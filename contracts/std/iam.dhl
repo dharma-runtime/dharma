@@ -1,0 +1,93 @@
+---
+namespace: std.iam
+version: 1.1.0
+---
+
+# Identity Contract
+
+The source of truth for a sovereign identity.
+
+This is where **contact information** lives. Other contracts (like
+`std.io.contacts`) should reference identities, not duplicate profile data.
+
+Recommended profile keys:
+- `name`
+- `email`
+- `phone`
+
+```dhl
+aggregate Identity
+    state
+        public display_name: Text(len=128)?
+        public email: Text(len=128)?
+        public phone: Text(len=32)?
+        public handle: Text(len=128)
+        public handle_registry: Ref<Registry>?
+        public handle_proof: Ref<Note>?
+        public keys: Map<Identity, Text(len=128)>
+        public profile: Map<Text, Text>
+        public delegates: Map<Identity, Text(len=64)>
+
+action AddKey(key: Identity, meta: Text)
+    validate
+        contains(state.keys, context.signer)
+    apply
+        state.keys.set(key, meta)
+
+action RevokeKey(key: Identity)
+    validate
+        contains(state.keys, context.signer)
+    apply
+        state.keys.set(key, "")
+
+action UpdateProfile(key: Text, value: Text)
+    validate
+        contains(state.keys, context.signer)
+    apply
+        state.profile.set(key, value)
+
+action UpdateDisplayName(name: Text(len=128)?)
+    validate
+        contains(state.keys, context.signer)
+    apply
+        state.display_name = name
+        if name != null
+            state.profile.set("name", name)
+
+action UpdateEmail(email: Text(len=128)?)
+    validate
+        contains(state.keys, context.signer)
+    apply
+        state.email = email
+        if email != null
+            state.profile.set("email", email)
+
+action UpdatePhone(phone: Text(len=32)?)
+    validate
+        contains(state.keys, context.signer)
+    apply
+        state.phone = phone
+        if phone != null
+            state.profile.set("phone", phone)
+
+action SetHandle(name: Text, registry: Ref<Registry>, proof: Ref<Note>)
+    validate
+        contains(state.keys, context.signer)
+        len(name) < 128
+    apply
+        state.handle = name
+        state.handle_registry = registry
+        state.handle_proof = proof
+
+action Delegate(delegate: Identity, scope: Text)
+    validate
+        contains(state.keys, context.signer)
+    apply
+        state.delegates.set(delegate, scope)
+
+action RevokeDelegate(delegate: Identity)
+    validate
+        contains(state.keys, context.signer)
+    apply
+        state.delegates.set(delegate, "")
+```

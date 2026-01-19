@@ -1,0 +1,38 @@
+---
+namespace: std.wrk.notes
+version: 1.0.0
+---
+
+# Workflow Notes Contract
+
+Markdown content, tagging, and linking to tasks.
+
+```dhl
+aggregate Note
+    state
+        public content: Text(len=2048)
+        public author: Identity
+        public tags: List<Text(len=32)>
+        public links: List<Ref<Task>>
+
+action Create(text: Text)
+    apply
+        state.content = text
+        state.author = context.signer
+
+action Update(text: Text)
+    validate
+        context.signer == state.author
+    apply
+        state.content = text
+
+action Tag(tag: Text)
+    validate
+        len(tag) < 32
+    apply
+        state.tags.push(tag)
+
+action LinkTask(task: Ref<Task>)
+    apply
+        state.links.push(task)
+```

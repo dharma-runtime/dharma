@@ -1,0 +1,47 @@
+---
+namespace: std.fin.ledger
+version: 1.0.0
+---
+
+# Ledger Contract
+
+Double-entry inspired primitives (single-account view).
+
+```dhl
+aggregate Account
+    state
+        public owner: Identity
+        public currency: Text(len=8)
+        public balance_cents: Int
+        public status: Enum(Open, Frozen, Closed) = 'Open
+
+action Open(currency: Text)
+    apply
+        state.owner = context.signer
+        state.currency = currency
+        state.balance_cents = 0
+        state.status = 'Open
+
+action Credit(amount_cents: Int)
+    validate
+        state.status == 'Open
+        amount_cents >= 0
+    apply
+        state.balance_cents = state.balance_cents + amount_cents
+
+action Debit(amount_cents: Int)
+    validate
+        state.status == 'Open
+        amount_cents >= 0
+        state.balance_cents >= amount_cents
+    apply
+        state.balance_cents = state.balance_cents - amount_cents
+
+action Freeze()
+    apply
+        state.status = 'Frozen
+
+action Close()
+    apply
+        state.status = 'Closed
+```

@@ -1,0 +1,33 @@
+---
+namespace: std.note
+version: 1.0.0
+---
+
+# Note Contract
+
+A simple, immutable-ish text document. Great for wikis, logs, or knowledge base entries.
+
+```dhl
+aggregate Note
+    state
+        public content: Text(len=2048)
+        public author: Identity
+        public tags: List<Text(len=32)>
+
+action Create(text: Text)
+    apply
+        state.content = text
+        state.author = context.signer
+
+action Update(text: Text)
+    validate
+        context.signer == state.author
+    apply
+        state.content = text
+
+action Tag(tag: Text)
+    validate
+        len(tag) < 32
+    apply
+        state.tags.push(tag)
+```

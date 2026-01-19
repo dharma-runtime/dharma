@@ -1,0 +1,97 @@
+---
+namespace: sys.directory
+version: 1.0.0
+---
+
+# Directory (Atlas-lite) Contract
+
+This contract is the **Control Plane ledger** for Dharma Fabric. It is the
+canonical, append-only source of truth for:
+
+- **Shard maps** (how tables are partitioned)
+- **Providers** (relays/routers and their public endpoints)
+- **Domains** (ownership and policy)
+
+It is intentionally minimal in v1 to keep the runtime small and auditable.
+
+## Design Notes
+
+- The Directory is a standard Subject ledger (not a database).
+- Domain ownership and policy are recorded as plain assertions.
+- Complex policy enforcement happens in the **runtime**, not in the DSL.
+- This contract accepts requests; validation of parent authorization is done
+  by DirectoryState (kernel), not the DSL.
+
+## State Model
+
+- `root`: the top-level domain this directory manages (e.g. `corp.ph`)
+- `admins`: trusted admins who can register providers and policies
+- `domains`: map of `domain -> owner Identity`
+- `pending`: map of `domain -> requested owner`
+- `authorizations`: map of `domain -> authorized owner`
+- `policies`: map of `domain -> policy_hash (hex)`
+- `providers`: map of `provider Identity -> endpoint`
+- `shardmaps`: map of `table -> shardmap blob (CBOR hex)`
+
+---
+
+```dhl
+aggregate Directory
+    state
+        public root: Text(len=128)
+        public admins: List<Identity>
+        public domains: Map<Text, Identity>
+        public pending: Map<Text, Identity>
+        public authorizations: Map<Text, Identity>
+        public policies: Map<Text, Text>
+        public providers: Map<Identity, Text>
+        public shardmaps: Map<Text, Text>
+
+action Create(root: Text)
+    apply
+        state.root = root
+        state.admins.push(context.signer)
+
+// --- Providers (Relays / Routers) ---
+action RegisterProvider(id: Identity, endpoint: Text)
+    validate
+        contains(state.admins, context.signer)
+    apply
+        state.providers.set(id, endpoint)
+
+action RevokeProvider(id: Identity)
+    validate
+        contains(state.admins, context.signer)
+    apply
+        state.providers.remove(id)
+
+// --- Shard Map ---
+action DefineShardMap(table: Text, shardmap_hex: Text)
+    validate
+        contains(state.admins, context.signer)
+    apply
+        state.shardmaps.set(table, shardmap_hex)
+
+// --- Domain Ownership (Parent Authorization done in runtime) ---
+action DomainRequest(domain: Text, parent: Text, owner: Identity)
+    apply
+        state.pending.set(domain, owner)
+
+action DomainAuthorize(domain: Text, parent: Text, owner: Identity)
+    validate
+        contains(state.admins, context.signer)
+    apply
+        state.authorizations.set(domain, owner)
+
+action DomainRegister(domain: Text, owner: Identity)
+    validate
+        contains(state.admins, context.signer)
+    apply
+        state.domains.set(domain, owner)
+
+action DomainPolicy(domain: Text, policy_hash: Text)
+    validate
+        contains(state.admins, context.signer)
+    apply
+        state.policies.set(domain, policy_hash)
+```

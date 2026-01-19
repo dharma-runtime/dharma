@@ -1,0 +1,37 @@
+---
+namespace: std.biz.logistics
+version: 1.0.0
+---
+
+# Logistics Contract
+
+Shipments, carriers, and tracking.
+
+```dhl
+aggregate Shipment
+    state
+        public tracking: Text(len=64)
+        public carrier: Text(len=64)
+        public origin: Text(len=128)
+        public destination: Text(len=128)
+        public status: Enum(Draft, Packed, InTransit, Delivered, Lost, Returned) = 'Draft
+        public last_update: Timestamp?
+
+flow Lifecycle
+    'Draft -> [Pack] -> 'Packed
+    'Packed -> [Ship] -> 'InTransit
+    'InTransit -> [Deliver] -> 'Delivered
+    'InTransit -> [Return] -> 'Returned
+
+action Create(tracking: Text, carrier: Text, origin: Text, destination: Text)
+    apply
+        state.tracking = tracking
+        state.carrier = carrier
+        state.origin = origin
+        state.destination = destination
+        state.status = 'Draft
+
+action MarkLost()
+    apply
+        state.status = 'Lost
+```

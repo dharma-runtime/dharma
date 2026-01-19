@@ -1,0 +1,35 @@
+[package]
+name = "dharma-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dh"
+path = "src/main.rs"
+
+[dependencies]
+dharma-core = { path = "../dharma-core", features = ["dharmaq"] }
+dharma-test = { path = "../dharma-test" }
+ciborium = { version = "0.2", default-features = false, features = ["std"] }
+rustyline = "17.0.2"
+home = "=0.5.11"
+dirs = "6.0.0"
+rand_core = "0.6"
+crossterm = { version = "0.27", default-features = false }
+tabled = "0.15"
+inquire = "0.6"
+indicatif = "0.17"
+pulldown-cmark = { version = "0.10", optional = true }
+nom = { version = "7", optional = true }
+wasm-encoder = { version = "0.30", optional = true }
+
+[features]
+default = ["compiler"]
+compiler = ["pulldown-cmark", "nom", "wasm-encoder"]
+
+[dev-dependencies]
+tempfile = "3.10"
+rand = "0.8"
+wat = "1.0"
+wasmi = "0.35"
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }

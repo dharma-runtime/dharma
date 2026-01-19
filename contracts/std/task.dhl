@@ -1,0 +1,45 @@
+---
+namespace: std.task
+version: 1.0.0
+---
+
+# Task Contract
+
+A standard primitive for work tracking.
+
+```dhl
+aggregate Task
+    state
+        public title: Text(len=128)
+        public description: Text(len=1024)
+        public status: Enum(Open, InProgress, Review, Done, Blocked) = 'Open
+        public assignee: Identity
+        public owner: Identity
+        public priority: Enum(Low, Medium, High, Critical) = 'Medium
+
+flow Lifecycle
+    'Open -> [Start] -> 'InProgress
+    'InProgress -> [Submit] -> 'Review
+    'Review -> [Approve] -> 'Done
+    'Review -> [Reject] -> 'InProgress
+    'Open -> [Block] -> 'Blocked
+    'InProgress -> [Block] -> 'Blocked
+    'Review -> [Block] -> 'Blocked
+    'Blocked -> [Unblock] -> 'Open
+
+action Create(title: Text)
+    apply
+        state.title = title
+        state.owner = context.signer
+        state.status = 'Open
+
+action Assign(who: Identity)
+    validate
+        context.signer == state.owner or context.signer == state.assignee
+    apply
+        state.assignee = who
+
+// The 'flow' block above automatically generates:
+// action Start() validate state.status == 'Open' apply state.status = 'InProgress'
+// etc.
+```

@@ -1,0 +1,57 @@
+---
+namespace: std.io.mail
+version: 1.0.0
+---
+
+# Mail Contract
+
+Outbound email requests and delivery receipts.
+
+```dhl
+aggregate MailMessage
+    state
+        public from: Identity
+        public to: List<Text(len=128)>
+        public cc: List<Text(len=128)>
+        public subject: Text(len=256)
+        public body: Text(len=2048)
+        public status: Enum(Draft, Queued, Sent, Failed, Delivered) = 'Draft
+        public last_error: Text(len=256)?
+
+action Compose(to: Text, subject: Text, body: Text)
+    apply
+        state.from = context.signer
+        state.to.push(to)
+        state.subject = subject
+        state.body = body
+        state.status = 'Draft
+
+action AddCc(addr: Text)
+    validate
+        context.signer == state.from
+    apply
+        state.cc.push(addr)
+
+action Queue()
+    validate
+        state.status == 'Draft
+    apply
+        state.status = 'Queued
+
+action MarkSent()
+    validate
+        state.status == 'Queued
+    apply
+        state.status = 'Sent
+
+action MarkDelivered()
+    validate
+        state.status == 'Sent
+    apply
+        state.status = 'Delivered
+
+action MarkFailed(reason: Text)
+    apply
+        state.status = 'Failed
+        state.last_error = reason
+```

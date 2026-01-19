@@ -1,0 +1,45 @@
+---
+namespace: std.web.com.cart
+version: 1.0.0
+---
+
+# Shopping Cart Contract
+
+Cart state for ecommerce flows.
+
+```dhl
+aggregate Cart
+    state
+        public owner: Identity
+        public items: List<Text(len=128)>
+        public total_cents: Int
+        public status: Enum(Open, CheckedOut, Abandoned) = 'Open
+
+flow CartFlow
+    'Open -> [Checkout] -> 'CheckedOut
+    'Open -> [Abandon] -> 'Abandoned
+
+action Create()
+    apply
+        state.owner = context.signer
+        state.status = 'Open
+        state.total_cents = 0
+
+action AddItem(item: Text)
+    validate
+        state.status == 'Open
+    apply
+        state.items.push(item)
+
+action RemoveItem(item: Text)
+    validate
+        state.status == 'Open
+    apply
+        state.items.remove(item)
+
+action SetTotal(total_cents: Int)
+    validate
+        total_cents >= 0
+    apply
+        state.total_cents = total_cents
+```

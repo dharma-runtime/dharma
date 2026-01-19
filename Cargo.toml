@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+  "dharma-core",
+  "dharma-cli",
+  "dharma-runtime",
+  "dharma-sim",
+  "dharma-test",
+  "dharma-ui",
+]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,8 @@
+[package]
+name = "dharma-sim"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dharma-core = { path = "../dharma-core" }
+rand_chacha = "0.3"

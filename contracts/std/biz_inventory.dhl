@@ -1,0 +1,47 @@
+---
+namespace: std.biz.inventory
+version: 1.0.0
+---
+
+# Inventory Contract
+
+SKU, quantity, and location tracking.
+
+```dhl
+aggregate Item
+    state
+        public sku: Text(len=64)
+        public name: Text(len=128)
+        public quantity: Int
+        public location: Text(len=64)
+        public status: Enum(Active, Discontinued) = 'Active
+
+action Create(sku: Text, label: Text, qty: Int, location: Text)
+    apply
+        state.sku = args.sku
+        state.name = args.label
+        state.quantity = args.qty
+        state.location = args.location
+        state.status = 'Active
+
+action Receive(qty: Int)
+    validate
+        args.qty >= 0
+    apply
+        state.quantity = state.quantity + args.qty
+
+action Consume(qty: Int)
+    validate
+        args.qty >= 0
+        state.quantity >= args.qty
+    apply
+        state.quantity = state.quantity - args.qty
+
+action Move(location: Text)
+    apply
+        state.location = args.location
+
+action Discontinue()
+    apply
+        state.status = 'Discontinued
+```

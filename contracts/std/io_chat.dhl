@@ -1,0 +1,54 @@
+---
+namespace: std.io.chat
+version: 1.0.0
+---
+
+# Chat Contract
+
+Rooms, membership, and message log.
+
+```dhl
+aggregate Room
+    state
+        public name: Text(len=128)
+        public owner: Identity
+        public topic: Text(len=256)
+        public members: List<Identity>
+        public messages: List<Text(len=512)>
+        public status: Enum(Open, Archived) = 'Open
+
+action Create(name: Text)
+    apply
+        state.name = name
+        state.owner = context.signer
+        state.members.push(context.signer)
+        state.status = 'Open
+
+action SetTopic(topic: Text)
+    validate
+        context.signer == state.owner
+    apply
+        state.topic = topic
+
+action Join()
+    validate
+        state.status == 'Open
+    apply
+        state.members.push(context.signer)
+
+action Leave()
+    apply
+        state.members.remove(context.signer)
+
+action Post(text: Text)
+    validate
+        contains(state.members, context.signer)
+    apply
+        state.messages.push(text)
+
+action Archive()
+    validate
+        context.signer == state.owner
+    apply
+        state.status = 'Archived
+```

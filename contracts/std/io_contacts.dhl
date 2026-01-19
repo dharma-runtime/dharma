@@ -1,0 +1,159 @@
+---
+namespace: std.io.contacts
+version: 1.1.0
+---
+
+# Contacts Contract
+
+This contract is a **personal CRM** and a **social protocol** at the same time.
+It models a single Contact entry while allowing optional, mutual relationship
+state between two identities.
+
+## Why this is "Contact" (not "Friendship")
+Most relationships are not mutual friendships. A contact can be:
+- a friend
+- a client
+- a supplier
+- a coworker
+- a vendor
+- a stranger you want to reach later
+
+So we keep **Contact** as the universal container, and embed a **relationship
+state machine** inside it. This avoids a second protocol and lets you upgrade a
+regular contact into a social relationship when both parties agree.
+
+## Where contact info lives (Important)
+Contact details (name, email, phone, etc) are **not stored here**.
+They belong in `std.iam.Identity.profile`. This guarantees:
+
+- when you update your phone number, your contacts see the latest info
+- there is a single source of truth for identity data
+
+This contract only governs **relationship state** and **local annotations**.
+
+## State Model (Summary)
+- `owner`: the identity who owns this Contact entry.
+- `contact`: the other identity (optional). If absent, this is a local record.
+- `relation`: `None | Pending | Accepted | Declined | Blocked`
+- `requested_by`: who initiated the current request (if any).
+- `blocked_by`: who set Blocked (if any).
+- `alias/tags/notes`: local annotations (not authoritative identity data).
+
+## Relationship Semantics
+- **Request** creates a pending invitation.
+- **Accept** finalizes mutual agreement.
+- **Decline** cancels the request (not terminal).
+- **Block** can be applied by either party (not terminal).
+- **Unblock** returns to `None` and clears request metadata.
+
+Decline and Block are **not terminal** by design. You can change your mind.
+
+## Determinism & Safety Notes
+- A request must target a real identity and cannot target self.
+- Only the non-requesting party can Accept/Decline.
+- Block can be applied by either party, but only the blocker can Unblock.
+
+## Subject Strategy (Recommended)
+For mutual contacts, use a **deterministic subject id** based on the two identities
+so both parties can resolve the same Contact:
+
+```
+subject_id = hash("contact" + min(a,b) + max(a,b))
+```
+
+For personal CRM-only entries, you can use a random subject id and never share it.
+
+---
+
+## Contract
+
+```dhl
+aggregate Contact
+    state
+        public owner: Identity
+        public contact: Identity?
+        alias: Text(len=128)
+        tags: List<Text(len=32)>
+        notes: Text(len=1024)
+        public relation: Enum(None, Pending, Accepted, Declined, Blocked) = None
+        public requested_by: Identity?
+        public blocked_by: Identity?
+
+action Create(contact: Identity?, alias: Text)
+    apply
+        state.owner = context.signer
+        state.contact = contact
+        state.alias = alias
+
+action UpdateAlias(text: Text)
+    validate
+        context.signer == state.owner
+    apply
+        state.alias = text
+
+// Social protocol: initiate a request with another identity.
+action Request(other: Identity)
+    validate
+        other != context.signer
+        (state.contact == null) || (state.contact == other)
+        state.relation != Pending
+        state.relation != Accepted
+        state.relation != Blocked
+    apply
+        state.contact = other
+        state.relation = Pending
+        state.requested_by = context.signer
+        state.blocked_by = null
+
+// Accept the request (must be the non-requester).
+action Accept()
+    validate
+        state.relation == Pending
+        state.contact != null
+        context.signer != state.requested_by
+        (context.signer == state.owner) || (context.signer == state.contact)
+    apply
+        state.relation = Accepted
+
+// Decline is non-terminal. Future requests are allowed.
+action Decline()
+    validate
+        state.relation == Pending
+        state.contact != null
+        context.signer != state.requested_by
+        (context.signer == state.owner) || (context.signer == state.contact)
+    apply
+        state.relation = Declined
+
+// Block is non-terminal and can be reversed by the blocker.
+action Block()
+    validate
+        state.contact != null
+        (context.signer == state.owner) || (context.signer == state.contact)
+    apply
+        state.relation = Blocked
+        state.blocked_by = context.signer
+
+// Unblock restores neutral state.
+action Unblock()
+    validate
+        state.relation == Blocked
+        state.blocked_by == context.signer
+    apply
+        state.relation = None
+        state.blocked_by = null
+        state.requested_by = null
+
+action Tag(tag: Text)
+    validate
+        len(tag) < 32
+        context.signer == state.owner
+    apply
+        state.tags.push(tag)
+
+action UpdateNotes(text: Text)
+    validate
+        context.signer == state.owner
+    apply
+        state.notes = text
+```

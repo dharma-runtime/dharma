@@ -1,0 +1,48 @@
+---
+namespace: std.atlas
+version: 1.0.0
+---
+
+# Atlas Registry Contract
+
+An Atlas subject is a "Namespace Registry." 
+If you own the subject for `person.fr`, you are the registrar for all sub-names under it.
+
+```dhl
+aggregate Registry
+    state
+        public namespace: Text(len=64)   // e.g. "person.fr"
+        public pointers: Map<Text, Ref<Identity>>
+        public admins: List<Identity>
+
+action Create(namespace: Text)
+    apply
+        state.namespace = namespace
+        state.admins.push(context.signer)
+
+action AddAdmin(who: Identity)
+    validate
+        contains(state.admins, context.signer)
+    apply
+        state.admins.push(who)
+
+action RemoveAdmin(who: Identity)
+    validate
+        contains(state.admins, context.signer)
+    apply
+        state.admins.remove(who)
+
+action Register(name: Text, target: Ref<Identity>)
+    validate
+        // Only admins can register names in this namespace
+        contains(state.admins, context.signer)
+        not contains(state.pointers, name)
+    apply
+        state.pointers.set(name, target)
+
+action Transfer(name: Text, new_target: Ref<Identity>)
+    validate
+        contains(state.admins, context.signer)
+    apply
+        state.pointers.set(name, new_target)
+```

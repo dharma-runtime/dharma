@@ -1,0 +1,45 @@
+---
+namespace: std.biz.orders
+version: 1.0.0
+---
+
+# Orders Contract
+
+Order lifecycle and line items.
+
+```dhl
+aggregate Order
+    state
+        public buyer: Identity
+        public lines: List<Text(len=128)>
+        public total_cents: Int
+        public status: Enum(Draft, Submitted, Paid, Fulfilled, Cancelled) = 'Draft
+        public note: Text(len=256)
+
+flow Lifecycle
+    'Draft -> [Submit] -> 'Submitted
+    'Submitted -> [Pay] -> 'Paid
+    'Paid -> [Fulfill] -> 'Fulfilled
+    'Draft -> [Cancel] -> 'Cancelled
+    'Submitted -> [Cancel] -> 'Cancelled
+    'Paid -> [Cancel] -> 'Cancelled
+
+action Create(note: Text)
+    apply
+        state.buyer = context.signer
+        state.note = note
+        state.status = 'Draft
+
+action AddLine(line: Text)
+    validate
+        state.status == 'Draft
+    apply
+        state.lines.push(line)
+
+action SetTotal(total_cents: Int)
+    validate
+        state.status == 'Draft
+        total_cents >= 0
+    apply
+        state.total_cents = total_cents
+```

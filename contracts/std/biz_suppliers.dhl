@@ -1,0 +1,39 @@
+---
+namespace: std.biz.suppliers
+version: 1.0.0
+---
+
+# Suppliers Contract
+
+Vendor relationships and contacts.
+
+```dhl
+aggregate Supplier
+    state
+        public name: Text(len=128)
+        public contact: Text(len=128)
+        public status: Enum(Active, Inactive) = 'Active
+        public notes: Text(len=256)
+
+action Create(name: Text, contact: Text)
+    apply
+        state.name = name
+        state.contact = contact
+        state.status = 'Active
+
+action UpdateContact(contact: Text)
+    apply
+        state.contact = contact
+
+action AddNotes(text: Text)
+    apply
+        state.notes = text
+
+action Deactivate()
+    apply
+        state.status = 'Inactive
+
+action Activate()
+    apply
+        state.status = 'Active
+```

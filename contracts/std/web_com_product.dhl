@@ -1,0 +1,50 @@
+---
+namespace: std.web.com.product
+version: 1.0.0
+---
+
+# Product Catalog Contract
+
+Product catalog, pricing, variants (simplified).
+
+```dhl
+aggregate Product
+    state
+        public sku: Text(len=64)
+        public title: Text(len=128)
+        public description: Text(len=1024)
+        public price_cents: Int
+        public active: Bool = true
+        public tags: List<Text(len=32)>
+
+action Create(sku: Text, title: Text, price_cents: Int)
+    validate
+        price_cents >= 0
+    apply
+        state.sku = sku
+        state.title = title
+        state.price_cents = price_cents
+        state.active = true
+
+action UpdateDescription(text: Text)
+    apply
+        state.description = text
+
+action UpdatePrice(price_cents: Int)
+    validate
+        price_cents >= 0
+    apply
+        state.price_cents = price_cents
+
+action Tag(tag: Text)
+    apply
+        state.tags.push(tag)
+
+action Deactivate()
+    apply
+        state.active = false
+
+action Activate()
+    apply
+        state.active = true
+```

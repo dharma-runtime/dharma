@@ -1,0 +1,10 @@
+/target
+/data
+.dharma/
+_build/
+.DS_Store
+.dharma_history
+*.log
+*.swp
+.idea
+.vscode

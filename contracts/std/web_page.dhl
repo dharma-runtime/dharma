@@ -1,0 +1,39 @@
+---
+namespace: std.web.page
+version: 1.0.0
+---
+
+# Web Page Contract
+
+CMS pages, slugs, and publishing workflow.
+
+```dhl
+aggregate Page
+    state
+        public slug: Text(len=128)
+        public title: Text(len=256)
+        public body: Text(len=2048)
+        public author: Identity
+        public status: Enum(Draft, Published, Archived) = 'Draft
+
+flow PublishFlow
+    'Draft -> [Publish] -> 'Published
+    'Published -> [Unpublish] -> 'Draft
+    'Draft -> [Archive] -> 'Archived
+    'Published -> [Archive] -> 'Archived
+
+action Create(slug: Text, title: Text, body: Text)
+    apply
+        state.slug = slug
+        state.title = title
+        state.body = body
+        state.author = context.signer
+        state.status = 'Draft
+
+action Update(title: Text, body: Text)
+    validate
+        context.signer == state.author
+    apply
+        state.title = title
+        state.body = body
+```
