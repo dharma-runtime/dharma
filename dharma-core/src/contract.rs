@@ -1093,6 +1093,24 @@ mod tests {
     }
 
     #[test]
+    fn wasm_contract_reject_status() {
+        let engine = ContractEngine::new(test_result_wasm_bytes("reject", false, Some("rule failed")));
+        let result = engine.validate(&[1, 2], &[3, 4]).unwrap();
+        assert_eq!(result.status, ContractStatus::Reject);
+        assert!(!result.ok);
+        assert_eq!(result.reason.as_deref(), Some("rule failed"));
+    }
+
+    #[test]
+    fn wasm_contract_pending_status() {
+        let engine = ContractEngine::new(test_result_wasm_bytes("pending", false, Some("awaiting approval")));
+        let result = engine.validate(&[1, 2], &[3, 4]).unwrap();
+        assert_eq!(result.status, ContractStatus::Pending);
+        assert!(!result.ok);
+        assert_eq!(result.reason.as_deref(), Some("awaiting approval"));
+    }
+
+    #[test]
     fn to_usize_rejects_negative() {
         assert!(super::to_usize(-1).is_err());
     }
@@ -1115,6 +1133,29 @@ mod tests {
         let engine = ContractEngine::new_with_limits(test_wasm_bytes(), limits);
         let result = engine.validate(&[1, 2], &[3, 4]).unwrap();
         assert!(result.ok);
+    }
+
+    #[test]
+    fn wasm_contract_rejects_large_memory_module() {
+        let limits = VmLimits {
+            fuel: 1_000_000,
+            memory_bytes: 64 * 1024,
+        };
+        let engine = ContractEngine::new_with_limits(test_large_memory_wasm_bytes(), limits);
+        assert!(matches!(
+            engine.validate(&[1, 2], &[3, 4]),
+            Err(DharmaError::Contract(_))
+        ));
+    }
+
+    #[test]
+    fn wasm_contract_blocks_unknown_imports() {
+        let engine = ContractEngine::new(test_sandbox_escape_wasm_bytes());
+        let err = engine.validate(&[1, 2], &[3, 4]).unwrap_err();
+        match err {
+            DharmaError::Contract(msg) => assert!(!msg.is_empty()),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
@@ -1236,6 +1277,102 @@ fn test_loop_wasm_bytes() -> Vec<u8> {
             (loop $spin
               (br $spin)
             )
+            (i32.const 0)
+          )
+          (func (export "reduce") (param i32 i32) (result i32)
+            (i32.const 0)
+          )
+        )
+        "#;
+    wat::parse_str(wat).unwrap()
+}
+
+#[cfg(test)]
+fn test_result_wasm_bytes(status: &str, ok: bool, reason: Option<&str>) -> Vec<u8> {
+    let result = Value::Map(vec![
+        (Value::Text("ok".to_string()), Value::Bool(ok)),
+        (
+            Value::Text("reason".to_string()),
+            reason
+                .map(|value| Value::Text(value.to_string()))
+                .unwrap_or(Value::Null),
+        ),
+        (
+            Value::Text("status".to_string()),
+            Value::Text(status.to_string()),
+        ),
+    ]);
+    let bytes = cbor::encode_canonical_value(&result).unwrap();
+    let encoded = bytes
+        .iter()
+        .map(|byte| format!("\\{:02x}", byte))
+        .collect::<String>();
+    let len = bytes.len();
+    let wat = format!(
+        r#"
+        (module
+          (memory (export "memory") 1)
+          (global $heap (mut i32) (i32.const 64))
+          (global $len (mut i32) (i32.const {len}))
+          (func (export "alloc") (param $size i32) (result i32)
+            (local $ptr i32)
+            (local.set $ptr (global.get $heap))
+            (global.set $heap (i32.add (global.get $heap) (local.get $size)))
+            (local.get $ptr)
+          )
+          (func (export "result_len") (result i32)
+            (global.get $len)
+          )
+          (func (export "validate") (param i32 i32 i32 i32) (result i32)
+            (i32.const 4096)
+          )
+          (func (export "reduce") (param i32 i32) (result i32)
+            (i32.const 4096)
+          )
+          (data (i32.const 4096) "{encoded}")
+        )
+        "#
+    );
+    wat::parse_str(wat).unwrap()
+}
+
+#[cfg(test)]
+fn test_large_memory_wasm_bytes() -> Vec<u8> {
+    let wat = r#"
+        (module
+          (memory (export "memory") 64)
+          (func (export "alloc") (param i32) (result i32)
+            (i32.const 0)
+          )
+          (func (export "result_len") (result i32)
+            (i32.const 0)
+          )
+          (func (export "validate") (param i32 i32 i32 i32) (result i32)
+            (i32.const 0)
+          )
+          (func (export "reduce") (param i32 i32) (result i32)
+            (i32.const 0)
+          )
+        )
+        "#;
+    wat::parse_str(wat).unwrap()
+}
+
+#[cfg(test)]
+fn test_sandbox_escape_wasm_bytes() -> Vec<u8> {
+    let wat = r#"
+        (module
+          (import "wasi_snapshot_preview1" "fd_write"
+            (func $fd_write (param i32 i32 i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (func (export "alloc") (param i32) (result i32)
+            (i32.const 0)
+          )
+          (func (export "result_len") (result i32)
+            (i32.const 0)
+          )
+          (func (export "validate") (param i32 i32 i32 i32) (result i32)
+            (call $fd_write (i32.const 1) (i32.const 0) (i32.const 0) (i32.const 0))
             (i32.const 0)
           )
           (func (export "reduce") (param i32 i32) (result i32)

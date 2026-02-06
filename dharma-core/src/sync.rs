@@ -496,6 +496,7 @@ fn parse_err(value: &Value) -> Result<ErrMsg, DharmaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ciborium::value::Value;
 
     #[test]
     fn hello_roundtrip() {
@@ -569,5 +570,26 @@ mod tests {
         let bytes = msg.to_cbor().unwrap();
         let parsed = SyncMessage::from_cbor(&bytes).unwrap();
         assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn crafted_get_payload_rejects_unknown_ref_type() {
+        let payload = Value::Map(vec![(
+            Value::Text("ids".to_string()),
+            Value::Array(vec![Value::Map(vec![
+                (Value::Text("t".to_string()), Value::Text("../../assertion".to_string())),
+                (Value::Text("id".to_string()), Value::Bytes(vec![7u8; 32])),
+            ])]),
+        )]);
+        let msg = Value::Map(vec![
+            (Value::Text("t".to_string()), Value::Text("get".to_string())),
+            (Value::Text("p".to_string()), payload),
+        ]);
+        let bytes = crate::cbor::encode_canonical_value(&msg).unwrap();
+        let err = SyncMessage::from_cbor(&bytes).unwrap_err();
+        match err {
+            DharmaError::Validation(reason) => assert!(reason.contains("invalid ref type")),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

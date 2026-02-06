@@ -104,4 +104,18 @@ mod tests {
         assert!(write_frame(&mut buffer, b"hello").is_err());
         set_max_frame_size(DEFAULT_MAX_FRAME_SIZE);
     }
+
+    #[test]
+    fn read_frame_rejects_oversized_advertised_length() {
+        let limit = max_frame_size().min(u32::MAX as usize - 1);
+        let oversized = (limit + 1) as u32;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&oversized.to_be_bytes());
+        let mut cursor = std::io::Cursor::new(bytes);
+        let err = read_frame_optional(&mut cursor).unwrap_err();
+        match err {
+            DharmaError::Network(msg) => assert!(msg.contains("frame too large")),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
 }

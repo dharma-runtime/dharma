@@ -528,10 +528,43 @@ mod tests {
     use crate::assertion::{AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION};
     use crate::crypto;
     use crate::store::state::append_assertion;
-    use crate::types::{ContractId, SchemaId};
+    use crate::types::{AssertionId, ContractId, SchemaId};
     use ciborium::value::Value;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
+
+    fn append_identity_assertion(
+        env: &crate::env::StdEnv,
+        subject: SubjectId,
+        assertion_type: &str,
+        auth: IdentityKey,
+        signer: &ed25519_dalek::SigningKey,
+        seq: u64,
+        prev: Option<AssertionId>,
+        body: Value,
+    ) -> AssertionId {
+        let header = AssertionHeader {
+            v: crypto::PROTOCOL_VERSION,
+            ver: DEFAULT_DATA_VERSION,
+            sub: subject,
+            typ: assertion_type.to_string(),
+            auth,
+            seq,
+            prev,
+            refs: prev.into_iter().collect(),
+            ts: None,
+            schema: SchemaId::from_bytes([3u8; 32]),
+            contract: ContractId::from_bytes([4u8; 32]),
+            note: None,
+            meta: None,
+        };
+        let assertion = AssertionPlaintext::sign(header, body, signer).unwrap();
+        let bytes = assertion.to_cbor().unwrap();
+        let id = assertion.assertion_id().unwrap();
+        let env_id = crypto::envelope_id(&bytes);
+        append_assertion(env, &subject, seq, id, env_id, assertion_type, &bytes).unwrap();
+        id
+    }
 
     #[test]
     fn delegates_parse_and_allow() {
@@ -848,6 +881,165 @@ mod tests {
         assert!(!scope_allows("fin", "finance.approve"));
         assert!(!scope_allows("finance.approver", "finance.approve"));
         assert!(!scope_allows("finance.?", "finance.approve"));
+    }
+
+    #[test]
+    fn scope_allows_supports_custom_scope_separators() {
+        assert!(scope_allows("orders", "orders:approve"));
+        assert!(scope_allows("orders", "orders/approve"));
+        assert!(scope_allows("warehouse.eu.*", "warehouse.eu.pick"));
+        assert!(!scope_allows("orders", "orders_v2:approve"));
+    }
+
+    #[test]
+    fn delegate_allows_rejects_expired_delegate() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = crate::env::StdEnv::new(temp.path());
+        let mut rng = StdRng::seed_from_u64(88);
+        let (root_sk, root_id) = crypto::generate_identity_keypair(&mut rng);
+        let (_device_sk, device_id) = crypto::generate_identity_keypair(&mut rng);
+        let subject = SubjectId::from_bytes([21u8; 32]);
+
+        let genesis_id = append_identity_assertion(
+            &env,
+            subject,
+            CORE_GENESIS,
+            root_id,
+            &root_sk,
+            1,
+            None,
+            Value::Map(vec![]),
+        );
+        append_identity_assertion(
+            &env,
+            subject,
+            IAM_DELEGATE,
+            root_id,
+            &root_sk,
+            2,
+            Some(genesis_id),
+            Value::Map(vec![
+                (
+                    Value::Text("delegate".to_string()),
+                    Value::Bytes(device_id.as_bytes().to_vec()),
+                ),
+                (Value::Text("scope".to_string()), Value::Text("all".to_string())),
+                (Value::Text("expires".to_string()), Value::Integer(10.into())),
+            ]),
+        );
+
+        assert!(delegate_allows(&env, &subject, &device_id, "sync", 9).unwrap());
+        assert!(!delegate_allows(&env, &subject, &device_id, "sync", 10).unwrap());
+        assert!(!delegate_allows(&env, &subject, &device_id, "sync", 11).unwrap());
+    }
+
+    #[test]
+    fn delegate_allows_handles_overlapping_concurrent_delegates() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = crate::env::StdEnv::new(temp.path());
+        let mut rng = StdRng::seed_from_u64(89);
+        let (root_sk, root_id) = crypto::generate_identity_keypair(&mut rng);
+        let (_device_a_sk, device_a) = crypto::generate_identity_keypair(&mut rng);
+        let (_device_b_sk, device_b) = crypto::generate_identity_keypair(&mut rng);
+        let subject = SubjectId::from_bytes([22u8; 32]);
+
+        let genesis_id = append_identity_assertion(
+            &env,
+            subject,
+            CORE_GENESIS,
+            root_id,
+            &root_sk,
+            1,
+            None,
+            Value::Map(vec![]),
+        );
+        let delegate_a = append_identity_assertion(
+            &env,
+            subject,
+            IAM_DELEGATE,
+            root_id,
+            &root_sk,
+            2,
+            Some(genesis_id),
+            Value::Map(vec![
+                (
+                    Value::Text("delegate".to_string()),
+                    Value::Bytes(device_a.as_bytes().to_vec()),
+                ),
+                (
+                    Value::Text("scope".to_string()),
+                    Value::Text("finance.*".to_string()),
+                ),
+            ]),
+        );
+        append_identity_assertion(
+            &env,
+            subject,
+            IAM_DELEGATE,
+            root_id,
+            &root_sk,
+            3,
+            Some(delegate_a),
+            Value::Map(vec![
+                (
+                    Value::Text("delegate".to_string()),
+                    Value::Bytes(device_b.as_bytes().to_vec()),
+                ),
+                (
+                    Value::Text("scope".to_string()),
+                    Value::Text("finance.approve".to_string()),
+                ),
+            ]),
+        );
+
+        assert!(delegate_allows(&env, &subject, &device_a, "finance.approve", 0).unwrap());
+        assert!(delegate_allows(&env, &subject, &device_a, "finance.audit", 0).unwrap());
+        assert!(delegate_allows(&env, &subject, &device_b, "finance.approve", 0).unwrap());
+        assert!(!delegate_allows(&env, &subject, &device_b, "finance.audit", 0).unwrap());
+    }
+
+    #[test]
+    fn self_delegation_is_stable() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = crate::env::StdEnv::new(temp.path());
+        let mut rng = StdRng::seed_from_u64(90);
+        let (root_sk, root_id) = crypto::generate_identity_keypair(&mut rng);
+        let subject = SubjectId::from_bytes([23u8; 32]);
+
+        let genesis_id = append_identity_assertion(
+            &env,
+            subject,
+            CORE_GENESIS,
+            root_id,
+            &root_sk,
+            1,
+            None,
+            Value::Map(vec![]),
+        );
+        append_identity_assertion(
+            &env,
+            subject,
+            IAM_DELEGATE,
+            root_id,
+            &root_sk,
+            2,
+            Some(genesis_id),
+            Value::Map(vec![
+                (
+                    Value::Text("delegate".to_string()),
+                    Value::Bytes(root_id.as_bytes().to_vec()),
+                ),
+                (
+                    Value::Text("scope".to_string()),
+                    Value::Text("finance.approve".to_string()),
+                ),
+            ]),
+        );
+
+        let delegates = load_delegates(&env, &subject).unwrap();
+        assert_eq!(delegates.len(), 1);
+        assert_eq!(delegates[0].key, root_id);
+        assert!(delegate_allows(&env, &subject, &root_id, "sync", 0).unwrap());
     }
 
     #[test]
