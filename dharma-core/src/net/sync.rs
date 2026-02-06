@@ -60,6 +60,17 @@ impl Default for SyncOptions {
     }
 }
 
+enum SyncIngestOutcome {
+    Accepted {
+        envelope_id: Option<EnvelopeId>,
+        assertion_id: Option<AssertionId>,
+    },
+    Pending {
+        assertion_id: AssertionId,
+        reason: String,
+    },
+}
+
 pub fn sync_loop(
     stream: &mut dyn ReadWrite,
     session: Session,
@@ -248,115 +259,38 @@ pub fn sync_loop_with(
                     pending_get.remove(&obj.id);
                     pending_get.remove(&ObjectRef::Envelope(envelope_id));
                     let _ = retry_pending(store, index, keys);
-                } else if options.relay {
-                    let subject_hint = pending_subjects.remove(&obj.id);
-                    match ingest_object_relay(
+                } else {
+                    let subject_hint = if options.relay {
+                        pending_subjects.remove(&obj.id)
+                    } else {
+                        None
+                    };
+                    let result = if options.relay {
+                        ingest_sync_object_relay(
+                            store,
+                            index,
+                            identity,
+                            envelope_id,
+                            &obj.bytes,
+                            subject_hint.clone(),
+                        )
+                    } else {
+                        ingest_sync_object_normal(store, index, keys, envelope_id, &obj.bytes)
+                    };
+                    handle_sync_object_ingest_result(
+                        stream,
+                        &mut session,
                         store,
                         index,
-                        identity,
-                        envelope_id,
-                        &obj.bytes,
+                        keys,
+                        &options,
+                        &obj,
+                        &mut pending_get,
+                        &mut pending_subjects,
                         subject_hint,
-                    ) {
-                        Ok(RelayIngestStatus::Accepted(env_id, assertion_id)) => {
-                            pending_get.remove(&ObjectRef::Envelope(env_id));
-                            pending_get.remove(&ObjectRef::Assertion(assertion_id));
-                            pending_get.remove(&obj.id);
-                            let _ = retry_pending(store, index, keys);
-                        }
-                        Ok(RelayIngestStatus::Opaque(env_id)) => {
-                            pending_get.remove(&ObjectRef::Envelope(env_id));
-                            pending_get.remove(&obj.id);
-                            let _ = retry_pending(store, index, keys);
-                        }
-                        Ok(RelayIngestStatus::Pending(assertion_id, reason)) => {
-                            pending_get.remove(&obj.id);
-                            pending_get.remove(&ObjectRef::Assertion(assertion_id));
-                            log_sync(
-                                &options,
-                                format!("sync: pending {} ({reason})", assertion_id.to_hex()),
-                            );
-                            warn!(
-                                assertion_id = %assertion_id.to_hex(),
-                                reason = %reason,
-                                "pending object"
-                            );
-                        }
-                        Err(IngestError::MissingDependency {
-                            assertion_id,
-                            missing,
-                        }) => {
-                            pending_get.remove(&obj.id);
-                            pending_get.remove(&ObjectRef::Assertion(assertion_id));
-                            if let Some(subject) = subject_hint {
-                                pending_subjects.insert(ObjectRef::Assertion(missing), subject);
-                            }
-                            if pending_get.insert(ObjectRef::Assertion(missing)) {
-                                send_get(
-                                    stream,
-                                    &mut session,
-                                    vec![ObjectRef::Assertion(missing)],
-                                )?;
-                            }
-                        }
-                        Err(IngestError::Validation(reason)) => {
-                            return Err(DharmaError::Validation(format!(
-                                "peer sent invalid object: {reason}"
-                            )));
-                        }
-                        Err(IngestError::Dharma(err)) => return Err(err),
-                        Err(IngestError::Pending(reason)) => {
-                            warn!(reason = %reason, "pending object");
-                        }
-                    }
-                } else {
-                    match ingest_object(store, index, &obj.bytes, keys) {
-                        Ok(IngestStatus::Accepted(assertion_id)) => {
-                            pending_get.remove(&obj.id);
-                            pending_get.remove(&ObjectRef::Assertion(assertion_id));
-                            let _ = retry_pending(store, index, keys);
-                        }
-                        Ok(IngestStatus::Pending(assertion_id, reason)) => {
-                            pending_get.remove(&obj.id);
-                            pending_get.remove(&ObjectRef::Assertion(assertion_id));
-                            log_sync(
-                                &options,
-                                format!("sync: pending {} ({reason})", assertion_id.to_hex()),
-                            );
-                            warn!(
-                                object_id = %object_ref_hex(&obj.id),
-                                reason = %reason,
-                                "pending object"
-                            );
-                        }
-                        Err(IngestError::MissingDependency {
-                            assertion_id,
-                            missing,
-                        }) => {
-                            pending_get.remove(&obj.id);
-                            pending_get.remove(&ObjectRef::Assertion(assertion_id));
-                            if pending_get.insert(ObjectRef::Assertion(missing)) {
-                                send_get(
-                                    stream,
-                                    &mut session,
-                                    vec![ObjectRef::Assertion(missing)],
-                                )?;
-                            }
-                        }
-                        Err(IngestError::Pending(reason)) => {
-                            warn!(reason = %reason, "pending object");
-                        }
-                        Err(IngestError::Validation(_reason)) => {
-                            // If it's not an assertion, it might be a schema or other object.
-                            if let Err(err) = store.put_object(&envelope_id, &obj.bytes) {
-                                return Err(err);
-                            }
-                            pending_get.remove(&obj.id);
-                            pending_get.remove(&ObjectRef::Envelope(envelope_id));
-                            let _ = retry_pending(store, index, keys);
-                        }
-                        Err(IngestError::Dharma(err)) => return Err(err),
-                    }
+                        options.relay,
+                        result,
+                    )?;
                 }
             }
             SyncMessage::Err(err) => {
@@ -413,6 +347,144 @@ pub fn sync_loop_with(
         }
         let _ = t; // reserved for future type checks
     }
+}
+
+fn ingest_sync_object_relay(
+    store: &Store,
+    index: &mut FrontierIndex,
+    identity: &IdentityState,
+    envelope_id: EnvelopeId,
+    bytes: &[u8],
+    subject_hint: Option<SubjectId>,
+) -> Result<SyncIngestOutcome, IngestError> {
+    match ingest_object_relay(store, index, identity, envelope_id, bytes, subject_hint) {
+        Ok(RelayIngestStatus::Accepted(env_id, assertion_id)) => Ok(SyncIngestOutcome::Accepted {
+            envelope_id: Some(env_id),
+            assertion_id: Some(assertion_id),
+        }),
+        Ok(RelayIngestStatus::Opaque(env_id)) => Ok(SyncIngestOutcome::Accepted {
+            envelope_id: Some(env_id),
+            assertion_id: None,
+        }),
+        Ok(RelayIngestStatus::Pending(assertion_id, reason)) => Ok(SyncIngestOutcome::Pending {
+            assertion_id,
+            reason,
+        }),
+        Err(err) => Err(err),
+    }
+}
+
+fn ingest_sync_object_normal(
+    store: &Store,
+    index: &mut FrontierIndex,
+    keys: &mut Keyring,
+    envelope_id: EnvelopeId,
+    bytes: &[u8],
+) -> Result<SyncIngestOutcome, IngestError> {
+    match ingest_object(store, index, bytes, keys) {
+        Ok(IngestStatus::Accepted(assertion_id)) => Ok(SyncIngestOutcome::Accepted {
+            envelope_id: None,
+            assertion_id: Some(assertion_id),
+        }),
+        Ok(IngestStatus::Pending(assertion_id, reason)) => Ok(SyncIngestOutcome::Pending {
+            assertion_id,
+            reason,
+        }),
+        Err(IngestError::Validation(_reason)) => {
+            // If it's not an assertion, it might be a schema or other object.
+            store.put_object(&envelope_id, bytes)?;
+            Ok(SyncIngestOutcome::Accepted {
+                envelope_id: Some(envelope_id),
+                assertion_id: None,
+            })
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn handle_sync_object_ingest_result(
+    stream: &mut dyn ReadWrite,
+    session: &mut Session,
+    store: &Store,
+    index: &mut FrontierIndex,
+    keys: &mut Keyring,
+    options: &SyncOptions,
+    obj: &Obj,
+    pending_get: &mut HashSet<ObjectRef>,
+    pending_subjects: &mut HashMap<ObjectRef, SubjectId>,
+    subject_hint: Option<SubjectId>,
+    is_relay_mode: bool,
+    result: Result<SyncIngestOutcome, IngestError>,
+) -> Result<(), DharmaError> {
+    match result {
+        Ok(SyncIngestOutcome::Accepted {
+            envelope_id,
+            assertion_id,
+        }) => {
+            pending_get.remove(&obj.id);
+            if let Some(envelope_id) = envelope_id {
+                pending_get.remove(&ObjectRef::Envelope(envelope_id));
+            }
+            if let Some(assertion_id) = assertion_id {
+                pending_get.remove(&ObjectRef::Assertion(assertion_id));
+            }
+            let _ = retry_pending(store, index, keys);
+        }
+        Ok(SyncIngestOutcome::Pending {
+            assertion_id,
+            reason,
+        }) => {
+            pending_get.remove(&obj.id);
+            pending_get.remove(&ObjectRef::Assertion(assertion_id));
+            log_sync(
+                options,
+                format!("sync: pending {} ({reason})", assertion_id.to_hex()),
+            );
+            if is_relay_mode {
+                warn!(
+                    assertion_id = %assertion_id.to_hex(),
+                    reason = %reason,
+                    "pending object"
+                );
+            } else {
+                warn!(
+                    object_id = %object_ref_hex(&obj.id),
+                    reason = %reason,
+                    "pending object"
+                );
+            }
+        }
+        Err(IngestError::MissingDependency {
+            assertion_id,
+            missing,
+        }) => {
+            pending_get.remove(&obj.id);
+            pending_get.remove(&ObjectRef::Assertion(assertion_id));
+            if let Some(subject) = subject_hint {
+                pending_subjects.insert(ObjectRef::Assertion(missing), subject);
+            }
+            if pending_get.insert(ObjectRef::Assertion(missing)) {
+                send_get(stream, session, vec![ObjectRef::Assertion(missing)])?;
+            }
+        }
+        Err(IngestError::Validation(reason)) => {
+            let envelope_id = crate::crypto::envelope_id(&obj.bytes);
+            warn!(
+                object_id = %object_ref_hex(&obj.id),
+                envelope_id = %envelope_id.to_hex(),
+                reason = %reason,
+                "peer sent invalid object"
+            );
+            return Err(DharmaError::Validation(
+                "peer sent invalid object".to_string(),
+            ));
+        }
+        Err(IngestError::Dharma(err)) => return Err(err),
+        Err(IngestError::Pending(reason)) => {
+            warn!(reason = %reason, "pending object");
+        }
+    }
+    Ok(())
 }
 
 fn send_inv(
