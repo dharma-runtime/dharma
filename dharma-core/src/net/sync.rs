@@ -1150,8 +1150,8 @@ mod tests {
         let store = Store::from_root(temp.path());
         let index = FrontierIndex::default();
         let subject = SubjectId::from_bytes([13u8; 32]);
-        let a = AssertionId::from_bytes([14u8; 32]);
-        let b = AssertionId::from_bytes([15u8; 32]);
+        let first_tip = AssertionId::from_bytes([14u8; 32]);
+        let second_tip = AssertionId::from_bytes([15u8; 32]);
         let policy = OverlayPolicy::from_str("default deny\n");
         let claims = crate::net::policy::PeerClaims::default();
         let access = OverlayAccess::new(&policy, None, false, &claims);
@@ -1159,7 +1159,7 @@ mod tests {
 
         let first = Inventory::Subjects(vec![SubjectInventory {
             sub: subject,
-            frontier: vec![a, a],
+            frontier: vec![first_tip, first_tip],
             overlay: Vec::new(),
             since_seq: None,
         }]);
@@ -1171,11 +1171,11 @@ mod tests {
             &access,
             &Subscriptions::all(),
         );
-        assert_eq!(first_missing, vec![ObjectRef::Assertion(a)]);
+        assert_eq!(first_missing, vec![ObjectRef::Assertion(first_tip)]);
 
         let replay_and_reorder = Inventory::Subjects(vec![SubjectInventory {
             sub: subject,
-            frontier: vec![b, a],
+            frontier: vec![second_tip, first_tip],
             overlay: Vec::new(),
             since_seq: None,
         }]);
@@ -1187,7 +1187,7 @@ mod tests {
             &access,
             &Subscriptions::all(),
         );
-        assert_eq!(second_missing, vec![ObjectRef::Assertion(b)]);
+        assert_eq!(second_missing, vec![ObjectRef::Assertion(second_tip)]);
     }
 
     #[test]

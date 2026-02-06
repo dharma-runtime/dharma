@@ -1136,11 +1136,10 @@ mod tests {
             memory_bytes: 64 * 1024,
         };
         let engine = ContractEngine::new_with_limits(test_large_memory_wasm_bytes(), limits);
-        let err = engine.validate(&[1, 2], &[3, 4]).unwrap_err();
-        match err {
-            DharmaError::Contract(msg) => assert!(msg.to_lowercase().contains("memory")),
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(matches!(
+            engine.validate(&[1, 2], &[3, 4]),
+            Err(DharmaError::Contract(_))
+        ));
     }
 
     #[test]

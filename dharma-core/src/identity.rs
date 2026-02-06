@@ -538,7 +538,7 @@ mod tests {
     fn append_identity_assertion(
         env: &crate::env::StdEnv,
         subject: SubjectId,
-        typ: &str,
+        assertion_type: &str,
         auth: IdentityKey,
         signer: &ed25519_dalek::SigningKey,
         seq: u64,
@@ -549,7 +549,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: subject,
-            typ: typ.to_string(),
+            typ: assertion_type.to_string(),
             auth,
             seq,
             prev,
@@ -564,7 +564,7 @@ mod tests {
         let bytes = assertion.to_cbor().unwrap();
         let id = assertion.assertion_id().unwrap();
         let env_id = crypto::envelope_id(&bytes);
-        append_assertion(env, &subject, seq, id, env_id, typ, &bytes).unwrap();
+        append_assertion(env, &subject, seq, id, env_id, assertion_type, &bytes).unwrap();
         id
     }
 
