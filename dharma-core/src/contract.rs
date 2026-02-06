@@ -1063,6 +1063,12 @@ fn parse_contract_result(bytes: &[u8]) -> Result<ContractResult, DharmaError> {
     Ok(ContractResult { ok, status, reason })
 }
 
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_parse_contract_result(bytes: &[u8]) -> Result<(), DharmaError> {
+    parse_contract_result(bytes).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
