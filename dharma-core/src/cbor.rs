@@ -59,14 +59,8 @@ mod tests {
         ]);
         canonicalize(&mut value);
         if let Value::Map(entries) = value {
-            assert_eq!(
-                entries[0].0,
-                Value::Text("a".to_string())
-            );
-            assert_eq!(
-                entries[1].0,
-                Value::Text("b".to_string())
-            );
+            assert_eq!(entries[0].0, Value::Text("a".to_string()));
+            assert_eq!(entries[1].0, Value::Text("b".to_string()));
         } else {
             panic!("expected map");
         }

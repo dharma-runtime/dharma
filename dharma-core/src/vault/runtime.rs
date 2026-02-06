@@ -1,25 +1,27 @@
-use crate::cbor;
 use crate::backup::{backup_policy_status, BackupPolicyStatus};
+use crate::cbor;
 use crate::config::{Config, VaultArchiveMode};
 use crate::error::DharmaError;
 use crate::identity::IdentityState;
 use crate::store::Store;
 use crate::types::{ContractId, SchemaId, SubjectId};
+use crate::value::{expect_bytes, expect_map, expect_uint, map_get};
 use crate::vault::drivers::LocalDriver;
 use crate::vault::drivers::PeerDriver;
-use crate::vault::{archive_subject, VaultArchiveInput, VaultConfig, VaultDictionaryRef, VaultDriver};
-use crate::value::{expect_bytes, expect_map, expect_uint, map_get};
+use crate::vault::{
+    archive_subject, VaultArchiveInput, VaultConfig, VaultDictionaryRef, VaultDriver,
+};
 use ciborium::value::Value;
 use fs2::{available_space, total_space};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "vault-s3")]
+use crate::vault::drivers::s3::S3Options;
 #[cfg(feature = "vault-arweave")]
 use crate::vault::drivers::ArweaveDriver;
 #[cfg(feature = "vault-s3")]
 use crate::vault::drivers::S3Driver;
-#[cfg(feature = "vault-s3")]
-use crate::vault::drivers::s3::S3Options;
 
 pub enum VaultArchiveOutcome {
     Deferred,
@@ -61,7 +63,10 @@ pub fn drain_archive_queue(
     for job in queue.jobs {
         processed = processed.saturating_add(1);
         if job.subject != identity.subject_id {
-            eprintln!("[vault] skipping unsupported subject {}", job.subject.to_hex());
+            eprintln!(
+                "[vault] skipping unsupported subject {}",
+                job.subject.to_hex()
+            );
             continue;
         }
         match maybe_archive_subject_with_config(
@@ -108,10 +113,7 @@ pub fn maybe_archive_subject_with_config(
         return Ok(VaultArchiveOutcome::Skipped);
     }
 
-    let now = store
-        .env()
-        .now()
-        .max(0) as u64;
+    let now = store.env().now().max(0) as u64;
     let monitor_path = vault_monitor_path(store.root());
     let mut monitor = VaultMonitorState::load(&monitor_path);
     if !monitor.should_check(now, config.vault.check_interval_secs) {
@@ -167,8 +169,7 @@ pub fn maybe_archive_subject_with_config(
     let pressure_storage = metrics.storage_bytes >= max_storage;
     let pressure_disk = metrics.disk_used_pct >= config.vault.disk_pressure_pct;
     let approaching_storage = metrics.storage_bytes
-        >= max_storage.saturating_mul(u64::from(config.vault.alert_threshold_pct))
-            / 100;
+        >= max_storage.saturating_mul(u64::from(config.vault.alert_threshold_pct)) / 100;
     let approaching_disk = metrics.disk_used_pct >= config.vault.alert_threshold_pct;
 
     let driver = build_driver(config, store.root())?;
@@ -355,12 +356,10 @@ fn build_driver(
         "s3" => {
             #[cfg(feature = "vault-s3")]
             {
-                let bucket = config
-                    .vault
-                    .s3
-                    .bucket
-                    .as_ref()
-                    .ok_or_else(|| DharmaError::Config("vault s3.bucket missing".to_string()))?;
+                let bucket =
+                    config.vault.s3.bucket.as_ref().ok_or_else(|| {
+                        DharmaError::Config("vault s3.bucket missing".to_string())
+                    })?;
                 let prefix = config.vault.s3.prefix.clone().unwrap_or_default();
                 let mut opts = S3Options::default();
                 opts.endpoint_url = config.vault.s3.endpoint_url.clone();
@@ -380,30 +379,16 @@ fn build_driver(
             #[cfg(feature = "vault-arweave")]
             {
                 let driver = if config.vault.arweave.arlocal {
-                    let endpoint = config
-                        .vault
-                        .arweave
-                        .gateway_url
-                        .as_ref()
-                        .ok_or_else(|| {
-                            DharmaError::Config("vault arweave.gateway_url missing".to_string())
-                        })?;
+                    let endpoint = config.vault.arweave.gateway_url.as_ref().ok_or_else(|| {
+                        DharmaError::Config("vault arweave.gateway_url missing".to_string())
+                    })?;
                     ArweaveDriver::new_arlocal(endpoint.clone())?
                 } else {
-                    let upload_url = config
-                        .vault
-                        .arweave
-                        .upload_url
-                        .as_ref()
-                        .ok_or_else(|| {
-                            DharmaError::Config("vault arweave.upload_url missing".to_string())
-                        })?;
-                    let gateway_url = config
-                        .vault
-                        .arweave
-                        .gateway_url
-                        .as_ref()
-                        .ok_or_else(|| {
+                    let upload_url = config.vault.arweave.upload_url.as_ref().ok_or_else(|| {
+                        DharmaError::Config("vault arweave.upload_url missing".to_string())
+                    })?;
+                    let gateway_url =
+                        config.vault.arweave.gateway_url.as_ref().ok_or_else(|| {
                             DharmaError::Config("vault arweave.gateway_url missing".to_string())
                         })?;
                     ArweaveDriver::new(
@@ -421,9 +406,7 @@ fn build_driver(
                 ))
             }
         }
-        other => Err(DharmaError::Config(format!(
-            "unknown vault driver {other}"
-        ))),
+        other => Err(DharmaError::Config(format!("unknown vault driver {other}"))),
     }
 }
 
@@ -573,7 +556,10 @@ impl VaultArchiveJob {
                 Value::Text("subject".to_string()),
                 Value::Bytes(self.subject.as_bytes().to_vec()),
             ),
-            (Value::Text("ver".to_string()), Value::Integer(self.ver.into())),
+            (
+                Value::Text("ver".to_string()),
+                Value::Integer(self.ver.into()),
+            ),
             (
                 Value::Text("schema".to_string()),
                 Value::Bytes(self.schema_id.as_bytes().to_vec()),

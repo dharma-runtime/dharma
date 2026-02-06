@@ -252,15 +252,24 @@ impl Config {
 
         out.push("[network]".to_string());
         out.push(format!("listen_port = {}", self.network.listen_port));
-        out.push(format!("peers = [{}]", format_string_array(&self.network.peers)));
+        out.push(format!(
+            "peers = [{}]",
+            format_string_array(&self.network.peers)
+        ));
         out.push(format!("max_peers = {}", self.network.max_peers));
         out.push(format!("max_frame_size = {}", self.network.max_frame_size));
         out.push(format!(
             "connect_timeout_ms = {}",
             self.network.connect_timeout_ms
         ));
-        out.push(format!("read_timeout_ms = {}", self.network.read_timeout_ms));
-        out.push(format!("write_timeout_ms = {}", self.network.write_timeout_ms));
+        out.push(format!(
+            "read_timeout_ms = {}",
+            self.network.read_timeout_ms
+        ));
+        out.push(format!(
+            "write_timeout_ms = {}",
+            self.network.write_timeout_ms
+        ));
         out.push(String::new());
 
         out.push("[storage]".to_string());
@@ -387,10 +396,7 @@ impl Config {
             "token = \"{}\"",
             self.vault.arweave.token.clone().unwrap_or_default()
         ));
-        out.push(format!(
-            "arlocal = {}",
-            self.vault.arweave.arlocal
-        ));
+        out.push(format!("arlocal = {}", self.vault.arweave.arlocal));
         out.push(String::new());
 
         out.join("\n")
@@ -812,7 +818,9 @@ fn secondary_global_path() -> Result<Option<PathBuf>, DharmaError> {
         Some(home) => home,
         None => return Ok(None),
     };
-    Ok(Some(home.join(".config").join("dharma").join("dharma.toml")))
+    Ok(Some(
+        home.join(".config").join("dharma").join("dharma.toml"),
+    ))
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -874,10 +882,7 @@ fn default_config_template() -> String {
             "max_local_storage_mb = {}",
             DEFAULT_VAULT_MAX_LOCAL_STORAGE_MB
         ),
-        &format!(
-            "disk_pressure_pct = {}",
-            DEFAULT_VAULT_DISK_PRESSURE_PCT
-        ),
+        &format!("disk_pressure_pct = {}", DEFAULT_VAULT_DISK_PRESSURE_PCT),
         &format!(
             "alert_threshold_pct = {}",
             DEFAULT_VAULT_ALERT_THRESHOLD_PCT

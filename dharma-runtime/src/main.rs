@@ -1,4 +1,5 @@
 use dharma_core::assertion::AssertionPlaintext;
+use dharma_core::config::Config;
 use dharma_core::env::StdEnv;
 use dharma_core::envelope;
 use dharma_core::identity::IdentityState;
@@ -9,11 +10,10 @@ use dharma_core::net;
 use dharma_core::store::state::list_assertions;
 use dharma_core::store::Store;
 use dharma_core::DharmaError;
-use dharma_core::config::Config;
 use std::fs;
-use std::io::{self, Write};
 #[cfg(feature = "server")]
 use std::io::Read;
+use std::io::{self, Write};
 #[cfg(feature = "server")]
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -185,7 +185,9 @@ where
 
     let head = head.ok_or_else(|| DharmaError::Validation("No identity assertions".to_string()))?;
     if !head.verify_signature()? {
-        return Err(DharmaError::Validation("Invalid identity head signature".to_string()));
+        return Err(DharmaError::Validation(
+            "Invalid identity head signature".to_string(),
+        ));
     }
     Ok(head_seq)
 }

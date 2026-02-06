@@ -1,13 +1,13 @@
 use crate::cbor;
 use crate::error::DharmaError;
 use crate::identity::IdentityState;
+use crate::net::io::ReadWrite;
 use crate::net::noise::HandshakeState;
 use crate::types::{IdentityKey, SubjectId};
 use crate::value::{expect_bytes, expect_map, expect_uint, map_get};
-use ciborium::value::Value;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
-use crate::net::io::ReadWrite;
+use ciborium::value::Value;
 use x25519_dalek::StaticSecret;
 
 const MAGIC: u32 = 0x50414354;
@@ -56,7 +56,10 @@ impl Session {
         )?;
         self.send_counter = next_counter;
         let frame = Value::Map(vec![
-            (Value::Text("magic".to_string()), Value::Integer(MAGIC.into())),
+            (
+                Value::Text("magic".to_string()),
+                Value::Integer(MAGIC.into()),
+            ),
             (Value::Text("v".to_string()), Value::Integer(VERSION.into())),
             (Value::Text("t".to_string()), Value::Integer(t.into())),
             (Value::Text("n".to_string()), Value::Bytes(nonce.to_vec())),
@@ -69,18 +72,24 @@ impl Session {
         let value = cbor::ensure_canonical(bytes)?;
         let map = expect_map(&value)?;
         let magic = expect_uint(
-            map_get(map, "magic").ok_or_else(|| DharmaError::Validation("missing magic".to_string()))?,
+            map_get(map, "magic")
+                .ok_or_else(|| DharmaError::Validation("missing magic".to_string()))?,
         )?;
-        let version =
-            expect_uint(map_get(map, "v").ok_or_else(|| DharmaError::Validation("missing v".to_string()))?)?;
-        let t =
-            expect_uint(map_get(map, "t").ok_or_else(|| DharmaError::Validation("missing t".to_string()))?)?
-                as u8;
+        let version = expect_uint(
+            map_get(map, "v").ok_or_else(|| DharmaError::Validation("missing v".to_string()))?,
+        )?;
+        let t = expect_uint(
+            map_get(map, "t").ok_or_else(|| DharmaError::Validation("missing t".to_string()))?,
+        )? as u8;
         if magic != MAGIC as u64 || version != VERSION as u64 {
             return Err(DharmaError::Validation("invalid frame".to_string()));
         }
-        let nonce = expect_bytes(map_get(map, "n").ok_or_else(|| DharmaError::Validation("missing n".to_string()))?)?;
-        let ct = expect_bytes(map_get(map, "ct").ok_or_else(|| DharmaError::Validation("missing ct".to_string()))?)?;
+        let nonce = expect_bytes(
+            map_get(map, "n").ok_or_else(|| DharmaError::Validation("missing n".to_string()))?,
+        )?;
+        let ct = expect_bytes(
+            map_get(map, "ct").ok_or_else(|| DharmaError::Validation("missing ct".to_string()))?,
+        )?;
         let aad = build_aad(t);
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&self.recv_key));
         let next_counter = self
@@ -89,7 +98,10 @@ impl Session {
             .ok_or_else(|| DharmaError::Crypto("nonce counter overflow".to_string()))?;
         let pt = cipher.decrypt(
             Nonce::from_slice(&nonce),
-            chacha20poly1305::aead::Payload { msg: &ct, aad: &aad },
+            chacha20poly1305::aead::Payload {
+                msg: &ct,
+                aad: &aad,
+            },
         )?;
         self.recv_counter = next_counter;
         Ok((t, pt))
@@ -160,7 +172,10 @@ pub fn server_handshake(
 
 fn encode_plain_frame(t: u8, payload: &[u8]) -> Result<Vec<u8>, DharmaError> {
     let entries = vec![
-        (Value::Text("magic".to_string()), Value::Integer(MAGIC.into())),
+        (
+            Value::Text("magic".to_string()),
+            Value::Integer(MAGIC.into()),
+        ),
         (Value::Text("v".to_string()), Value::Integer(VERSION.into())),
         (Value::Text("t".to_string()), Value::Integer(t.into())),
         (Value::Text("p".to_string()), Value::Bytes(payload.to_vec())),
@@ -171,15 +186,22 @@ fn encode_plain_frame(t: u8, payload: &[u8]) -> Result<Vec<u8>, DharmaError> {
 fn decode_plain_frame(bytes: &[u8]) -> Result<PlainFrame, DharmaError> {
     let value = cbor::ensure_canonical(bytes)?;
     let map = expect_map(&value)?;
-    let magic =
-        expect_uint(map_get(map, "magic").ok_or_else(|| DharmaError::Validation("missing magic".to_string()))?)?;
-    let version =
-        expect_uint(map_get(map, "v").ok_or_else(|| DharmaError::Validation("missing v".to_string()))?)?;
+    let magic = expect_uint(
+        map_get(map, "magic")
+            .ok_or_else(|| DharmaError::Validation("missing magic".to_string()))?,
+    )?;
+    let version = expect_uint(
+        map_get(map, "v").ok_or_else(|| DharmaError::Validation("missing v".to_string()))?,
+    )?;
     if magic != MAGIC as u64 || version != VERSION as u64 {
         return Err(DharmaError::Validation("invalid frame".to_string()));
     }
-    let t = expect_uint(map_get(map, "t").ok_or_else(|| DharmaError::Validation("missing t".to_string()))?)? as u8;
-    let payload = expect_bytes(map_get(map, "p").ok_or_else(|| DharmaError::Validation("missing payload".to_string()))?)?;
+    let t = expect_uint(
+        map_get(map, "t").ok_or_else(|| DharmaError::Validation("missing t".to_string()))?,
+    )? as u8;
+    let payload = expect_bytes(
+        map_get(map, "p").ok_or_else(|| DharmaError::Validation("missing payload".to_string()))?,
+    )?;
     Ok(PlainFrame { t, payload })
 }
 
@@ -206,10 +228,12 @@ fn parse_identity_payload(payload: &[u8]) -> Result<(SubjectId, IdentityKey), Dh
     let value = cbor::ensure_canonical(payload)?;
     let map = expect_map(&value)?;
     let identity_sub = expect_bytes(
-        map_get(map, "identity_sub").ok_or_else(|| DharmaError::Validation("missing identity_sub".to_string()))?,
+        map_get(map, "identity_sub")
+            .ok_or_else(|| DharmaError::Validation("missing identity_sub".to_string()))?,
     )?;
     let peer_pk = expect_bytes(
-        map_get(map, "peer_pk").ok_or_else(|| DharmaError::Validation("missing peer_pk".to_string()))?,
+        map_get(map, "peer_pk")
+            .ok_or_else(|| DharmaError::Validation("missing peer_pk".to_string()))?,
     )?;
     Ok((
         SubjectId::from_slice(&identity_sub)?,

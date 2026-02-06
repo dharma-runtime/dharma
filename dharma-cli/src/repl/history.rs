@@ -27,10 +27,7 @@ pub fn structural_counts(records: &[AssertionRecord]) -> Result<StructuralCounts
                 continue;
             }
         };
-        let prev = assertion
-            .header
-            .prev
-            .and_then(|prev_id| map.get(&prev_id));
+        let prev = assertion.header.prev.and_then(|prev_id| map.get(&prev_id));
         match structural_validate(assertion, prev)? {
             StructuralStatus::Accept => counts.accepted += 1,
             StructuralStatus::Pending(_) => counts.pending += 1,
@@ -47,8 +44,8 @@ mod tests {
     use crate::crypto;
     use crate::types::{ContractId, IdentityKey, SchemaId, SubjectId};
     use ciborium::value::Value;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     #[test]
     fn structural_counts_accepts_chain() {
@@ -71,7 +68,10 @@ mod tests {
             note: None,
             meta: None,
         };
-        let body_a = Value::Map(vec![(Value::Text("v".to_string()), Value::Integer(1.into()))]);
+        let body_a = Value::Map(vec![(
+            Value::Text("v".to_string()),
+            Value::Integer(1.into()),
+        )]);
         let assertion_a = AssertionPlaintext::sign(header_a, body_a, &signing_key).unwrap();
         let bytes_a = assertion_a.to_cbor().unwrap();
         let assertion_id_a = assertion_a.assertion_id().unwrap();
@@ -82,7 +82,10 @@ mod tests {
             prev: Some(assertion_id_a),
             ..assertion_a.header.clone()
         };
-        let body_b = Value::Map(vec![(Value::Text("v".to_string()), Value::Integer(2.into()))]);
+        let body_b = Value::Map(vec![(
+            Value::Text("v".to_string()),
+            Value::Integer(2.into()),
+        )]);
         let assertion_b = AssertionPlaintext::sign(header_b, body_b, &signing_key).unwrap();
         let bytes_b = assertion_b.to_cbor().unwrap();
         let assertion_id_b = assertion_b.assertion_id().unwrap();

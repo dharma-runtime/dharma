@@ -66,16 +66,22 @@ pub fn structural_validate(
     if let Some(prev_id) = assertion.header.prev {
         match prev {
             None => {
-                return Ok(StructuralStatus::Pending("missing prev assertion".to_string()));
+                return Ok(StructuralStatus::Pending(
+                    "missing prev assertion".to_string(),
+                ));
             }
             Some(prev_assertion) => {
                 if prev_assertion.header.sub != assertion.header.sub
                     || prev_assertion.header.seq + 1 != assertion.header.seq
                 {
-                    return Ok(StructuralStatus::Reject("author chain mismatch".to_string()));
+                    return Ok(StructuralStatus::Reject(
+                        "author chain mismatch".to_string(),
+                    ));
                 }
                 if prev_assertion.header.ver != assertion.header.ver {
-                    return Ok(StructuralStatus::Reject("data version mismatch".to_string()));
+                    return Ok(StructuralStatus::Reject(
+                        "data version mismatch".to_string(),
+                    ));
                 }
                 let _ = prev_id; // explicit, for clarity
             }
@@ -151,7 +157,9 @@ pub fn validate_subject(
     let mut accepted_map: HashMap<AssertionId, AssertionPlaintext> = HashMap::new();
 
     for id in order {
-        let assertion = assertions.get(&id).ok_or_else(|| DharmaError::Validation("missing assertion".to_string()))?;
+        let assertion = assertions
+            .get(&id)
+            .ok_or_else(|| DharmaError::Validation("missing assertion".to_string()))?;
         let prev = assertion
             .header
             .prev
@@ -167,7 +175,8 @@ pub fn validate_subject(
                 continue;
             }
         }
-        if let Err(_) = crate::schema::validate_body(schema, &assertion.header.typ, &assertion.body) {
+        if let Err(_) = crate::schema::validate_body(schema, &assertion.header.typ, &assertion.body)
+        {
             rejected.push(id);
             continue;
         }
@@ -186,7 +195,11 @@ pub fn validate_subject(
         }
     }
 
-    Ok(SubjectValidation { accepted, pending, rejected })
+    Ok(SubjectValidation {
+        accepted,
+        pending,
+        rejected,
+    })
 }
 
 fn build_context(
@@ -195,12 +208,15 @@ fn build_context(
     accepted_map: &HashMap<AssertionId, AssertionPlaintext>,
     current: &AssertionPlaintext,
 ) -> Value {
-    let accepted_values = accepted
-        .iter()
-        .map(|a| a.to_value())
-        .collect::<Vec<_>>();
+    let accepted_values = accepted.iter().map(|a| a.to_value()).collect::<Vec<_>>();
     let mut lookup_entries = Vec::new();
-    for reference in current.header.refs.iter().copied().chain(current.header.prev) {
+    for reference in current
+        .header
+        .refs
+        .iter()
+        .copied()
+        .chain(current.header.prev)
+    {
         if let Some(assertion) = accepted_map.get(&reference) {
             lookup_entries.push((
                 Value::Bytes(reference.as_bytes().to_vec()),
@@ -282,7 +298,11 @@ mod tests {
             meta: None,
         };
         let a1 = AssertionPlaintext::sign(header1, Value::Null, &sk).unwrap();
-        let header2 = AssertionHeader { seq: 2, prev: Some(AssertionId::from_bytes([1u8; 32])), ..a1.header.clone() };
+        let header2 = AssertionHeader {
+            seq: 2,
+            prev: Some(AssertionId::from_bytes([1u8; 32])),
+            ..a1.header.clone()
+        };
         let a2 = AssertionPlaintext::sign(header2, Value::Null, &sk).unwrap();
         let mut map = HashMap::new();
         map.insert(AssertionId::from_bytes([1u8; 32]), a1);
@@ -312,7 +332,13 @@ mod tests {
         let assertion = AssertionPlaintext::sign(header, Value::Map(vec![]), &sk).unwrap();
         let mut map = HashMap::new();
         map.insert(AssertionId::from_bytes([1u8; 32]), assertion);
-        let result = validate_subject(&SubjectId::from_bytes([9u8; 32]), &map, &schema(), &contract()).unwrap();
+        let result = validate_subject(
+            &SubjectId::from_bytes([9u8; 32]),
+            &map,
+            &schema(),
+            &contract(),
+        )
+        .unwrap();
         assert_eq!(result.accepted.len(), 1);
     }
 
@@ -507,7 +533,11 @@ mod tests {
             meta: None,
         };
         let a1 = AssertionPlaintext::sign(header1, Value::Null, &sk).unwrap();
-        let header2 = AssertionHeader { seq: 2, prev: Some(AssertionId::from_bytes([1u8; 32])), ..a1.header.clone() };
+        let header2 = AssertionHeader {
+            seq: 2,
+            prev: Some(AssertionId::from_bytes([1u8; 32])),
+            ..a1.header.clone()
+        };
         let a2 = AssertionPlaintext::sign(header2, Value::Null, &sk).unwrap();
         let mut map = HashMap::new();
         map.insert(AssertionId::from_bytes([1u8; 32]), a1);

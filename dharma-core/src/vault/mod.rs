@@ -10,8 +10,8 @@ use rand_core::{CryptoRng, RngCore};
 use sha2::Sha256;
 use std::io::{Read, Write};
 
-pub mod drivers;
 pub mod archive;
+pub mod drivers;
 pub mod runtime;
 
 pub use archive::{archive_subject, VaultArchiveInput, VaultArchiveResult};
@@ -65,7 +65,9 @@ impl CompressionAlg {
     fn from_u8(value: u8) -> Result<Self, DharmaError> {
         match value {
             1 => Ok(CompressionAlg::Zstd19),
-            _ => Err(DharmaError::Validation("unsupported compression".to_string())),
+            _ => Err(DharmaError::Validation(
+                "unsupported compression".to_string(),
+            )),
         }
     }
 }
@@ -79,7 +81,9 @@ impl EncryptionAlg {
     fn from_u8(value: u8) -> Result<Self, DharmaError> {
         match value {
             1 => Ok(EncryptionAlg::XChaCha20Poly1305),
-            _ => Err(DharmaError::Validation("unsupported encryption".to_string())),
+            _ => Err(DharmaError::Validation(
+                "unsupported encryption".to_string(),
+            )),
         }
     }
 }
@@ -144,7 +148,9 @@ impl DhboxHeaderV1 {
         }
         let version = read_u8(bytes, &mut offset)?;
         if version != DHBOX_VERSION_V1 {
-            return Err(DharmaError::Validation("unsupported dhbox version".to_string()));
+            return Err(DharmaError::Validation(
+                "unsupported dhbox version".to_string(),
+            ));
         }
         let subject_id = SubjectId::from_slice(&read_bytes::<32>(bytes, &mut offset)?)?;
         let seq_start = read_u64(bytes, &mut offset)?;
@@ -250,7 +256,9 @@ impl DhboxChunk {
                 Some(dict.bytes.as_slice())
             }
             (None, Some(_)) => {
-                return Err(DharmaError::Validation("dict inline without hash".to_string()));
+                return Err(DharmaError::Validation(
+                    "dict inline without hash".to_string(),
+                ));
             }
         };
         let aad = vault_aad(
@@ -290,7 +298,9 @@ impl DhboxChunk {
         }
         let snapshot_hash = blake3_hash(&payload.snapshot);
         if snapshot_hash != self.header.snapshot_hash {
-            return Err(DharmaError::Validation("snapshot hash mismatch".to_string()));
+            return Err(DharmaError::Validation(
+                "snapshot hash mismatch".to_string(),
+            ));
         }
         let mut leaves = Vec::with_capacity(payload.assertions.len());
         for assertion in &payload.assertions {
@@ -471,10 +481,16 @@ impl VaultSegmentBuilder {
         }
     }
 
-    pub fn push(&mut self, item: VaultItem, snapshot: Vec<u8>) -> Result<Option<VaultSegment>, DharmaError> {
+    pub fn push(
+        &mut self,
+        item: VaultItem,
+        snapshot: Vec<u8>,
+    ) -> Result<Option<VaultSegment>, DharmaError> {
         if let Some(last) = self.last_seq {
             if item.seq < last {
-                return Err(DharmaError::Validation("vault items out of order".to_string()));
+                return Err(DharmaError::Validation(
+                    "vault items out of order".to_string(),
+                ));
             }
         }
         self.size_bytes = self.size_bytes.saturating_add(item.bytes.len());
@@ -520,7 +536,10 @@ impl VaultSegmentBuilder {
 pub struct VaultCrypto;
 
 impl VaultCrypto {
-    pub fn derive_vmk(root_key: &[u8; 32], identity_id: &IdentityKey) -> Result<[u8; 32], DharmaError> {
+    pub fn derive_vmk(
+        root_key: &[u8; 32],
+        identity_id: &IdentityKey,
+    ) -> Result<[u8; 32], DharmaError> {
         let hk = Hkdf::<Sha256>::new(Some(identity_id.as_bytes()), root_key);
         let mut out = [0u8; 32];
         hk.expand(b"dharma:vault:master", &mut out)
@@ -528,7 +547,11 @@ impl VaultCrypto {
         Ok(out)
     }
 
-    pub fn derive_svk(vmk: &[u8; 32], subject_id: &SubjectId, epoch: u64) -> Result<[u8; 32], DharmaError> {
+    pub fn derive_svk(
+        vmk: &[u8; 32],
+        subject_id: &SubjectId,
+        epoch: u64,
+    ) -> Result<[u8; 32], DharmaError> {
         let hk = Hkdf::<Sha256>::new(None, vmk);
         let mut info = Vec::with_capacity(32 + 8 + 22);
         info.extend_from_slice(b"dharma:vault:subject");
@@ -567,7 +590,10 @@ impl VaultCrypto {
         let cipher = XChaCha20Poly1305::new(key.into());
         Ok(cipher.encrypt(
             XNonce::from_slice(nonce),
-            chacha20poly1305::aead::Payload { msg: plaintext, aad },
+            chacha20poly1305::aead::Payload {
+                msg: plaintext,
+                aad,
+            },
         )?)
     }
 
@@ -580,7 +606,10 @@ impl VaultCrypto {
         let cipher = XChaCha20Poly1305::new(key.into());
         Ok(cipher.decrypt(
             XNonce::from_slice(nonce),
-            chacha20poly1305::aead::Payload { msg: ciphertext, aad },
+            chacha20poly1305::aead::Payload {
+                msg: ciphertext,
+                aad,
+            },
         )?)
     }
 }
@@ -622,7 +651,9 @@ pub struct VaultDictionary {
 impl VaultDictionary {
     pub fn train(samples: &[Vec<u8>], dict_size: usize) -> Result<Self, DharmaError> {
         if samples.is_empty() {
-            return Err(DharmaError::Validation("no samples for dictionary".to_string()));
+            return Err(DharmaError::Validation(
+                "no samples for dictionary".to_string(),
+            ));
         }
         let sample_refs: Vec<&[u8]> = samples.iter().map(|s| s.as_slice()).collect();
         let dict = zstd::dict::from_samples(&sample_refs, dict_size)?;
@@ -641,7 +672,11 @@ pub enum VaultDictionaryRef<'a> {
 fn dict_parts(dict: VaultDictionaryRef<'_>) -> (Option<VaultHash>, Option<Vec<u8>>, Option<&[u8]>) {
     match dict {
         VaultDictionaryRef::None => (None, None, None),
-        VaultDictionaryRef::Inline(d) => (Some(d.hash), Some(d.bytes.clone()), Some(d.bytes.as_slice())),
+        VaultDictionaryRef::Inline(d) => (
+            Some(d.hash),
+            Some(d.bytes.clone()),
+            Some(d.bytes.as_slice()),
+        ),
         VaultDictionaryRef::Reference(d) => (Some(d.hash), None, Some(d.bytes.as_slice())),
     }
 }
@@ -691,15 +726,14 @@ impl VaultPayload {
             .map(expect_bytes)
             .collect::<Result<Vec<_>, _>>()?;
         let snapshot = expect_bytes(snapshot_val)?;
-        Ok(Self { assertions, snapshot })
+        Ok(Self {
+            assertions,
+            snapshot,
+        })
     }
 }
 
-fn compress_payload(
-    bytes: &[u8],
-    dict: Option<&[u8]>,
-    level: i32,
-) -> Result<Vec<u8>, DharmaError> {
+fn compress_payload(bytes: &[u8], dict: Option<&[u8]>, level: i32) -> Result<Vec<u8>, DharmaError> {
     if let Some(dict_bytes) = dict {
         let mut encoder = zstd::Encoder::with_dictionary(Vec::new(), level, dict_bytes)?;
         encoder.write_all(bytes)?;
@@ -787,7 +821,11 @@ fn merkle_proof(leaves: &[VaultHash], index: usize) -> Vec<VaultHash> {
         let mut pos = 0;
         while pos < level.len() {
             let left = level[pos];
-            let right = if pos + 1 < level.len() { level[pos + 1] } else { left };
+            let right = if pos + 1 < level.len() {
+                level[pos + 1]
+            } else {
+                left
+            };
             next.push(merkle_parent(&left, &right));
             pos += 2;
         }
@@ -906,13 +944,28 @@ mod tests {
     fn dhbox_ciphertext_hash_matches() {
         let (subject_id, schema_id, contract_id) = dummy_ids();
         let assertions = vec![
-            VaultItem { seq: 1, bytes: b"a".to_vec() },
-            VaultItem { seq: 2, bytes: b"b".to_vec() },
+            VaultItem {
+                seq: 1,
+                bytes: b"a".to_vec(),
+            },
+            VaultItem {
+                seq: 2,
+                bytes: b"b".to_vec(),
+            },
         ];
-        let segment = VaultSegment::new(subject_id, schema_id, contract_id, assertions, b"snap".to_vec()).unwrap();
+        let segment = VaultSegment::new(
+            subject_id,
+            schema_id,
+            contract_id,
+            assertions,
+            b"snap".to_vec(),
+        )
+        .unwrap();
         let svk = [7u8; 32];
         let mut rng = StdRng::seed_from_u64(5);
-        let chunk = segment.seal(&svk, VaultDictionaryRef::None, &mut rng).unwrap();
+        let chunk = segment
+            .seal(&svk, VaultDictionaryRef::None, &mut rng)
+            .unwrap();
         let hash = chunk.ciphertext_hash();
         assert_eq!(hash, blake3_hash(&chunk.ciphertext));
     }
@@ -920,11 +973,23 @@ mod tests {
     #[test]
     fn dhbox_decrypt_fails_on_wrong_aad() {
         let (subject_id, schema_id, contract_id) = dummy_ids();
-        let assertions = vec![VaultItem { seq: 1, bytes: b"a".to_vec() }];
-        let segment = VaultSegment::new(subject_id, schema_id, contract_id, assertions, b"snap".to_vec()).unwrap();
+        let assertions = vec![VaultItem {
+            seq: 1,
+            bytes: b"a".to_vec(),
+        }];
+        let segment = VaultSegment::new(
+            subject_id,
+            schema_id,
+            contract_id,
+            assertions,
+            b"snap".to_vec(),
+        )
+        .unwrap();
         let svk = [9u8; 32];
         let mut rng = StdRng::seed_from_u64(9);
-        let chunk = segment.seal(&svk, VaultDictionaryRef::None, &mut rng).unwrap();
+        let chunk = segment
+            .seal(&svk, VaultDictionaryRef::None, &mut rng)
+            .unwrap();
         let mut tampered = chunk.clone();
         tampered.header.subject_id = SubjectId::from_bytes([9u8; 32]);
         let err = tampered.decrypt_payload(&svk, None).unwrap_err();
@@ -937,11 +1002,23 @@ mod tests {
     #[test]
     fn dhbox_verify_payload_roundtrip() {
         let (subject_id, schema_id, contract_id) = dummy_ids();
-        let assertions = vec![VaultItem { seq: 1, bytes: b"payload".to_vec() }];
-        let segment = VaultSegment::new(subject_id, schema_id, contract_id, assertions, b"snap".to_vec()).unwrap();
+        let assertions = vec![VaultItem {
+            seq: 1,
+            bytes: b"payload".to_vec(),
+        }];
+        let segment = VaultSegment::new(
+            subject_id,
+            schema_id,
+            contract_id,
+            assertions,
+            b"snap".to_vec(),
+        )
+        .unwrap();
         let svk = [3u8; 32];
         let mut rng = StdRng::seed_from_u64(11);
-        let chunk = segment.seal(&svk, VaultDictionaryRef::None, &mut rng).unwrap();
+        let chunk = segment
+            .seal(&svk, VaultDictionaryRef::None, &mut rng)
+            .unwrap();
         let payload = chunk.verify_payload(&svk, None).unwrap();
         assert_eq!(payload.snapshot, b"snap".to_vec());
         assert_eq!(payload.assertions.len(), 1);
@@ -951,11 +1028,23 @@ mod tests {
     #[test]
     fn dhbox_verify_payload_rejects_merkle_mismatch() {
         let (subject_id, schema_id, contract_id) = dummy_ids();
-        let assertions = vec![VaultItem { seq: 1, bytes: b"keep".to_vec() }];
-        let segment = VaultSegment::new(subject_id, schema_id, contract_id, assertions, b"snap".to_vec()).unwrap();
+        let assertions = vec![VaultItem {
+            seq: 1,
+            bytes: b"keep".to_vec(),
+        }];
+        let segment = VaultSegment::new(
+            subject_id,
+            schema_id,
+            contract_id,
+            assertions,
+            b"snap".to_vec(),
+        )
+        .unwrap();
         let svk = [5u8; 32];
         let mut rng = StdRng::seed_from_u64(13);
-        let mut chunk = segment.seal(&svk, VaultDictionaryRef::None, &mut rng).unwrap();
+        let mut chunk = segment
+            .seal(&svk, VaultDictionaryRef::None, &mut rng)
+            .unwrap();
 
         let mut payload = chunk.decrypt_payload(&svk, None).unwrap();
         payload.assertions[0] = b"tampered".to_vec();
@@ -968,8 +1057,15 @@ mod tests {
             &chunk.header.schema_id,
             &chunk.header.contract_id,
         );
-        let ck = VaultCrypto::derive_ck(&svk, chunk.header.seq_start, chunk.header.seq_end, &chunk.header.chunk_salt).unwrap();
-        chunk.ciphertext = VaultCrypto::encrypt(&ck, &chunk.header.nonce, &compressed, &aad).unwrap();
+        let ck = VaultCrypto::derive_ck(
+            &svk,
+            chunk.header.seq_start,
+            chunk.header.seq_end,
+            &chunk.header.chunk_salt,
+        )
+        .unwrap();
+        chunk.ciphertext =
+            VaultCrypto::encrypt(&ck, &chunk.header.nonce, &compressed, &aad).unwrap();
 
         let err = chunk.verify_payload(&svk, None).unwrap_err();
         match err {
@@ -989,9 +1085,25 @@ mod tests {
         };
         let mut builder = VaultSegmentBuilder::new(config, subject_id, schema_id, contract_id);
         let snap = b"snapshot".to_vec();
-        let out = builder.push(VaultItem { seq: 1, bytes: vec![1u8; 4] }, snap.clone()).unwrap();
+        let out = builder
+            .push(
+                VaultItem {
+                    seq: 1,
+                    bytes: vec![1u8; 4],
+                },
+                snap.clone(),
+            )
+            .unwrap();
         assert!(out.is_none());
-        let out = builder.push(VaultItem { seq: 2, bytes: vec![2u8; 4] }, snap.clone()).unwrap();
+        let out = builder
+            .push(
+                VaultItem {
+                    seq: 2,
+                    bytes: vec![2u8; 4],
+                },
+                snap.clone(),
+            )
+            .unwrap();
         assert!(out.is_some());
     }
 
@@ -1035,6 +1147,12 @@ mod tests {
         let leaves = vec![[1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]];
         let root = VaultMerkle::root(&leaves).unwrap();
         let proof = VaultMerkle::proof(&leaves, 2).unwrap();
-        assert!(VaultMerkle::verify(leaves[2], 2, leaves.len(), &proof, &root));
+        assert!(VaultMerkle::verify(
+            leaves[2],
+            2,
+            leaves.len(),
+            &proof,
+            &root
+        ));
     }
 }

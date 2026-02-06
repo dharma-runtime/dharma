@@ -50,6 +50,16 @@ pub struct ManifestEntry {
     pub subject: Option<SubjectId>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CqrsReverseEntry {
+    pub envelope_id: EnvelopeId,
+    pub assertion_id: AssertionId,
+    pub subject: SubjectId,
+    pub is_overlay: bool,
+}
+
+const CQRS_REVERSE_ENTRY_LEN: usize = 32 + 32 + 32 + 1;
+
 pub fn subject_dir(env: &dyn Env, subject: &SubjectId) -> PathBuf {
     env.root().join("subjects").join(subject.to_hex())
 }
@@ -124,7 +134,10 @@ pub fn load_epoch(env: &dyn Env, subject: &SubjectId) -> Result<Option<u64>, Dha
 pub fn save_epoch(env: &dyn Env, subject: &SubjectId, epoch: u64) -> Result<(), DharmaError> {
     let dir = indexes_dir(env, subject);
     env.create_dir_all(&dir)?;
-    let value = Value::Map(vec![(Value::Text("epoch".to_string()), Value::Integer(epoch.into()))]);
+    let value = Value::Map(vec![(
+        Value::Text("epoch".to_string()),
+        Value::Integer(epoch.into()),
+    )]);
     let bytes = cbor::encode_canonical_value(&value)?;
     write_with_retry(env, &epoch_path(env, subject), &bytes)
 }
@@ -143,7 +156,10 @@ impl KeyBindRecord {
                 Value::Text("domain".to_string()),
                 Value::Bytes(self.domain.as_bytes().to_vec()),
             ),
-            (Value::Text("epoch".to_string()), Value::Integer(self.epoch.into())),
+            (
+                Value::Text("epoch".to_string()),
+                Value::Integer(self.epoch.into()),
+            ),
             (
                 Value::Text("sdk_id".to_string()),
                 Value::Bytes(self.sdk_id.as_bytes().to_vec()),
@@ -153,15 +169,18 @@ impl KeyBindRecord {
 
     pub fn from_value(value: &Value) -> Result<Self, DharmaError> {
         let map = expect_map(value)?;
-        let domain_bytes = expect_bytes(map_get(map, "domain").ok_or_else(|| {
-            DharmaError::Validation("missing domain".to_string())
-        })?)?;
-        let epoch = expect_uint(map_get(map, "epoch").ok_or_else(|| {
-            DharmaError::Validation("missing epoch".to_string())
-        })?)?;
-        let sdk_bytes = expect_bytes(map_get(map, "sdk_id").ok_or_else(|| {
-            DharmaError::Validation("missing sdk_id".to_string())
-        })?)?;
+        let domain_bytes = expect_bytes(
+            map_get(map, "domain")
+                .ok_or_else(|| DharmaError::Validation("missing domain".to_string()))?,
+        )?;
+        let epoch = expect_uint(
+            map_get(map, "epoch")
+                .ok_or_else(|| DharmaError::Validation("missing epoch".to_string()))?,
+        )?;
+        let sdk_bytes = expect_bytes(
+            map_get(map, "sdk_id")
+                .ok_or_else(|| DharmaError::Validation("missing sdk_id".to_string()))?,
+        )?;
         Ok(KeyBindRecord {
             domain: SubjectId::from_slice(&domain_bytes)?,
             epoch,
@@ -200,6 +219,10 @@ fn log_path(dir: &Path) -> PathBuf {
 
 fn manifest_path(env: &dyn Env) -> PathBuf {
     env.root().join("indexes").join("global.idx")
+}
+
+fn cqrs_reverse_path(env: &dyn Env) -> PathBuf {
+    env.root().join("indexes").join("cqrs_reverse_v1.idx")
 }
 
 fn ensure_subject_dirs(env: &dyn Env, subject: &SubjectId) -> Result<(), DharmaError> {
@@ -316,6 +339,15 @@ fn repair_manifest_file(env: &dyn Env, path: &Path) -> Result<(), DharmaError> {
     truncate_file(env, path, last_good)
 }
 
+fn repair_cqrs_reverse_file(env: &dyn Env, path: &Path) -> Result<(), DharmaError> {
+    if !env.exists(path) {
+        return Ok(());
+    }
+    let buf = env.read(path)?;
+    let usable = (buf.len() / CQRS_REVERSE_ENTRY_LEN) * CQRS_REVERSE_ENTRY_LEN;
+    truncate_file(env, path, usable)
+}
+
 fn append_log_entry(env: &dyn Env, dir: &Path, entry: &LogEntry) -> Result<(), DharmaError> {
     env.create_dir_all(dir)?;
     let path = log_path(dir);
@@ -324,8 +356,7 @@ fn append_log_entry(env: &dyn Env, dir: &Path, entry: &LogEntry) -> Result<(), D
         .len()
         .try_into()
         .map_err(|_| DharmaError::Validation("action too long".to_string()))?;
-    let mut buf =
-        Vec::with_capacity(8 + 8 + 1 + 32 + 32 + 32 + 2 + action_bytes.len() + 4);
+    let mut buf = Vec::with_capacity(8 + 8 + 1 + 32 + 32 + 32 + 2 + action_bytes.len() + 4);
     buf.extend_from_slice(&entry.seq.to_le_bytes());
     buf.extend_from_slice(&entry.ver.to_le_bytes());
     match entry.prev {
@@ -405,7 +436,9 @@ fn read_log_entries(env: &dyn Env, dir: &Path) -> Result<Vec<LogEntry>, DharmaEr
         hasher.update(&buf[entry_start..offset]);
         let actual = hasher.finalize();
         if actual != expected {
-            return Err(DharmaError::Validation("log entry checksum mismatch".to_string()));
+            return Err(DharmaError::Validation(
+                "log entry checksum mismatch".to_string(),
+            ));
         }
         offset += 4;
         entries.push(LogEntry {
@@ -420,7 +453,11 @@ fn read_log_entries(env: &dyn Env, dir: &Path) -> Result<Vec<LogEntry>, DharmaEr
     Ok(entries)
 }
 
-fn read_cbor_file_with_retry(env: &dyn Env, path: &Path, attempts: usize) -> Result<Vec<u8>, DharmaError> {
+fn read_cbor_file_with_retry(
+    env: &dyn Env,
+    path: &Path,
+    attempts: usize,
+) -> Result<Vec<u8>, DharmaError> {
     let mut last_err: Option<DharmaError> = None;
     for _ in 0..attempts {
         let bytes = env.read(path)?;
@@ -432,7 +469,10 @@ fn read_cbor_file_with_retry(env: &dyn Env, path: &Path, attempts: usize) -> Res
     Err(last_err.unwrap_or_else(|| DharmaError::Cbor("corrupt cbor".to_string())))
 }
 
-pub fn read_assertion_log(env: &dyn Env, subject: &SubjectId) -> Result<Vec<LogEntry>, DharmaError> {
+pub fn read_assertion_log(
+    env: &dyn Env,
+    subject: &SubjectId,
+) -> Result<Vec<LogEntry>, DharmaError> {
     read_log_entries(env, &assertions_dir(env, subject))
 }
 
@@ -471,6 +511,51 @@ pub fn append_manifest(
     Ok(())
 }
 
+pub fn append_cqrs_reverse_entry(
+    env: &dyn Env,
+    entry: &CqrsReverseEntry,
+) -> Result<(), DharmaError> {
+    let dir = env.root().join("indexes");
+    env.create_dir_all(&dir)?;
+    let path = cqrs_reverse_path(env);
+    let mut buf = Vec::with_capacity(CQRS_REVERSE_ENTRY_LEN);
+    buf.extend_from_slice(entry.envelope_id.as_bytes());
+    buf.extend_from_slice(entry.assertion_id.as_bytes());
+    buf.extend_from_slice(entry.subject.as_bytes());
+    buf.push(if entry.is_overlay { 1u8 } else { 0u8 });
+    match env.append(&path, &buf) {
+        Ok(()) => {}
+        Err(err) if is_torn_write(&err) => {
+            repair_cqrs_reverse_file(env, &path)?;
+            env.append(&path, &buf)?;
+        }
+        Err(err) => return Err(err),
+    }
+    Ok(())
+}
+
+pub fn read_cqrs_reverse_entries(env: &dyn Env) -> Result<Vec<CqrsReverseEntry>, DharmaError> {
+    let path = cqrs_reverse_path(env);
+    if !env.exists(&path) {
+        return Ok(Vec::new());
+    }
+    let buf = env.read(&path)?;
+    let usable_len = (buf.len() / CQRS_REVERSE_ENTRY_LEN) * CQRS_REVERSE_ENTRY_LEN;
+    if usable_len == 0 {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::with_capacity(usable_len / CQRS_REVERSE_ENTRY_LEN);
+    for chunk in buf[..usable_len].chunks_exact(CQRS_REVERSE_ENTRY_LEN) {
+        entries.push(CqrsReverseEntry {
+            envelope_id: EnvelopeId::from_slice(&chunk[0..32])?,
+            assertion_id: AssertionId::from_slice(&chunk[32..64])?,
+            subject: SubjectId::from_slice(&chunk[64..96])?,
+            is_overlay: chunk[96] == 1,
+        });
+    }
+    Ok(entries)
+}
+
 pub fn read_manifest(env: &dyn Env) -> Result<Vec<ManifestEntry>, DharmaError> {
     let path = manifest_path(env);
     if !env.exists(&path) {
@@ -499,7 +584,10 @@ pub fn read_manifest(env: &dyn Env) -> Result<Vec<ManifestEntry>, DharmaError> {
         } else {
             break;
         };
-        entries.push(ManifestEntry { envelope_id, subject });
+        entries.push(ManifestEntry {
+            envelope_id,
+            subject,
+        });
     }
     Ok(entries)
 }
@@ -516,7 +604,12 @@ pub fn append_assertion(
     ensure_subject_dirs(env, subject)?;
     let dir = assertions_dir(env, subject);
     let safe_action = action.replace('/', "_");
-    let filename = format!("{:04}_{}_{}.dharma", seq, safe_action, assertion_id.to_hex());
+    let filename = format!(
+        "{:04}_{}_{}.dharma",
+        seq,
+        safe_action,
+        assertion_id.to_hex()
+    );
     let path = dir.join(filename);
     if env.exists(&path) {
         return Ok(path);
@@ -532,6 +625,15 @@ pub fn append_assertion(
         action: action.to_string(),
     };
     append_log_entry(env, &dir, &entry)?;
+    append_cqrs_reverse_entry(
+        env,
+        &CqrsReverseEntry {
+            envelope_id,
+            assertion_id,
+            subject: *subject,
+            is_overlay: false,
+        },
+    )?;
     append_manifest(env, &envelope_id, Some(subject))?;
     Ok(path)
 }
@@ -548,7 +650,12 @@ pub fn append_overlay(
     ensure_subject_dirs(env, subject)?;
     let dir = overlays_dir(env, subject);
     let safe_action = action.replace('/', "_");
-    let filename = format!("{:04}_{}_{}.dharma", seq, safe_action, assertion_id.to_hex());
+    let filename = format!(
+        "{:04}_{}_{}.dharma",
+        seq,
+        safe_action,
+        assertion_id.to_hex()
+    );
     let path = dir.join(filename);
     if env.exists(&path) {
         return Ok(path);
@@ -564,11 +671,23 @@ pub fn append_overlay(
         action: action.to_string(),
     };
     append_log_entry(env, &dir, &entry)?;
+    append_cqrs_reverse_entry(
+        env,
+        &CqrsReverseEntry {
+            envelope_id,
+            assertion_id,
+            subject: *subject,
+            is_overlay: true,
+        },
+    )?;
     append_manifest(env, &envelope_id, Some(subject))?;
     Ok(path)
 }
 
-pub fn list_assertions(env: &dyn Env, subject: &SubjectId) -> Result<Vec<AssertionRecord>, DharmaError> {
+pub fn list_assertions(
+    env: &dyn Env,
+    subject: &SubjectId,
+) -> Result<Vec<AssertionRecord>, DharmaError> {
     let dir = assertions_dir(env, subject);
     if !env.exists(&dir) {
         return Ok(Vec::new());
@@ -586,8 +705,12 @@ pub fn list_assertions(env: &dyn Env, subject: &SubjectId) -> Result<Vec<Asserti
         let mut records = Vec::new();
         for entry in log_entries {
             let safe_action = entry.action.replace('/', "_");
-            let filename =
-                format!("{:04}_{}_{}.dharma", entry.seq, safe_action, entry.assertion_id.to_hex());
+            let filename = format!(
+                "{:04}_{}_{}.dharma",
+                entry.seq,
+                safe_action,
+                entry.assertion_id.to_hex()
+            );
             let path = dir.join(filename);
             let bytes = match read_cbor_file_with_retry(env, &path, 3) {
                 Ok(bytes) => bytes,
@@ -610,7 +733,9 @@ pub fn list_assertions(env: &dyn Env, subject: &SubjectId) -> Result<Vec<Asserti
         if path.extension().and_then(|s| s.to_str()) != Some("dharma") {
             continue;
         }
-        let Some(name) = path.file_name() else { continue };
+        let Some(name) = path.file_name() else {
+            continue;
+        };
         let name = name.to_string_lossy();
         let seq = match parse_seq(&name) {
             Ok(seq) => seq,
@@ -658,7 +783,10 @@ pub fn subject_has_facts(env: &dyn Env, subject: &SubjectId) -> Result<bool, Dha
     Ok(false)
 }
 
-pub fn list_overlays(env: &dyn Env, subject: &SubjectId) -> Result<Vec<AssertionRecord>, DharmaError> {
+pub fn list_overlays(
+    env: &dyn Env,
+    subject: &SubjectId,
+) -> Result<Vec<AssertionRecord>, DharmaError> {
     let dir = overlays_dir(env, subject);
     if !env.exists(&dir) {
         return Ok(Vec::new());
@@ -676,8 +804,12 @@ pub fn list_overlays(env: &dyn Env, subject: &SubjectId) -> Result<Vec<Assertion
         let mut records = Vec::new();
         for entry in log_entries {
             let safe_action = entry.action.replace('/', "_");
-            let filename =
-                format!("{:04}_{}_{}.dharma", entry.seq, safe_action, entry.assertion_id.to_hex());
+            let filename = format!(
+                "{:04}_{}_{}.dharma",
+                entry.seq,
+                safe_action,
+                entry.assertion_id.to_hex()
+            );
             let path = dir.join(filename);
             let bytes = match read_cbor_file_with_retry(env, &path, 3) {
                 Ok(bytes) => bytes,
@@ -700,7 +832,9 @@ pub fn list_overlays(env: &dyn Env, subject: &SubjectId) -> Result<Vec<Assertion
         if path.extension().and_then(|s| s.to_str()) != Some("dharma") {
             continue;
         }
-        let Some(name) = path.file_name() else { continue };
+        let Some(name) = path.file_name() else {
+            continue;
+        };
         let name = name.to_string_lossy();
         let seq = match parse_seq(&name) {
             Ok(seq) => seq,
@@ -804,9 +938,14 @@ pub fn load_latest_snapshot_for_ver(
         if !env.is_file(&path) {
             continue;
         }
-        let Some(name) = path.file_name() else { continue };
+        let Some(name) = path.file_name() else {
+            continue;
+        };
         let name = name.to_string_lossy();
-        if parse_snapshot_ver(&name).map(|file_ver| file_ver != ver).unwrap_or(false) {
+        if parse_snapshot_ver(&name)
+            .map(|file_ver| file_ver != ver)
+            .unwrap_or(false)
+        {
             continue;
         }
         if let Ok(seq) = parse_seq(&name) {
@@ -815,7 +954,9 @@ pub fn load_latest_snapshot_for_ver(
             }
         }
     }
-    let Some((_, path)) = best else { return Ok(None) };
+    let Some((_, path)) = best else {
+        return Ok(None);
+    };
     let bytes = env.read(&path)?;
     let snapshot = decode_snapshot(&bytes)?;
     if snapshot.header.ver != ver {
@@ -839,9 +980,14 @@ pub fn load_snapshot_at_or_before_seq(
         if !env.is_file(&path) {
             continue;
         }
-        let Some(name) = path.file_name() else { continue };
+        let Some(name) = path.file_name() else {
+            continue;
+        };
         let name = name.to_string_lossy();
-        if parse_snapshot_ver(&name).map(|file_ver| file_ver != ver).unwrap_or(false) {
+        if parse_snapshot_ver(&name)
+            .map(|file_ver| file_ver != ver)
+            .unwrap_or(false)
+        {
             continue;
         }
         if let Ok(snap_seq) = parse_seq(&name) {
@@ -857,7 +1003,9 @@ pub fn load_snapshot_at_or_before_seq(
             }
         }
     }
-    let Some((_, path)) = best else { return Ok(None) };
+    let Some((_, path)) = best else {
+        return Ok(None);
+    };
     let bytes = env.read(&path)?;
     let snapshot = decode_snapshot(&bytes)?;
     if snapshot.header.ver != ver {
@@ -1046,7 +1194,10 @@ mod tests {
             note: None,
             meta: None,
         };
-        let header2 = AssertionHeader { seq: 2, ..header1.clone() };
+        let header2 = AssertionHeader {
+            seq: 2,
+            ..header1.clone()
+        };
         let bytes1 = AssertionPlaintext::sign(header1, Value::Null, &signing_key)
             .unwrap()
             .to_cbor()
@@ -1089,7 +1240,10 @@ mod tests {
             note: None,
             meta: None,
         };
-        let header2 = AssertionHeader { seq: 2, ..header1.clone() };
+        let header2 = AssertionHeader {
+            seq: 2,
+            ..header1.clone()
+        };
         let bytes1 = AssertionPlaintext::sign(header1, Value::Null, &signing_key)
             .unwrap()
             .to_cbor()
@@ -1107,6 +1261,84 @@ mod tests {
         let records = list_overlays(&env, &subject).unwrap();
         assert_eq!(records[0].seq, 1);
         assert_eq!(records[1].seq, 2);
+    }
+
+    #[test]
+    fn cqrs_reverse_entries_include_assertions_and_overlays() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = crate::env::StdEnv::new(temp.path());
+        let subject = SubjectId::from_bytes([66u8; 32]);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(808);
+        let (signing_key, _) = crypto::generate_identity_keypair(&mut rng);
+        let header = AssertionHeader {
+            v: crypto::PROTOCOL_VERSION,
+            ver: DEFAULT_DATA_VERSION,
+            sub: subject,
+            typ: "action.Touch".to_string(),
+            auth: IdentityKey::from_bytes(signing_key.verifying_key().to_bytes()),
+            seq: 1,
+            prev: None,
+            refs: Vec::new(),
+            ts: None,
+            schema: SchemaId::from_bytes([1u8; 32]),
+            contract: ContractId::from_bytes([2u8; 32]),
+            note: None,
+            meta: None,
+        };
+        let assertion_bytes = AssertionPlaintext::sign(header.clone(), Value::Null, &signing_key)
+            .unwrap()
+            .to_cbor()
+            .unwrap();
+        let overlay_header = AssertionHeader {
+            seq: 2,
+            prev: Some(AssertionId::from_bytes([3u8; 32])),
+            ..header
+        };
+        let overlay_bytes = AssertionPlaintext::sign(overlay_header, Value::Null, &signing_key)
+            .unwrap()
+            .to_cbor()
+            .unwrap();
+
+        let assertion_id = AssertionId::from_bytes([3u8; 32]);
+        let assertion_env = crypto::envelope_id(&assertion_bytes);
+        append_assertion(
+            &env,
+            &subject,
+            1,
+            assertion_id,
+            assertion_env,
+            "Touch",
+            &assertion_bytes,
+        )
+        .unwrap();
+
+        let overlay_id = AssertionId::from_bytes([4u8; 32]);
+        let overlay_env = crypto::envelope_id(&overlay_bytes);
+        append_overlay(
+            &env,
+            &subject,
+            2,
+            overlay_id,
+            overlay_env,
+            "TouchOverlay",
+            &overlay_bytes,
+        )
+        .unwrap();
+
+        let entries = read_cqrs_reverse_entries(&env).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| {
+            entry.envelope_id == assertion_env
+                && entry.assertion_id == assertion_id
+                && entry.subject == subject
+                && !entry.is_overlay
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.envelope_id == overlay_env
+                && entry.assertion_id == overlay_id
+                && entry.subject == subject
+                && entry.is_overlay
+        }));
     }
 
     #[test]
@@ -1137,8 +1369,16 @@ mod tests {
             .unwrap();
         let assertion_id = AssertionId::from_bytes([10u8; 32]);
         let envelope_id = crypto::envelope_id(&bytes);
-        append_assertion(&env, &subject, 1, assertion_id, envelope_id, "note.text", &bytes)
-            .unwrap();
+        append_assertion(
+            &env,
+            &subject,
+            1,
+            assertion_id,
+            envelope_id,
+            "note.text",
+            &bytes,
+        )
+        .unwrap();
         let entries = read_log_entries(&env, &assertions_dir(&env, &subject)).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].seq, 1);
@@ -1172,8 +1412,16 @@ mod tests {
             .unwrap();
         let assertion_id = AssertionId::from_bytes([12u8; 32]);
         let envelope_id = crypto::envelope_id(&bytes);
-        append_assertion(&env, &subject, 1, assertion_id, envelope_id, "note.text", &bytes)
-            .unwrap();
+        append_assertion(
+            &env,
+            &subject,
+            1,
+            assertion_id,
+            envelope_id,
+            "note.text",
+            &bytes,
+        )
+        .unwrap();
         let dir = assertions_dir(&env, &subject);
         let log_path = log_path(&dir);
         let mut log_bytes = env.read(&log_path).unwrap();

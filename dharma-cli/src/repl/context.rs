@@ -1,10 +1,10 @@
-use crate::identity_store;
 use crate::dharmaq_core::QueryRow;
+use crate::identity_store;
 use crate::repl::aliases::{alias_for_subject, load_aliases, AliasMap};
-use crate::IdentityState;
+use crate::store::state::load_latest_snapshot_for_ver;
 use crate::types::SubjectId;
 use crate::FrontierIndex;
-use crate::store::state::load_latest_snapshot_for_ver;
+use crate::IdentityState;
 use crossterm::style::{Color, Stylize};
 use std::fs;
 use std::path::PathBuf;
@@ -73,10 +73,21 @@ impl ReplContext {
 
         let subject_label = self.subject_label();
         let dirty = self.subject_dirty();
-        let dirty_mark = if dirty { self.paint("*", Color::Red) } else { "".to_string() };
-        let sub_seg = format!("[📄 {}{}]", self.paint(&subject_label, Color::Blue), dirty_mark);
+        let dirty_mark = if dirty {
+            self.paint("*", Color::Red)
+        } else {
+            "".to_string()
+        };
+        let sub_seg = format!(
+            "[📄 {}{}]",
+            self.paint(&subject_label, Color::Blue),
+            dirty_mark
+        );
 
-        let lens_seg = format!("[👓 v{}]", self.paint(&self.current_lens.to_string(), Color::Magenta));
+        let lens_seg = format!(
+            "[👓 v{}]",
+            self.paint(&self.current_lens.to_string(), Color::Magenta)
+        );
 
         let (online, peers) = self.network_status();
         let net_label = if online { "Online" } else { "Offline" };

@@ -18,7 +18,11 @@ pub fn value_to_json(value: &Value) -> String {
         Value::Bytes(bytes) => format!("\"0x{}\"", hex_string(bytes)),
         Value::Text(text) => format!("\"{}\"", json_escape(text)),
         Value::Array(items) => {
-            let rendered = items.iter().map(value_to_json).collect::<Vec<_>>().join(",");
+            let rendered = items
+                .iter()
+                .map(value_to_json)
+                .collect::<Vec<_>>()
+                .join(",");
             format!("[{rendered}]")
         }
         Value::Map(entries) => {
@@ -193,9 +197,10 @@ mod tests {
 
     #[test]
     fn value_to_text_renders_lines() {
-        let value = Value::Map(vec![
-            (Value::Text("name".to_string()), Value::Text("alice".to_string())),
-        ]);
+        let value = Value::Map(vec![(
+            Value::Text("name".to_string()),
+            Value::Text("alice".to_string()),
+        )]);
         let lines = value_to_text(&value);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("name"));
@@ -203,9 +208,10 @@ mod tests {
 
     #[test]
     fn render_json_respects_color_flag() {
-        let value = Value::Map(vec![
-            (Value::Text("a".to_string()), Value::Integer(1.into())),
-        ]);
+        let value = Value::Map(vec![(
+            Value::Text("a".to_string()),
+            Value::Integer(1.into()),
+        )]);
         let plain = render_json(&value, false);
         assert_eq!(plain, value_to_json(&value));
         let colored = render_json(&value, true);

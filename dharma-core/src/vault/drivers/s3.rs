@@ -5,9 +5,9 @@ use crate::vault::{DhboxChunk, VaultDriver, VaultLocation, VaultMeta};
 #[cfg(feature = "vault-s3")]
 use crate::types::{hex_decode, hex_encode};
 #[cfg(feature = "vault-s3")]
-use aws_sdk_s3::primitives::ByteStream;
-#[cfg(feature = "vault-s3")]
 use aws_sdk_s3::config::Builder as S3ConfigBuilder;
+#[cfg(feature = "vault-s3")]
+use aws_sdk_s3::primitives::ByteStream;
 #[cfg(feature = "vault-s3")]
 use aws_sdk_s3::Client;
 #[cfg(feature = "vault-s3")]
@@ -73,7 +73,10 @@ impl S3Driver {
     }
 
     #[cfg(not(feature = "vault-s3"))]
-    pub fn new(_bucket: impl Into<String>, _prefix: impl Into<String>) -> Result<Self, DharmaError> {
+    pub fn new(
+        _bucket: impl Into<String>,
+        _prefix: impl Into<String>,
+    ) -> Result<Self, DharmaError> {
         Err(DharmaError::Config(
             "vault-s3 feature not enabled".to_string(),
         ))
@@ -102,7 +105,12 @@ impl S3Driver {
             if head.is_ok() {
                 return Ok(());
             }
-            let result = self.client.create_bucket().bucket(&self.bucket).send().await;
+            let result = self
+                .client
+                .create_bucket()
+                .bucket(&self.bucket)
+                .send()
+                .await;
             match result {
                 Ok(_) => Ok(()),
                 Err(err) => {

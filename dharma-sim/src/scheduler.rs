@@ -50,11 +50,7 @@ impl<E> SimScheduler<E> {
     }
 
     pub fn schedule(&mut self, time: i64, order: u64, event: E) {
-        self.queue.push(ScheduledEvent {
-            time,
-            order,
-            event,
-        });
+        self.queue.push(ScheduledEvent { time, order, event });
     }
 
     pub fn next(&mut self) -> Option<ScheduledEvent<E>> {

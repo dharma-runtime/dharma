@@ -1,26 +1,31 @@
-use crate::error::DharmaError;
 use crate::assertion::{is_overlay, AssertionPlaintext};
+use crate::error::DharmaError;
 use crate::fabric::types::AdStore;
+use crate::identity::IdentityState;
+use crate::keys;
+use crate::keys::Keyring;
 use crate::net::handshake::Session;
 use crate::net::ingest::{
     ingest_object, ingest_object_relay, retry_pending, IngestError, IngestStatus, RelayIngestStatus,
 };
+use crate::net::io::ReadWrite;
 use crate::net::policy::OverlayAccess;
 use crate::net::subscriptions::load_subscriptions;
 use crate::net::trust::PeerPolicy;
-use crate::identity::IdentityState;
-use crate::keys;
 use crate::pdl::schema::CqrsSchema;
 use crate::store::index::FrontierIndex;
-use crate::keys::Keyring;
-use crate::store::state::{find_assertion_by_id, find_overlay_by_id, list_assertions, list_overlays, overlays_for_ref};
+use crate::store::state::{
+    find_assertion_by_id, find_overlay_by_id, list_assertions, list_overlays, overlays_for_ref,
+};
 use crate::store::Store;
-use crate::sync::{Ads, Get, GetAds, Inventory, Obj, ObjectRef, SubjectInventory, Subscriptions, SyncMessage, Hello};
+use crate::sync::{
+    Ads, Get, GetAds, Hello, Inventory, Obj, ObjectRef, SubjectInventory, Subscriptions,
+    SyncMessage,
+};
 use crate::types::{AssertionId, EnvelopeId, SchemaId, SubjectId};
 use std::collections::{HashMap, HashSet};
-use crate::net::io::ReadWrite;
-use std::time::Duration;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 const TYPE_INV: u8 = 10;
 const TYPE_GET: u8 = 11;
@@ -165,10 +170,16 @@ pub fn sync_loop_with(
                 saw_inventory = true;
                 match &inv {
                     Inventory::Subjects(subjects) => {
-                        log_sync(&options, format!("sync: recv inv subjects={}", subjects.len()));
+                        log_sync(
+                            &options,
+                            format!("sync: recv inv subjects={}", subjects.len()),
+                        );
                     }
                     Inventory::Objects(objects) => {
-                        log_sync(&options, format!("sync: recv inv objects={}", objects.len()));
+                        log_sync(
+                            &options,
+                            format!("sync: recv inv objects={}", objects.len()),
+                        );
                     }
                 }
                 if let Some(delta) =
@@ -207,12 +218,18 @@ pub fn sync_loop_with(
             SyncMessage::Get(get) => {
                 log_sync(&options, format!("sync: recv get ids={}", get.ids.len()));
                 for obj in handle_get(store, get, overlay, &peer_subs)? {
-                    log_sync(&options, format!("sync: send obj {}", object_ref_hex(&obj.id)));
+                    log_sync(
+                        &options,
+                        format!("sync: send obj {}", object_ref_hex(&obj.id)),
+                    );
                     send_obj(stream, &mut session, obj)?;
                 }
             }
             SyncMessage::Obj(obj) => {
-                log_sync(&options, format!("sync: recv obj {}", object_ref_hex(&obj.id)));
+                log_sync(
+                    &options,
+                    format!("sync: recv obj {}", object_ref_hex(&obj.id)),
+                );
                 let envelope_id = crate::crypto::envelope_id(&obj.bytes);
                 if crate::store::looks_like_wasm(&obj.bytes) {
                     store.verify_contract_bytes(&envelope_id, &obj.bytes)?;
@@ -250,14 +267,21 @@ pub fn sync_loop_with(
                             );
                             eprintln!("Pending object {}: {reason}", assertion_id.to_hex());
                         }
-                        Err(IngestError::MissingDependency { assertion_id, missing }) => {
+                        Err(IngestError::MissingDependency {
+                            assertion_id,
+                            missing,
+                        }) => {
                             pending_get.remove(&obj.id);
                             pending_get.remove(&ObjectRef::Assertion(assertion_id));
                             if let Some(subject) = subject_hint {
                                 pending_subjects.insert(ObjectRef::Assertion(missing), subject);
                             }
                             if pending_get.insert(ObjectRef::Assertion(missing)) {
-                                send_get(stream, &mut session, vec![ObjectRef::Assertion(missing)])?;
+                                send_get(
+                                    stream,
+                                    &mut session,
+                                    vec![ObjectRef::Assertion(missing)],
+                                )?;
                             }
                         }
                         Err(IngestError::Validation(reason)) => {
@@ -286,11 +310,18 @@ pub fn sync_loop_with(
                             );
                             eprintln!("Pending object {}: {reason}", object_ref_hex(&obj.id));
                         }
-                        Err(IngestError::MissingDependency { assertion_id, missing }) => {
+                        Err(IngestError::MissingDependency {
+                            assertion_id,
+                            missing,
+                        }) => {
                             pending_get.remove(&obj.id);
                             pending_get.remove(&ObjectRef::Assertion(assertion_id));
                             if pending_get.insert(ObjectRef::Assertion(missing)) {
-                                send_get(stream, &mut session, vec![ObjectRef::Assertion(missing)])?;
+                                send_get(
+                                    stream,
+                                    &mut session,
+                                    vec![ObjectRef::Assertion(missing)],
+                                )?;
                             }
                         }
                         Err(IngestError::Pending(reason)) => {
@@ -345,9 +376,10 @@ pub fn sync_loop_with(
             SyncMessage::GetAds(_) => {
                 log_sync(&options, "sync: recv getads");
                 if let Some(store) = &options.ad_store {
-                    let ads = store.lock().map(|guard| {
-                        guard.get_all().into_iter().map(|(_, ad)| ad).collect()
-                    }).unwrap_or_default();
+                    let ads = store
+                        .lock()
+                        .map(|guard| guard.get_all().into_iter().map(|(_, ad)| ad).collect())
+                        .unwrap_or_default();
                     let msg = SyncMessage::Ads(Ads { ads });
                     send_msg(stream, &mut session, &msg)?;
                 }
@@ -753,8 +785,7 @@ fn handle_get(
                     }
                 }
                 if bytes_opt.is_none() {
-                    if let Some((_kind, _subject, bytes)) =
-                        find_cqrs_object(store, &assertion_id)?
+                    if let Some((_kind, _subject, bytes)) = find_cqrs_object(store, &assertion_id)?
                     {
                         bytes_opt = Some(bytes);
                     }
@@ -818,6 +849,16 @@ fn find_cqrs_object_by_envelope(
     store: &Store,
     envelope_id: &EnvelopeId,
 ) -> Result<Option<(CqrsKind, SubjectId, AssertionId, Vec<u8>)>, DharmaError> {
+    if let Some(entry) = store.lookup_cqrs_by_envelope(envelope_id)? {
+        if let Some(bytes) = load_bytes_for_cqrs_entry(store, &entry)? {
+            let kind = if entry.is_overlay {
+                CqrsKind::OverlayAction
+            } else {
+                classify_assertion(&bytes)
+            };
+            return Ok(Some((kind, entry.subject, entry.assertion_id, bytes)));
+        }
+    }
     for subject in store.list_subjects()? {
         for record in list_assertions(store.env(), &subject)? {
             if record.envelope_id == *envelope_id {
@@ -827,7 +868,12 @@ fn find_cqrs_object_by_envelope(
         }
         for record in list_overlays(store.env(), &subject)? {
             if record.envelope_id == *envelope_id {
-                return Ok(Some((CqrsKind::OverlayAction, subject, record.assertion_id, record.bytes)));
+                return Ok(Some((
+                    CqrsKind::OverlayAction,
+                    subject,
+                    record.assertion_id,
+                    record.bytes,
+                )));
             }
         }
     }
@@ -841,10 +887,39 @@ enum CqrsKind {
     Other,
 }
 
+fn load_bytes_for_cqrs_entry(
+    store: &Store,
+    entry: &crate::store::state::CqrsReverseEntry,
+) -> Result<Option<Vec<u8>>, DharmaError> {
+    if let Some(bytes) = store.get_object_any(&entry.envelope_id)? {
+        return Ok(Some(bytes));
+    }
+    if entry.is_overlay {
+        if let Some(bytes) = find_overlay_by_id(store.env(), &entry.subject, &entry.assertion_id)? {
+            return Ok(Some(bytes));
+        }
+        return find_assertion_by_id(store.env(), &entry.subject, &entry.assertion_id);
+    }
+    if let Some(bytes) = find_assertion_by_id(store.env(), &entry.subject, &entry.assertion_id)? {
+        return Ok(Some(bytes));
+    }
+    find_overlay_by_id(store.env(), &entry.subject, &entry.assertion_id)
+}
+
 fn find_cqrs_object(
     store: &Store,
     assertion_id: &AssertionId,
 ) -> Result<Option<(CqrsKind, SubjectId, Vec<u8>)>, DharmaError> {
+    if let Some(entry) = store.lookup_cqrs_by_assertion(assertion_id)? {
+        if let Some(bytes) = load_bytes_for_cqrs_entry(store, &entry)? {
+            let kind = if entry.is_overlay {
+                CqrsKind::OverlayAction
+            } else {
+                classify_assertion(&bytes)
+            };
+            return Ok(Some((kind, entry.subject, bytes)));
+        }
+    }
     for subject in store.list_subjects()? {
         if let Some(bytes) = find_assertion_by_id(store.env(), &subject, assertion_id)? {
             let kind = classify_assertion(&bytes);
@@ -879,7 +954,10 @@ fn append_overlays(
         };
         let ref_id = ObjectRef::Assertion(overlay_id);
         if sent.insert(ref_id.clone()) {
-            out.push(Obj { id: ref_id, bytes: payload });
+            out.push(Obj {
+                id: ref_id,
+                bytes: payload,
+            });
         }
     }
     Ok(())
@@ -899,11 +977,7 @@ fn classify_assertion(bytes: &[u8]) -> CqrsKind {
     CqrsKind::BaseAction
 }
 
-fn allow_overlay_for_subject(
-    overlay: &OverlayAccess,
-    store: &Store,
-    subject: &SubjectId,
-) -> bool {
+fn allow_overlay_for_subject(overlay: &OverlayAccess, store: &Store, subject: &SubjectId) -> bool {
     let namespace = subject_namespace(store, subject);
     overlay.allows(subject, namespace.as_deref())
 }
@@ -1046,8 +1120,14 @@ mod tests {
             since_seq: None,
         }]);
         let mut pending = HashSet::new();
-        let missing =
-            handle_inv(&inv, &store, &index, &mut pending, &access, &Subscriptions::all());
+        let missing = handle_inv(
+            &inv,
+            &store,
+            &index,
+            &mut pending,
+            &access,
+            &Subscriptions::all(),
+        );
         assert_eq!(missing, vec![ObjectRef::Assertion(overlay)]);
     }
 
@@ -1070,8 +1150,14 @@ mod tests {
             since_seq: None,
         }]);
         let mut pending = HashSet::new();
-        let missing =
-            handle_inv(&inv, &store, &index, &mut pending, &access, &Subscriptions::all());
+        let missing = handle_inv(
+            &inv,
+            &store,
+            &index,
+            &mut pending,
+            &access,
+            &Subscriptions::all(),
+        );
         assert!(missing.is_empty());
     }
 
@@ -1118,8 +1204,12 @@ mod tests {
             ..header1.clone()
         };
         let id2 = AssertionId::from_bytes([7u8; 32]);
-        index.update(id1, EnvelopeId::from_bytes(*id1.as_bytes()), &header1).unwrap();
-        index.update(id2, EnvelopeId::from_bytes(*id2.as_bytes()), &header2).unwrap();
+        index
+            .update(id1, EnvelopeId::from_bytes(*id1.as_bytes()), &header1)
+            .unwrap();
+        index
+            .update(id2, EnvelopeId::from_bytes(*id2.as_bytes()), &header2)
+            .unwrap();
 
         let policy = OverlayPolicy::from_str("default deny\n");
         let claims = crate::net::policy::PeerClaims::default();
@@ -1167,14 +1257,8 @@ mod tests {
         .unwrap();
         store.record_semantic(&base_id, &base_env).unwrap();
 
-        let overlay_bytes = action_assertion_bytes(
-            subject,
-            &signing_key,
-            1,
-            None,
-            vec![base_id],
-            true,
-        );
+        let overlay_bytes =
+            action_assertion_bytes(subject, &signing_key, 1, None, vec![base_id], true);
         let overlay_assertion = AssertionPlaintext::from_cbor(&overlay_bytes).unwrap();
         let overlay_id = overlay_assertion.assertion_id().unwrap();
         let overlay_env = crypto::envelope_id(&overlay_bytes);
@@ -1196,7 +1280,9 @@ mod tests {
         ));
         let claims = crate::net::policy::PeerClaims::default();
         let access = OverlayAccess::new(&policy, None, false, &claims);
-        let get = Get { ids: vec![ObjectRef::Assertion(base_id)] };
+        let get = Get {
+            ids: vec![ObjectRef::Assertion(base_id)],
+        };
         let out = handle_get(&store, get, &access, &Subscriptions::all()).unwrap();
         let ids = out.iter().map(|o| o.id.clone()).collect::<HashSet<_>>();
         assert!(ids.contains(&ObjectRef::Assertion(base_id)));
@@ -1207,7 +1293,9 @@ mod tests {
         let note_assertion = AssertionPlaintext::from_cbor(&note_bytes).unwrap();
         let note_id = note_assertion.assertion_id().unwrap();
         let note_env = crypto::envelope_id(&note_bytes);
-        store.put_assertion(&note_subject, &note_env, &note_bytes).unwrap();
+        store
+            .put_assertion(&note_subject, &note_env, &note_bytes)
+            .unwrap();
         append_assertion(
             store.env(),
             &note_subject,
@@ -1220,9 +1308,53 @@ mod tests {
         .unwrap();
         store.record_semantic(&note_id, &note_env).unwrap();
 
-        let get = Get { ids: vec![ObjectRef::Assertion(note_id)] };
+        let get = Get {
+            ids: vec![ObjectRef::Assertion(note_id)],
+        };
         let out = handle_get(&store, get, &access, &Subscriptions::all()).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].id, ObjectRef::Assertion(note_id));
+    }
+
+    #[test]
+    fn find_cqrs_object_uses_reverse_index_when_object_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::from_root(temp.path());
+        let mut rng = StdRng::seed_from_u64(17);
+        let (signing_key, _) = crypto::generate_identity_keypair(&mut rng);
+        let subject = SubjectId::from_bytes([33u8; 32]);
+
+        let bytes = action_assertion_bytes(subject, &signing_key, 1, None, Vec::new(), false);
+        let assertion = AssertionPlaintext::from_cbor(&bytes).unwrap();
+        let assertion_id = assertion.assertion_id().unwrap();
+        let envelope_id = crypto::envelope_id(&bytes);
+
+        store.put_assertion(&subject, &envelope_id, &bytes).unwrap();
+        append_assertion(
+            store.env(),
+            &subject,
+            1,
+            assertion_id,
+            envelope_id,
+            "Touch",
+            &bytes,
+        )
+        .unwrap();
+        store.record_semantic(&assertion_id, &envelope_id).unwrap();
+
+        let object_path = store
+            .objects_dir()
+            .join(format!("{}.obj", envelope_id.to_hex()));
+        store.env().remove_file(&object_path).unwrap();
+
+        let by_envelope = find_cqrs_object_by_envelope(&store, &envelope_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_envelope.1, subject);
+        assert_eq!(by_envelope.2, assertion_id);
+
+        let by_assertion = find_cqrs_object(&store, &assertion_id).unwrap().unwrap();
+        assert_eq!(by_assertion.1, subject);
+        assert_eq!(by_assertion.2, bytes);
     }
 }
