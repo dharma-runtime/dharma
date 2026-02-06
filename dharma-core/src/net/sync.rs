@@ -374,20 +374,22 @@ pub fn sync_loop_with(
                 );
                 if let Some(store) = &options.ad_store {
                     if ad.verify()? {
-                        if let Ok(mut guard) = store.lock() {
-                            guard.insert(ad);
-                        }
+                        let mut guard = store.lock().map_err(|_| {
+                            DharmaError::Validation("ad store lock poisoned".to_string())
+                        })?;
+                        guard.insert(ad);
                     }
                 }
             }
             SyncMessage::Ads(ads) => {
                 log_sync(&options, format!("sync: recv ads count={}", ads.ads.len()));
                 if let Some(store) = &options.ad_store {
-                    if let Ok(mut guard) = store.lock() {
-                        for ad in ads.ads {
-                            if ad.verify()? {
-                                guard.insert(ad);
-                            }
+                    let mut guard = store.lock().map_err(|_| {
+                        DharmaError::Validation("ad store lock poisoned".to_string())
+                    })?;
+                    for ad in ads.ads {
+                        if ad.verify()? {
+                            guard.insert(ad);
                         }
                     }
                 }
@@ -395,10 +397,10 @@ pub fn sync_loop_with(
             SyncMessage::GetAds(_) => {
                 log_sync(&options, "sync: recv getads");
                 if let Some(store) = &options.ad_store {
-                    let ads = store
-                        .lock()
-                        .map(|guard| guard.get_all().into_iter().map(|(_, ad)| ad).collect())
-                        .unwrap_or_default();
+                    let guard = store.lock().map_err(|_| {
+                        DharmaError::Validation("ad store lock poisoned".to_string())
+                    })?;
+                    let ads = guard.get_all().into_iter().map(|(_, ad)| ad).collect();
                     let msg = SyncMessage::Ads(Ads { ads });
                     send_msg(stream, &mut session, &msg)?;
                 }
@@ -872,6 +874,16 @@ fn find_cqrs_object_by_envelope(
     store: &Store,
     envelope_id: &EnvelopeId,
 ) -> Result<Option<(CqrsKind, SubjectId, AssertionId, Vec<u8>)>, DharmaError> {
+    if let Some(entry) = store.lookup_cqrs_by_envelope(envelope_id)? {
+        if let Some(bytes) = load_bytes_for_cqrs_entry(store, &entry)? {
+            let kind = if entry.is_overlay {
+                CqrsKind::OverlayAction
+            } else {
+                classify_assertion(&bytes)
+            };
+            return Ok(Some((kind, entry.subject, entry.assertion_id, bytes)));
+        }
+    }
     for subject in store.list_subjects()? {
         for record in list_assertions(store.env(), &subject)? {
             if record.envelope_id == *envelope_id {
@@ -900,10 +912,39 @@ enum CqrsKind {
     Other,
 }
 
+fn load_bytes_for_cqrs_entry(
+    store: &Store,
+    entry: &crate::store::state::CqrsReverseEntry,
+) -> Result<Option<Vec<u8>>, DharmaError> {
+    if let Some(bytes) = store.get_object_any(&entry.envelope_id)? {
+        return Ok(Some(bytes));
+    }
+    if entry.is_overlay {
+        if let Some(bytes) = find_overlay_by_id(store.env(), &entry.subject, &entry.assertion_id)? {
+            return Ok(Some(bytes));
+        }
+        return find_assertion_by_id(store.env(), &entry.subject, &entry.assertion_id);
+    }
+    if let Some(bytes) = find_assertion_by_id(store.env(), &entry.subject, &entry.assertion_id)? {
+        return Ok(Some(bytes));
+    }
+    find_overlay_by_id(store.env(), &entry.subject, &entry.assertion_id)
+}
+
 fn find_cqrs_object(
     store: &Store,
     assertion_id: &AssertionId,
 ) -> Result<Option<(CqrsKind, SubjectId, Vec<u8>)>, DharmaError> {
+    if let Some(entry) = store.lookup_cqrs_by_assertion(assertion_id)? {
+        if let Some(bytes) = load_bytes_for_cqrs_entry(store, &entry)? {
+            let kind = if entry.is_overlay {
+                CqrsKind::OverlayAction
+            } else {
+                classify_assertion(&bytes)
+            };
+            return Ok(Some((kind, entry.subject, bytes)));
+        }
+    }
     for subject in store.list_subjects()? {
         if let Some(bytes) = find_assertion_by_id(store.env(), &subject, assertion_id)? {
             let kind = classify_assertion(&bytes);
@@ -1299,5 +1340,47 @@ mod tests {
         let out = handle_get(&store, get, &access, &Subscriptions::all()).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].id, ObjectRef::Assertion(note_id));
+    }
+
+    #[test]
+    fn find_cqrs_object_uses_reverse_index_when_object_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::from_root(temp.path());
+        let mut rng = StdRng::seed_from_u64(17);
+        let (signing_key, _) = crypto::generate_identity_keypair(&mut rng);
+        let subject = SubjectId::from_bytes([33u8; 32]);
+
+        let bytes = action_assertion_bytes(subject, &signing_key, 1, None, Vec::new(), false);
+        let assertion = AssertionPlaintext::from_cbor(&bytes).unwrap();
+        let assertion_id = assertion.assertion_id().unwrap();
+        let envelope_id = crypto::envelope_id(&bytes);
+
+        store.put_assertion(&subject, &envelope_id, &bytes).unwrap();
+        append_assertion(
+            store.env(),
+            &subject,
+            1,
+            assertion_id,
+            envelope_id,
+            "Touch",
+            &bytes,
+        )
+        .unwrap();
+        store.record_semantic(&assertion_id, &envelope_id).unwrap();
+
+        let object_path = store
+            .objects_dir()
+            .join(format!("{}.obj", envelope_id.to_hex()));
+        store.env().remove_file(&object_path).unwrap();
+
+        let by_envelope = find_cqrs_object_by_envelope(&store, &envelope_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_envelope.1, subject);
+        assert_eq!(by_envelope.2, assertion_id);
+
+        let by_assertion = find_cqrs_object(&store, &assertion_id).unwrap().unwrap();
+        assert_eq!(by_assertion.1, subject);
+        assert_eq!(by_assertion.2, bytes);
     }
 }

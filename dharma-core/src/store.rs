@@ -1,10 +1,10 @@
 use crate::assertion::{is_overlay, AssertionPlaintext};
 use crate::cbor;
 use crate::contract::PermissionSummary;
-use crate::keys::Keyring;
-use crate::envelope::AssertionEnvelope;
 use crate::env::{Env, StdEnv};
+use crate::envelope::AssertionEnvelope;
 use crate::error::DharmaError;
+use crate::keys::Keyring;
 pub mod index;
 pub mod pending;
 pub mod state;
@@ -19,6 +19,14 @@ pub struct Store {
     env: Arc<dyn Env + Send + Sync>,
     verified_contracts: Arc<Mutex<HashMap<EnvelopeId, Vec<u8>>>>,
     permission_summaries: Arc<Mutex<HashMap<ContractId, Option<PermissionSummary>>>>,
+    cqrs_reverse_cache: Arc<Mutex<Option<CqrsReverseCache>>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CqrsReverseCache {
+    file_len: u64,
+    by_envelope: HashMap<EnvelopeId, state::CqrsReverseEntry>,
+    by_assertion: HashMap<AssertionId, state::CqrsReverseEntry>,
 }
 
 fn is_torn_write(err: &DharmaError) -> bool {
@@ -33,7 +41,11 @@ fn write_with_retry(env: &dyn Env, path: &Path, data: &[u8]) -> Result<(), Dharm
     }
 }
 
-fn read_cbor_with_retry(env: &dyn Env, path: &Path, attempts: usize) -> Result<Vec<u8>, DharmaError> {
+fn read_cbor_with_retry(
+    env: &dyn Env,
+    path: &Path,
+    attempts: usize,
+) -> Result<Vec<u8>, DharmaError> {
     let mut last_err: Option<DharmaError> = None;
     for i in 0..attempts {
         match env.read(path) {
@@ -62,8 +74,6 @@ pub(crate) fn looks_like_wasm(bytes: &[u8]) -> bool {
     bytes.len() >= 4 && bytes[..4] == [0x00, 0x61, 0x73, 0x6d]
 }
 
-
-
 impl Store {
     pub fn new<E>(env: &E) -> Self
     where
@@ -73,6 +83,7 @@ impl Store {
             env: Arc::new(env.clone()),
             verified_contracts: Arc::new(Mutex::new(HashMap::new())),
             permission_summaries: Arc::new(Mutex::new(HashMap::new())),
+            cqrs_reverse_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -106,7 +117,10 @@ impl Store {
         }
     }
 
-    fn cached_permission_summary(&self, contract: &ContractId) -> Option<Option<PermissionSummary>> {
+    fn cached_permission_summary(
+        &self,
+        contract: &ContractId,
+    ) -> Option<Option<PermissionSummary>> {
         let Ok(guard) = self.permission_summaries.lock() else {
             return None;
         };
@@ -129,7 +143,9 @@ impl Store {
         }
         let actual = crate::crypto::envelope_id(bytes);
         if &actual != envelope_id {
-            return Err(DharmaError::Validation("contract hash mismatch".to_string()));
+            return Err(DharmaError::Validation(
+                "contract hash mismatch".to_string(),
+            ));
         }
         self.cache_contract(*envelope_id, bytes.to_vec());
         Ok(())
@@ -142,7 +158,9 @@ impl Store {
         if let Some(bytes) = self.cached_contract(envelope_id) {
             return Ok(Some(bytes));
         }
-        let path = self.objects_dir().join(format!("{}.obj", envelope_id.to_hex()));
+        let path = self
+            .objects_dir()
+            .join(format!("{}.obj", envelope_id.to_hex()));
         if !self.env.exists(&path) {
             return Ok(None);
         }
@@ -154,9 +172,12 @@ impl Store {
                 self.cache_contract(*envelope_id, bytes.clone());
                 return Ok(Some(bytes));
             }
-            last_err = Some(DharmaError::Validation("contract hash mismatch".to_string()));
+            last_err = Some(DharmaError::Validation(
+                "contract hash mismatch".to_string(),
+            ));
         }
-        Err(last_err.unwrap_or_else(|| DharmaError::Validation("contract hash mismatch".to_string())))
+        Err(last_err
+            .unwrap_or_else(|| DharmaError::Validation("contract hash mismatch".to_string())))
     }
 
     pub fn objects_dir(&self) -> PathBuf {
@@ -169,6 +190,10 @@ impl Store {
 
     pub fn permission_summaries_dir(&self) -> PathBuf {
         self.indexes_dir().join("permission_summaries")
+    }
+
+    fn cqrs_reverse_path(&self) -> PathBuf {
+        self.indexes_dir().join("cqrs_reverse_v1.idx")
     }
 
     pub fn subjects_root(&self) -> PathBuf {
@@ -192,7 +217,9 @@ impl Store {
     }
 
     pub fn get_object(&self, envelope_id: &EnvelopeId) -> Result<Vec<u8>, DharmaError> {
-        let path = self.objects_dir().join(format!("{}.obj", envelope_id.to_hex()));
+        let path = self
+            .objects_dir()
+            .join(format!("{}.obj", envelope_id.to_hex()));
         read_cbor_with_retry(self.env.as_ref(), &path, 3)
     }
 
@@ -231,10 +258,7 @@ impl Store {
         }
         for path in self.env.list_dir(&root)? {
             if self.env.is_dir(&path) {
-                let name = path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
+                let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
                 if let Ok(subject) = SubjectId::from_hex(name) {
                     out.push(subject);
                 }
@@ -244,7 +268,9 @@ impl Store {
     }
 
     pub fn get_object_any(&self, envelope_id: &EnvelopeId) -> Result<Option<Vec<u8>>, DharmaError> {
-        let path = self.objects_dir().join(format!("{}.obj", envelope_id.to_hex()));
+        let path = self
+            .objects_dir()
+            .join(format!("{}.obj", envelope_id.to_hex()));
         if !self.env.exists(&path) {
             return Ok(None);
         }
@@ -281,6 +307,16 @@ impl Store {
             self.env.remove_dir_all(&subjects_root)?;
         }
         self.env.create_dir_all(&subjects_root)?;
+        let cqrs_reverse_path = self.cqrs_reverse_path();
+        if self.env.exists(&cqrs_reverse_path) {
+            self.env.remove_file(&cqrs_reverse_path)?;
+        }
+        {
+            let mut cache_guard = self.cqrs_reverse_cache.lock().map_err(|_| {
+                DharmaError::Validation("cqrs reverse cache lock poisoned".to_string())
+            })?;
+            *cache_guard = Some(CqrsReverseCache::default());
+        }
 
         for envelope_id in self.list_objects()? {
             let Some(bytes) = self.get_object_any(&envelope_id)? else {
@@ -352,7 +388,10 @@ impl Store {
         Ok(())
     }
 
-    pub fn lookup_envelope(&self, assertion_id: &AssertionId) -> Result<Option<EnvelopeId>, DharmaError> {
+    pub fn lookup_envelope(
+        &self,
+        assertion_id: &AssertionId,
+    ) -> Result<Option<EnvelopeId>, DharmaError> {
         let path = self.indexes_dir().join("semantic_v2.idx");
         if !self.env.exists(&path) {
             return Ok(None);
@@ -368,6 +407,80 @@ impl Store {
             }
         }
         Ok(None)
+    }
+
+    fn load_cqrs_reverse_cache(&self, file_len: u64) -> Result<CqrsReverseCache, DharmaError> {
+        let mut cache = CqrsReverseCache {
+            file_len,
+            by_envelope: HashMap::new(),
+            by_assertion: HashMap::new(),
+        };
+        for entry in state::read_cqrs_reverse_entries(self.env.as_ref())? {
+            cache.by_envelope.insert(entry.envelope_id, entry);
+            cache.by_assertion.insert(entry.assertion_id, entry);
+        }
+        Ok(cache)
+    }
+
+    fn merge_cqrs_reverse_entries(
+        cache: &mut CqrsReverseCache,
+        entries: Vec<state::CqrsReverseEntry>,
+    ) {
+        for entry in entries {
+            cache.by_envelope.insert(entry.envelope_id, entry);
+            cache.by_assertion.insert(entry.assertion_id, entry);
+        }
+    }
+
+    fn lookup_cqrs_reverse(
+        &self,
+        lookup: impl Fn(&CqrsReverseCache) -> Option<state::CqrsReverseEntry>,
+    ) -> Result<Option<state::CqrsReverseEntry>, DharmaError> {
+        let mut guard = self
+            .cqrs_reverse_cache
+            .lock()
+            .map_err(|_| DharmaError::Validation("cqrs reverse cache lock poisoned".to_string()))?;
+        let path = self.cqrs_reverse_path();
+        if !self.env.exists(&path) {
+            *guard = Some(CqrsReverseCache::default());
+            return Ok(None);
+        }
+        let file_len = self.env.file_len(&path)?;
+        if let Some(cache) = guard.as_mut() {
+            if cache.file_len == file_len {
+                return Ok(lookup(cache));
+            }
+            if cache.file_len < file_len {
+                let delta =
+                    state::read_cqrs_reverse_entries_since(self.env.as_ref(), cache.file_len)?;
+                Self::merge_cqrs_reverse_entries(cache, delta);
+                cache.file_len = file_len;
+                return Ok(lookup(cache));
+            }
+            let rebuilt = self.load_cqrs_reverse_cache(file_len)?;
+            let out = lookup(&rebuilt);
+            *guard = Some(rebuilt);
+            return Ok(out);
+        }
+
+        let rebuilt = self.load_cqrs_reverse_cache(file_len)?;
+        let out = lookup(&rebuilt);
+        *guard = Some(rebuilt);
+        Ok(out)
+    }
+
+    pub fn lookup_cqrs_by_envelope(
+        &self,
+        envelope_id: &EnvelopeId,
+    ) -> Result<Option<state::CqrsReverseEntry>, DharmaError> {
+        self.lookup_cqrs_reverse(|cache| cache.by_envelope.get(envelope_id).copied())
+    }
+
+    pub fn lookup_cqrs_by_assertion(
+        &self,
+        assertion_id: &AssertionId,
+    ) -> Result<Option<state::CqrsReverseEntry>, DharmaError> {
+        self.lookup_cqrs_reverse(|cache| cache.by_assertion.get(assertion_id).copied())
     }
 
     pub fn put_permission_summary(&self, summary: &PermissionSummary) -> Result<(), DharmaError> {
@@ -408,10 +521,7 @@ impl Store {
     }
 }
 
-fn decode_assertion(
-    bytes: &[u8],
-    keys: &Keyring,
-) -> Option<AssertionPlaintext> {
+fn decode_assertion(bytes: &[u8], keys: &Keyring) -> Option<AssertionPlaintext> {
     if let Ok(envelope) = AssertionEnvelope::from_cbor(bytes) {
         if let Some(key) = keys.key_for_kid(&envelope.kid) {
             if let Ok(plaintext) = crate::envelope::decrypt_assertion(&envelope, key) {
@@ -428,12 +538,12 @@ fn decode_assertion(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto;
     use crate::assertion::{AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION};
+    use crate::crypto;
     use crate::envelope;
-    use crate::types::Nonce12;
     use crate::envelope::AssertionEnvelope;
-    use crate::store::state::append_assertion;
+    use crate::store::state::{append_assertion, append_overlay};
+    use crate::types::Nonce12;
     use crate::types::{ContractId, IdentityKey, SchemaId};
     use ciborium::value::Value;
     use rand::rngs::StdRng;
@@ -591,7 +701,9 @@ mod tests {
         )
         .unwrap();
         let envelope_id = envelope.envelope_id().unwrap();
-        store.put_object(&envelope_id, &envelope.to_cbor().unwrap()).unwrap();
+        store
+            .put_object(&envelope_id, &envelope.to_cbor().unwrap())
+            .unwrap();
 
         let mut keys_map = HashMap::new();
         keys_map.insert(subject, subject_key);
@@ -606,5 +718,152 @@ mod tests {
         assert_eq!(records[0].envelope_id, envelope_id);
         let decoded = AssertionPlaintext::from_cbor(&records[0].bytes).unwrap();
         assert_eq!(decoded.header.seq, 1);
+    }
+
+    #[test]
+    fn rebuild_subject_views_clears_cqrs_reverse_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::from_root(temp.path());
+        let mut rng = StdRng::seed_from_u64(101);
+        let mut subject_key = [0u8; 32];
+        rng.fill_bytes(&mut subject_key);
+        let (signing_key, _) = crypto::generate_identity_keypair(&mut rng);
+        let subject = SubjectId::from_bytes([10u8; 32]);
+        let header = AssertionHeader {
+            v: crypto::PROTOCOL_VERSION,
+            ver: DEFAULT_DATA_VERSION,
+            sub: subject,
+            typ: "note.text".to_string(),
+            auth: IdentityKey::from_bytes(signing_key.verifying_key().to_bytes()),
+            seq: 1,
+            prev: None,
+            refs: Vec::new(),
+            ts: None,
+            schema: SchemaId::from_bytes([1u8; 32]),
+            contract: ContractId::from_bytes([2u8; 32]),
+            note: None,
+            meta: None,
+        };
+        let assertion = AssertionPlaintext::sign(header, Value::Null, &signing_key).unwrap();
+        let plaintext = assertion.to_cbor().unwrap();
+        let kid = crypto::key_id_from_key(&subject_key);
+        let envelope = envelope::encrypt_assertion(
+            &plaintext,
+            kid,
+            &subject_key,
+            Nonce12::from_bytes([2u8; 12]),
+        )
+        .unwrap();
+        let envelope_id = envelope.envelope_id().unwrap();
+        store
+            .put_object(&envelope_id, &envelope.to_cbor().unwrap())
+            .unwrap();
+
+        let mut keys_map = HashMap::new();
+        keys_map.insert(subject, subject_key);
+        let keys = Keyring::from_subject_keys(&keys_map);
+        store.rebuild_subject_views(&keys).unwrap();
+        store.rebuild_subject_views(&keys).unwrap();
+
+        let entries = state::read_cqrs_reverse_entries(store.env()).unwrap();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn lookup_cqrs_reverse_updates_when_index_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::from_root(temp.path());
+        let subject = SubjectId::from_bytes([10u8; 32]);
+        let mut rng = StdRng::seed_from_u64(88);
+        let (signing_key, _) = crypto::generate_identity_keypair(&mut rng);
+
+        let base_header = AssertionHeader {
+            v: crypto::PROTOCOL_VERSION,
+            ver: DEFAULT_DATA_VERSION,
+            sub: subject,
+            typ: "note.text".to_string(),
+            auth: IdentityKey::from_bytes(signing_key.verifying_key().to_bytes()),
+            seq: 1,
+            prev: None,
+            refs: Vec::new(),
+            ts: None,
+            schema: SchemaId::from_bytes([1u8; 32]),
+            contract: ContractId::from_bytes([2u8; 32]),
+            note: None,
+            meta: None,
+        };
+        let base_assertion =
+            AssertionPlaintext::sign(base_header, Value::Null, &signing_key).unwrap();
+        let base_bytes = base_assertion.to_cbor().unwrap();
+        let base_id = base_assertion.assertion_id().unwrap();
+        let base_env = crypto::envelope_id(&base_bytes);
+        store
+            .put_assertion(&subject, &base_env, &base_bytes)
+            .unwrap();
+        store.record_semantic(&base_id, &base_env).unwrap();
+        append_assertion(
+            store.env(),
+            &subject,
+            1,
+            base_id,
+            base_env,
+            "note.text",
+            &base_bytes,
+        )
+        .unwrap();
+
+        let first = store.lookup_cqrs_by_envelope(&base_env).unwrap().unwrap();
+        assert_eq!(first.assertion_id, base_id);
+        assert_eq!(first.subject, subject);
+        assert!(!first.is_overlay);
+
+        let overlay_header = AssertionHeader {
+            v: crypto::PROTOCOL_VERSION,
+            ver: DEFAULT_DATA_VERSION,
+            sub: subject,
+            typ: "action.Touch".to_string(),
+            auth: IdentityKey::from_bytes(signing_key.verifying_key().to_bytes()),
+            seq: 2,
+            prev: Some(base_id),
+            refs: vec![base_id],
+            ts: None,
+            schema: SchemaId::from_bytes([1u8; 32]),
+            contract: ContractId::from_bytes([2u8; 32]),
+            note: None,
+            meta: None,
+        };
+        let overlay_assertion =
+            AssertionPlaintext::sign(overlay_header, Value::Null, &signing_key).unwrap();
+        let overlay_bytes = overlay_assertion.to_cbor().unwrap();
+        let overlay_id = overlay_assertion.assertion_id().unwrap();
+        let overlay_env = crypto::envelope_id(&overlay_bytes);
+        store
+            .put_assertion(&subject, &overlay_env, &overlay_bytes)
+            .unwrap();
+        store.record_semantic(&overlay_id, &overlay_env).unwrap();
+        append_overlay(
+            store.env(),
+            &subject,
+            2,
+            overlay_id,
+            overlay_env,
+            "Touch",
+            &overlay_bytes,
+        )
+        .unwrap();
+
+        let second = store
+            .lookup_cqrs_by_envelope(&overlay_env)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.assertion_id, overlay_id);
+        assert_eq!(second.subject, subject);
+        assert!(second.is_overlay);
+
+        let by_assertion = store
+            .lookup_cqrs_by_assertion(&overlay_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_assertion.envelope_id, overlay_env);
     }
 }
