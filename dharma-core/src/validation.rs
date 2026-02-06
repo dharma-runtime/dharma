@@ -6,6 +6,7 @@ use crate::schema::SchemaManifest;
 use crate::types::{AssertionId, SubjectId};
 use ciborium::value::Value;
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StructuralStatus {
@@ -147,8 +148,8 @@ pub fn validate_subject(
     let mut accepted = Vec::new();
     let mut pending = Vec::new();
     let mut rejected = Vec::new();
-    let mut accepted_assertions: Vec<AssertionPlaintext> = Vec::new();
-    let mut accepted_map: HashMap<AssertionId, AssertionPlaintext> = HashMap::new();
+    let mut accepted_assertions: Vec<Arc<AssertionPlaintext>> = Vec::new();
+    let mut accepted_map: HashMap<AssertionId, Arc<AssertionPlaintext>> = HashMap::new();
 
     for id in order {
         let assertion = assertions.get(&id).ok_or_else(|| DharmaError::Validation("missing assertion".to_string()))?;
@@ -178,8 +179,9 @@ pub fn validate_subject(
         match result.status {
             ContractStatus::Accept if result.ok => {
                 accepted.push(id);
-                accepted_assertions.push(assertion.clone());
-                accepted_map.insert(id, assertion.clone());
+                let shared_assertion = Arc::new(assertion.clone());
+                accepted_assertions.push(Arc::clone(&shared_assertion));
+                accepted_map.insert(id, shared_assertion);
             }
             ContractStatus::Pending => pending.push(id),
             _ => rejected.push(id),
@@ -191,8 +193,8 @@ pub fn validate_subject(
 
 fn build_context(
     subject: &SubjectId,
-    accepted: &[AssertionPlaintext],
-    accepted_map: &HashMap<AssertionId, AssertionPlaintext>,
+    accepted: &[Arc<AssertionPlaintext>],
+    accepted_map: &HashMap<AssertionId, Arc<AssertionPlaintext>>,
     current: &AssertionPlaintext,
 ) -> Value {
     let accepted_values = accepted
