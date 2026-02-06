@@ -540,6 +540,7 @@ fn is_graceful_close(msg: &str) -> bool {
 fn is_relay_admission_rejection(reason: &str) -> bool {
     reason.starts_with("relay policy:")
         || reason.starts_with("relay auth:")
+        || reason.starts_with("relay usage:")
         || reason == "relay identity not authorized for relay domain"
         || reason == "relay quota exceeded"
         || reason == "relay object quota exceeded"
@@ -1252,6 +1253,7 @@ mod tests {
             "relay policy: validation error: missing domain ownership"
         ));
         assert!(is_relay_admission_rejection("relay auth: unavailable"));
+        assert!(is_relay_admission_rejection("relay usage: io error"));
         assert!(is_relay_admission_rejection(
             "relay identity not authorized for relay domain"
         ));

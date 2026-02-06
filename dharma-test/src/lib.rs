@@ -1795,10 +1795,11 @@ fn sync_pair_real(
     });
 
     let deadline = Instant::now() + timeout;
+    let mut sync_result: Result<(), String> = Ok(());
     while ready.load(Ordering::SeqCst) < 2 {
         if Instant::now() >= deadline {
-            control.close();
-            return Err("sync timeout".to_string());
+            sync_result = Err("sync timeout".to_string());
+            break;
         }
         if hub.has_pending_between(a.id, b.id) || hub.has_pending_between(b.id, a.id) {
             touch_log();
@@ -1809,44 +1810,45 @@ fn sync_pair_real(
 
     let quiet = Duration::from_millis(50);
     let mut quiet_since: Option<Instant> = None;
-    let mut activity_seen = false;
-    loop {
-        if Instant::now() >= deadline {
-            control.close();
-            return Err("sync timeout".to_string());
-        }
-        if log_stale(Duration::from_secs(10)) {
-            control.close();
-            return Err("no activity for 10s".to_string());
-        }
-        let pending =
-            hub.has_pending_between(a.id, b.id) || hub.has_pending_between(b.id, a.id);
-        if pending {
-            activity_seen = true;
-            touch_log();
-            quiet_since = None;
-        } else if activity_seen {
-            if let Some(since) = quiet_since {
+    if sync_result.is_ok() {
+        loop {
+            if Instant::now() >= deadline {
+                sync_result = Err("sync timeout".to_string());
+                break;
+            }
+            if log_stale(Duration::from_secs(10)) {
+                sync_result = Err("no activity for 10s".to_string());
+                break;
+            }
+            let pending =
+                hub.has_pending_between(a.id, b.id) || hub.has_pending_between(b.id, a.id);
+            if pending {
+                touch_log();
+                quiet_since = None;
+            } else if let Some(since) = quiet_since {
                 if since.elapsed() >= quiet {
                     break;
                 }
             } else {
                 quiet_since = Some(Instant::now());
             }
+            thread::yield_now();
         }
-        thread::yield_now();
     }
     control.close();
     let join_deadline = Instant::now() + timeout;
     while !thread_a.is_finished() || !thread_b.is_finished() {
         if Instant::now() >= join_deadline {
-            return Err("sync timeout".to_string());
+            return Err(sync_result
+                .err()
+                .unwrap_or_else(|| "sync timeout".to_string()));
         }
         thread::yield_now();
     }
     let res_a = thread_a.join().map_err(|_| "sync thread A failed".to_string())?;
-    res_a?;
     let res_b = thread_b.join().map_err(|_| "sync thread B failed".to_string())?;
+    sync_result?;
+    res_a?;
     res_b?;
     Ok(())
 }
