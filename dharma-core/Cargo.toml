@@ -8,6 +8,7 @@ compiler = []
 dharmaq = ["dep:byteorder", "dep:memmap2"]
 vault-s3 = ["dep:aws-config", "dep:aws-sdk-s3", "dep:aws-types", "dep:tokio"]
 vault-arweave = ["dep:reqwest", "dep:serde_json"]
+fuzzing = []
 
 [dependencies]
 ciborium = { version = "0.2", default-features = false, features = ["std"] }

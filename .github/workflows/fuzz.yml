@@ -1,0 +1,69 @@
+name: Fuzz
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/fuzz.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "dharma-core/**"
+  push:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/fuzz.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "dharma-core/**"
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  cargo-fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run fuzz targets
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            MAX_TOTAL_TIME=300
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            MAX_TOTAL_TIME=60
+          else
+            MAX_TOTAL_TIME=20
+          fi
+
+          targets=(
+            cbor_ensure_canonical
+            cbor_decode_value
+            assertion_plaintext_from_cbor
+            assertion_envelope_from_cbor
+            handshake_decode_plain_frame
+            handshake_session_decrypt
+            contract_parse_contract_result
+            sync_message_from_cbor
+          )
+
+          pushd dharma-core/fuzz
+          for target in "${targets[@]}"; do
+            echo "Running ${target} for ${MAX_TOTAL_TIME}s"
+            cargo fuzz run "${target}" -- \
+              -max_total_time="${MAX_TOTAL_TIME}" \
+              -rss_limit_mb=4096
+          done
+          popd

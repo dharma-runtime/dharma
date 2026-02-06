@@ -183,6 +183,12 @@ fn decode_plain_frame(bytes: &[u8]) -> Result<PlainFrame, DharmaError> {
     Ok(PlainFrame { t, payload })
 }
 
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_decode_plain_frame(bytes: &[u8]) -> Result<(), DharmaError> {
+    decode_plain_frame(bytes).map(|_| ())
+}
+
 struct PlainFrame {
     t: u8,
     payload: Vec<u8>,
