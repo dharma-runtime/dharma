@@ -33,6 +33,7 @@ fs2 = "0.4"
 byteorder = { version = "1.5", optional = true }
 crc32fast = { version = "1.4" }
 memmap2 = { version = "0.9", optional = true }
+tracing = "0.1"
 
 [dev-dependencies]
 wat = "1.0"
