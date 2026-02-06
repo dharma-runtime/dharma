@@ -2,7 +2,7 @@ use crate::cbor;
 use crate::error::DharmaError;
 use crate::fabric::types::Advertisement;
 use crate::types::{AssertionId, EnvelopeId, HpkePublicKey, IdentityKey, SubjectId};
-use crate::value::{expect_array, expect_bytes, expect_map, expect_text, expect_uint, map_get};
+use crate::value::{expect_array, expect_map, expect_text, expect_uint, expect_bytes, map_get};
 use ciborium::value::Value;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -122,12 +122,7 @@ impl Hello {
             ),
             (
                 Value::Text("suites".to_string()),
-                Value::Array(
-                    self.suites
-                        .iter()
-                        .map(|s| Value::Integer((*s).into()))
-                        .collect(),
-                ),
+                Value::Array(self.suites.iter().map(|s| Value::Integer((*s).into())).collect()),
             ),
             (
                 Value::Text("caps".to_string()),
@@ -153,18 +148,15 @@ impl Hello {
 impl Inventory {
     fn to_value(&self) -> Value {
         match self {
-            Inventory::Subjects(subjects) => Value::Map(vec![(
-                Value::Text("subjects".to_string()),
-                Value::Array(subjects.iter().map(|s| s.to_value()).collect()),
-            )]),
+            Inventory::Subjects(subjects) => {
+                Value::Map(vec![(
+                    Value::Text("subjects".to_string()),
+                    Value::Array(subjects.iter().map(|s| s.to_value()).collect()),
+                )])
+            }
             Inventory::Objects(objects) => Value::Map(vec![(
                 Value::Text("objects".to_string()),
-                Value::Array(
-                    objects
-                        .iter()
-                        .map(|o| Value::Bytes(o.as_bytes().to_vec()))
-                        .collect(),
-                ),
+                Value::Array(objects.iter().map(|o| Value::Bytes(o.as_bytes().to_vec())).collect()),
             )]),
         }
     }
@@ -173,10 +165,7 @@ impl Inventory {
 impl SubjectInventory {
     fn to_value(&self) -> Value {
         let mut entries = vec![
-            (
-                Value::Text("sub".to_string()),
-                Value::Bytes(self.sub.as_bytes().to_vec()),
-            ),
+            (Value::Text("sub".to_string()), Value::Bytes(self.sub.as_bytes().to_vec())),
             (
                 Value::Text("frontier".to_string()),
                 Value::Array(
@@ -212,24 +201,12 @@ impl ObjectRef {
     fn to_value(&self) -> Value {
         match self {
             ObjectRef::Assertion(id) => Value::Map(vec![
-                (
-                    Value::Text("t".to_string()),
-                    Value::Text("assertion".to_string()),
-                ),
-                (
-                    Value::Text("id".to_string()),
-                    Value::Bytes(id.as_bytes().to_vec()),
-                ),
+                (Value::Text("t".to_string()), Value::Text("assertion".to_string())),
+                (Value::Text("id".to_string()), Value::Bytes(id.as_bytes().to_vec())),
             ]),
             ObjectRef::Envelope(id) => Value::Map(vec![
-                (
-                    Value::Text("t".to_string()),
-                    Value::Text("envelope".to_string()),
-                ),
-                (
-                    Value::Text("id".to_string()),
-                    Value::Bytes(id.as_bytes().to_vec()),
-                ),
+                (Value::Text("t".to_string()), Value::Text("envelope".to_string())),
+                (Value::Text("id".to_string()), Value::Bytes(id.as_bytes().to_vec())),
             ]),
         }
     }
@@ -237,11 +214,10 @@ impl ObjectRef {
     fn from_value(value: &Value) -> Result<Self, DharmaError> {
         let map = expect_map(value)?;
         let kind = expect_text(
-            map_get(map, "t")
-                .ok_or_else(|| DharmaError::Validation("missing ref type".to_string()))?,
+            map_get(map, "t").ok_or_else(|| DharmaError::Validation("missing ref type".to_string()))?,
         )?;
-        let id_val = map_get(map, "id")
-            .ok_or_else(|| DharmaError::Validation("missing ref id".to_string()))?;
+        let id_val =
+            map_get(map, "id").ok_or_else(|| DharmaError::Validation("missing ref id".to_string()))?;
         let bytes = expect_bytes(id_val)?;
         match kind.as_str() {
             "assertion" => Ok(ObjectRef::Assertion(AssertionId::from_slice(&bytes)?)),
@@ -294,12 +270,7 @@ impl Subscriptions {
         if !self.namespaces.is_empty() {
             entries.push((
                 Value::Text("namespaces".to_string()),
-                Value::Array(
-                    self.namespaces
-                        .iter()
-                        .map(|n| Value::Text(n.clone()))
-                        .collect(),
-                ),
+                Value::Array(self.namespaces.iter().map(|n| Value::Text(n.clone())).collect()),
             ));
         }
         Value::Map(entries)
@@ -319,10 +290,7 @@ impl Obj {
     fn to_value(&self) -> Value {
         Value::Map(vec![
             (Value::Text("id".to_string()), self.id.to_value()),
-            (
-                Value::Text("bytes".to_string()),
-                Value::Bytes(self.bytes.clone()),
-            ),
+            (Value::Text("bytes".to_string()), Value::Bytes(self.bytes.clone())),
         ])
     }
 }
@@ -353,9 +321,7 @@ impl ErrMsg {
 
 fn parse_message(value: &Value) -> Result<SyncMessage, DharmaError> {
     let map = expect_map(value)?;
-    let t = expect_text(
-        map_get(map, "t").ok_or_else(|| DharmaError::Validation("missing t".to_string()))?,
-    )?;
+    let t = expect_text(map_get(map, "t").ok_or_else(|| DharmaError::Validation("missing t".to_string()))?)?;
     let p = map_get(map, "p").ok_or_else(|| DharmaError::Validation("missing p".to_string()))?;
     match t.as_str() {
         "hello" => Ok(SyncMessage::Hello(parse_hello(p)?)),
@@ -372,26 +338,16 @@ fn parse_message(value: &Value) -> Result<SyncMessage, DharmaError> {
 
 fn parse_hello(value: &Value) -> Result<Hello, DharmaError> {
     let map = expect_map(value)?;
-    let v = expect_uint(
-        map_get(map, "v").ok_or_else(|| DharmaError::Validation("missing v".to_string()))?,
-    )?;
-    let peer = expect_bytes(
-        map_get(map, "peer_id")
-            .ok_or_else(|| DharmaError::Validation("missing peer_id".to_string()))?,
-    )?;
-    let hpke = expect_bytes(
-        map_get(map, "hpke_pk")
-            .ok_or_else(|| DharmaError::Validation("missing hpke_pk".to_string()))?,
-    )?;
-    let suites_val = map_get(map, "suites")
-        .ok_or_else(|| DharmaError::Validation("missing suites".to_string()))?;
+    let v = expect_uint(map_get(map, "v").ok_or_else(|| DharmaError::Validation("missing v".to_string()))?)?;
+    let peer = expect_bytes(map_get(map, "peer_id").ok_or_else(|| DharmaError::Validation("missing peer_id".to_string()))?)?;
+    let hpke = expect_bytes(map_get(map, "hpke_pk").ok_or_else(|| DharmaError::Validation("missing hpke_pk".to_string()))?)?;
+    let suites_val = map_get(map, "suites").ok_or_else(|| DharmaError::Validation("missing suites".to_string()))?;
     let suites_array = expect_array(suites_val)?;
     let mut suites = Vec::new();
     for item in suites_array {
         suites.push(expect_uint(item)?);
     }
-    let caps_val =
-        map_get(map, "caps").ok_or_else(|| DharmaError::Validation("missing caps".to_string()))?;
+    let caps_val = map_get(map, "caps").ok_or_else(|| DharmaError::Validation("missing caps".to_string()))?;
     let caps_array = expect_array(caps_val)?;
     let mut caps = Vec::new();
     for item in caps_array {
@@ -468,11 +424,8 @@ fn parse_inventory(value: &Value) -> Result<Inventory, DharmaError> {
 
 fn parse_subject_inventory(value: &Value) -> Result<SubjectInventory, DharmaError> {
     let map = expect_map(value)?;
-    let sub_bytes = expect_bytes(
-        map_get(map, "sub").ok_or_else(|| DharmaError::Validation("missing sub".to_string()))?,
-    )?;
-    let frontier_val = map_get(map, "frontier")
-        .ok_or_else(|| DharmaError::Validation("missing frontier".to_string()))?;
+    let sub_bytes = expect_bytes(map_get(map, "sub").ok_or_else(|| DharmaError::Validation("missing sub".to_string()))?)?;
+    let frontier_val = map_get(map, "frontier").ok_or_else(|| DharmaError::Validation("missing frontier".to_string()))?;
     let frontier_array = expect_array(frontier_val)?;
     let mut frontier = Vec::new();
     for item in frontier_array {
@@ -500,8 +453,7 @@ fn parse_subject_inventory(value: &Value) -> Result<SubjectInventory, DharmaErro
 
 fn parse_get(value: &Value) -> Result<Get, DharmaError> {
     let map = expect_map(value)?;
-    let ids_val =
-        map_get(map, "ids").ok_or_else(|| DharmaError::Validation("missing ids".to_string()))?;
+    let ids_val = map_get(map, "ids").ok_or_else(|| DharmaError::Validation("missing ids".to_string()))?;
     let ids_array = expect_array(ids_val)?;
     let mut ids = Vec::new();
     for item in ids_array {
@@ -512,12 +464,8 @@ fn parse_get(value: &Value) -> Result<Get, DharmaError> {
 
 fn parse_obj(value: &Value) -> Result<Obj, DharmaError> {
     let map = expect_map(value)?;
-    let id_val =
-        map_get(map, "id").ok_or_else(|| DharmaError::Validation("missing id".to_string()))?;
-    let bytes = expect_bytes(
-        map_get(map, "bytes")
-            .ok_or_else(|| DharmaError::Validation("missing bytes".to_string()))?,
-    )?;
+    let id_val = map_get(map, "id").ok_or_else(|| DharmaError::Validation("missing id".to_string()))?;
+    let bytes = expect_bytes(map_get(map, "bytes").ok_or_else(|| DharmaError::Validation("missing bytes".to_string()))?)?;
     Ok(Obj {
         id: ObjectRef::from_value(id_val)?,
         bytes,
@@ -530,8 +478,7 @@ fn parse_ad(value: &Value) -> Result<Advertisement, DharmaError> {
 
 fn parse_ads(value: &Value) -> Result<Ads, DharmaError> {
     let map = expect_map(value)?;
-    let ads_val =
-        map_get(map, "ads").ok_or_else(|| DharmaError::Validation("missing ads".to_string()))?;
+    let ads_val = map_get(map, "ads").ok_or_else(|| DharmaError::Validation("missing ads".to_string()))?;
     let ads_array = expect_array(ads_val)?;
     let mut ads = Vec::with_capacity(ads_array.len());
     for item in ads_array {
@@ -542,10 +489,7 @@ fn parse_ads(value: &Value) -> Result<Ads, DharmaError> {
 
 fn parse_err(value: &Value) -> Result<ErrMsg, DharmaError> {
     let map = expect_map(value)?;
-    let message = expect_text(
-        map_get(map, "message")
-            .ok_or_else(|| DharmaError::Validation("missing message".to_string()))?,
-    )?;
+    let message = expect_text(map_get(map, "message").ok_or_else(|| DharmaError::Validation("missing message".to_string()))?)?;
     Ok(ErrMsg { message })
 }
 
@@ -589,7 +533,7 @@ mod tests {
 
     #[test]
     fn inv_objects_roundtrip() {
-        let msg = SyncMessage::Inv(Inventory::Objects(vec![EnvelopeId::from_bytes([5u8; 32])]));
+        let msg = SyncMessage::Inv(Inventory::Objects(vec![EnvelopeId::from_bytes([5u8; 32])])) ;
         let bytes = msg.to_cbor().unwrap();
         let parsed = SyncMessage::from_cbor(&bytes).unwrap();
         assert_eq!(msg, parsed);
@@ -621,9 +565,7 @@ mod tests {
 
     #[test]
     fn err_roundtrip() {
-        let msg = SyncMessage::Err(ErrMsg {
-            message: "oops".to_string(),
-        });
+        let msg = SyncMessage::Err(ErrMsg { message: "oops".to_string() });
         let bytes = msg.to_cbor().unwrap();
         let parsed = SyncMessage::from_cbor(&bytes).unwrap();
         assert_eq!(msg, parsed);

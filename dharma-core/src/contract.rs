@@ -8,16 +8,33 @@ use crate::runtime::remote;
 use crate::runtime::vm::VmLimits;
 use crate::types::{ContractId, SubjectId};
 use crate::value::{
-    expect_array, expect_bool, expect_bytes, expect_int, expect_map, expect_text, expect_uint,
+    expect_array,
+    expect_bool,
+    expect_bytes,
+    expect_int,
+    expect_map,
+    expect_text,
+    expect_uint,
     map_get,
 };
 use ciborium::value::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use wasmi::core::{Trap, TrapCode};
 use wasmi::{
-    Caller, Config, Engine, Extern, FuelConsumptionMode, Instance, Linker, Memory, Module, Store,
-    StoreLimits, StoreLimitsBuilder, TypedFunc,
+    Caller,
+    Config,
+    Engine,
+    Extern,
+    FuelConsumptionMode,
+    Instance,
+    Linker,
+    Memory,
+    Module,
+    Store,
+    StoreLimits,
+    StoreLimitsBuilder,
+    TypedFunc,
 };
+use wasmi::core::{Trap, TrapCode};
 
 const MAX_ROLE_LEN: usize = 128;
 const MAX_PATH_LEN: usize = 256;
@@ -178,36 +195,15 @@ impl PermissionSummary {
         let public = Value::Map(vec![
             (
                 Value::Text("actions".to_string()),
-                Value::Array(
-                    self.public
-                        .actions
-                        .iter()
-                        .cloned()
-                        .map(Value::Text)
-                        .collect(),
-                ),
+                Value::Array(self.public.actions.iter().cloned().map(Value::Text).collect()),
             ),
             (
                 Value::Text("queries".to_string()),
-                Value::Array(
-                    self.public
-                        .queries
-                        .iter()
-                        .cloned()
-                        .map(Value::Text)
-                        .collect(),
-                ),
+                Value::Array(self.public.queries.iter().cloned().map(Value::Text).collect()),
             ),
             (
                 Value::Text("scopes".to_string()),
-                Value::Array(
-                    self.public
-                        .scopes
-                        .iter()
-                        .cloned()
-                        .map(Value::Text)
-                        .collect(),
-                ),
+                Value::Array(self.public.scopes.iter().cloned().map(Value::Text).collect()),
             ),
         ]);
         Value::Map(vec![
@@ -216,35 +212,26 @@ impl PermissionSummary {
                 Value::Text("contract".to_string()),
                 Value::Bytes(self.contract.as_bytes().to_vec()),
             ),
-            (
-                Value::Text("ver".to_string()),
-                Value::Integer(self.ver.into()),
-            ),
+            (Value::Text("ver".to_string()), Value::Integer(self.ver.into())),
             (Value::Text("actions".to_string()), Value::Map(actions)),
             (Value::Text("queries".to_string()), Value::Map(queries)),
-            (
-                Value::Text("role_scopes".to_string()),
-                Value::Map(role_scopes),
-            ),
+            (Value::Text("role_scopes".to_string()), Value::Map(role_scopes)),
             (Value::Text("public".to_string()), public),
         ])
     }
 
     pub fn from_value(value: &Value) -> Result<Self, DharmaError> {
         let map = expect_map(value)?;
-        let v = expect_uint(
-            map_get(map, "v")
-                .ok_or_else(|| DharmaError::Validation("missing summary version".to_string()))?,
-        )?;
-        let contract_bytes = crate::value::expect_bytes(
-            map_get(map, "contract")
-                .ok_or_else(|| DharmaError::Validation("missing summary contract".to_string()))?,
-        )?;
+        let v = expect_uint(map_get(map, "v").ok_or_else(|| {
+            DharmaError::Validation("missing summary version".to_string())
+        })?)?;
+        let contract_bytes = crate::value::expect_bytes(map_get(map, "contract").ok_or_else(|| {
+            DharmaError::Validation("missing summary contract".to_string())
+        })?)?;
         let contract = ContractId::from_slice(&contract_bytes)?;
-        let ver = expect_uint(
-            map_get(map, "ver")
-                .ok_or_else(|| DharmaError::Validation("missing summary ver".to_string()))?,
-        )?;
+        let ver = expect_uint(map_get(map, "ver").ok_or_else(|| {
+            DharmaError::Validation("missing summary ver".to_string())
+        })?)?;
         let actions_val = map_get(map, "actions")
             .ok_or_else(|| DharmaError::Validation("missing summary actions".to_string()))?;
         let queries_val = map_get(map, "queries")
@@ -283,7 +270,13 @@ fn parse_rule_map(value: &Value) -> Result<BTreeMap<String, PermissionRule>, Dha
         let exhaustive_val = map_get(rule_map, "exhaustive")
             .ok_or_else(|| DharmaError::Validation("missing exhaustive".to_string()))?;
         let exhaustive = expect_bool(exhaustive_val)?;
-        out.insert(name, PermissionRule { roles, exhaustive });
+        out.insert(
+            name,
+            PermissionRule {
+                roles,
+                exhaustive,
+            },
+        );
     }
     Ok(out)
 }
@@ -361,11 +354,7 @@ impl ContractEngine {
         Self { wasm, limits }
     }
 
-    pub fn validate(
-        &self,
-        assertion: &[u8],
-        context: &[u8],
-    ) -> Result<ContractResult, DharmaError> {
+    pub fn validate(&self, assertion: &[u8], context: &[u8]) -> Result<ContractResult, DharmaError> {
         let output = self.call_validate(None, assertion, context)?;
         parse_contract_result(&output)
     }
@@ -384,7 +373,11 @@ impl ContractEngine {
         self.call_reduce(None, accepted)
     }
 
-    pub fn reduce_with_env(&self, env: &dyn Env, accepted: &[u8]) -> Result<Vec<u8>, DharmaError> {
+    pub fn reduce_with_env(
+        &self,
+        env: &dyn Env,
+        accepted: &[u8],
+    ) -> Result<Vec<u8>, DharmaError> {
         self.call_reduce(Some(env), accepted)
     }
 
@@ -402,13 +395,16 @@ impl ContractEngine {
         config.fuel_consumption_mode(FuelConsumptionMode::Eager);
         let engine = Engine::new(&config);
         let cursor = std::io::Cursor::new(&self.wasm);
-        let module = Module::new(&engine, cursor).map_err(map_wasmi_error)?;
+        let module = Module::new(&engine, cursor)
+            .map_err(map_wasmi_error)?;
         let limits = StoreLimitsBuilder::new()
             .memory_size(self.limits.memory_bytes)
             .build();
         let mut store = Store::new(&engine, ContractHost::new(env, limits));
         store.limiter(|host| &mut host.limits);
-        store.add_fuel(self.limits.fuel).map_err(map_fuel_error)?;
+        store
+            .add_fuel(self.limits.fuel)
+            .map_err(map_fuel_error)?;
         let mut linker = Linker::new(&engine);
         linker
             .func_wrap("env", "has_role", has_role_host)
@@ -468,10 +464,7 @@ impl ContractEngine {
         write_memory(&memory, &mut store, c_ptr, context)?;
 
         let out_ptr = validate
-            .call(
-                &mut store,
-                (a_ptr, assertion.len() as i32, c_ptr, context.len() as i32),
-            )
+            .call(&mut store, (a_ptr, assertion.len() as i32, c_ptr, context.len() as i32))
             .map_err(|e| map_wasmi_error(e.into()))?;
         let out_len = result_len
             .call(&mut store, ())
@@ -668,12 +661,7 @@ fn read_text_host(
     let path = read_text_arg(&memory, &caller, path_ptr)?;
     let (typ, value) = remote::read_remote_field(env, &subject, seq, &path)
         .map_err(|e| Trap::new(e.to_string()))?;
-    if !matches!(
-        typ,
-        crate::pdl::schema::TypeSpec::Text(_)
-            | crate::pdl::schema::TypeSpec::Currency
-            | crate::pdl::schema::TypeSpec::Enum(_)
-    ) {
+    if !matches!(typ, crate::pdl::schema::TypeSpec::Text(_) | crate::pdl::schema::TypeSpec::Currency | crate::pdl::schema::TypeSpec::Enum(_)) {
         return Err(Trap::new("read_text type mismatch"));
     }
     let text = expect_text(&value).map_err(|e| Trap::new(e.to_string()))?;
@@ -706,10 +694,7 @@ fn read_identity_host(
     let path = read_text_arg(&memory, &caller, path_ptr)?;
     let (typ, value) = remote::read_remote_field(env, &subject, seq, &path)
         .map_err(|e| Trap::new(e.to_string()))?;
-    if !matches!(
-        typ,
-        crate::pdl::schema::TypeSpec::Identity | crate::pdl::schema::TypeSpec::Ref(_)
-    ) {
+    if !matches!(typ, crate::pdl::schema::TypeSpec::Identity | crate::pdl::schema::TypeSpec::Ref(_)) {
         return Err(Trap::new("read_identity type mismatch"));
     }
     let bytes = expect_bytes(&value).map_err(|e| Trap::new(e.to_string()))?;
@@ -743,12 +728,14 @@ fn read_subject_ref_host(
         return Err(Trap::new("read_subject_ref type mismatch"));
     }
     let map = expect_map(&value).map_err(|e| Trap::new(e.to_string()))?;
-    let id_bytes =
-        expect_bytes(map_get(map, "id").ok_or_else(|| Trap::new("subject_ref missing id"))?)
-            .map_err(|e| Trap::new(e.to_string()))?;
-    let seq_val =
-        expect_uint(map_get(map, "seq").ok_or_else(|| Trap::new("subject_ref missing seq"))?)
-            .map_err(|e| Trap::new(e.to_string()))?;
+    let id_bytes = expect_bytes(
+        map_get(map, "id").ok_or_else(|| Trap::new("subject_ref missing id"))?
+    )
+    .map_err(|e| Trap::new(e.to_string()))?;
+    let seq_val = expect_uint(
+        map_get(map, "seq").ok_or_else(|| Trap::new("subject_ref missing seq"))?
+    )
+    .map_err(|e| Trap::new(e.to_string()))?;
     if id_bytes.len() != 32 {
         return Err(Trap::new("subject_ref id invalid"));
     }
@@ -886,11 +873,11 @@ fn remote_intersects_host(
             for entry in remote_list {
                 let map = expect_map(entry).map_err(|e| Trap::new(e.to_string()))?;
                 let id_bytes = expect_bytes(
-                    map_get(map, "id").ok_or_else(|| Trap::new("subject_ref missing id"))?,
+                    map_get(map, "id").ok_or_else(|| Trap::new("subject_ref missing id"))?
                 )
                 .map_err(|e| Trap::new(e.to_string()))?;
                 let seq_val = expect_int(
-                    map_get(map, "seq").ok_or_else(|| Trap::new("subject_ref missing seq"))?,
+                    map_get(map, "seq").ok_or_else(|| Trap::new("subject_ref missing seq"))?
                 )
                 .map_err(|e| Trap::new(e.to_string()))?;
                 if id_bytes.len() != 32 {
@@ -898,10 +885,7 @@ fn remote_intersects_host(
                 }
                 let mut id = [0u8; 32];
                 id.copy_from_slice(&id_bytes);
-                if local
-                    .iter()
-                    .any(|(lid, lseq)| lid == &id && *lseq == seq_val)
-                {
+                if local.iter().any(|(lid, lseq)| lid == &id && *lseq == seq_val) {
                     return Ok(1);
                 }
             }
@@ -1063,13 +1047,8 @@ fn to_usize(value: i32) -> Result<usize, DharmaError> {
 fn parse_contract_result(bytes: &[u8]) -> Result<ContractResult, DharmaError> {
     let value = cbor::ensure_canonical(bytes)?;
     let map = expect_map(&value)?;
-    let ok = expect_bool(
-        map_get(map, "ok").ok_or_else(|| DharmaError::Contract("missing ok".to_string()))?,
-    )?;
-    let status_text = expect_text(
-        map_get(map, "status")
-            .ok_or_else(|| DharmaError::Contract("missing status".to_string()))?,
-    )?;
+    let ok = expect_bool(map_get(map, "ok").ok_or_else(|| DharmaError::Contract("missing ok".to_string()))?)?;
+    let status_text = expect_text(map_get(map, "status").ok_or_else(|| DharmaError::Contract("missing status".to_string()))?)?;
     let status = match status_text.as_str() {
         "accept" => ContractStatus::Accept,
         "reject" => ContractStatus::Reject,
@@ -1118,10 +1097,7 @@ mod tests {
         limits.fuel = 1_000;
         let engine = ContractEngine::new_with_limits(test_loop_wasm_bytes(), limits);
         let err = engine.validate(&[1, 2], &[3, 4]).unwrap_err();
-        assert!(
-            matches!(err, DharmaError::OutOfFuel),
-            "unexpected error: {err}"
-        );
+        assert!(matches!(err, DharmaError::OutOfFuel), "unexpected error: {err}");
     }
 
     #[test]

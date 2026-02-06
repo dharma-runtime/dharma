@@ -5,11 +5,7 @@ use super::render::{render_json, value_to_json, value_to_text};
 use crate::assertion::{add_signer_meta, signer_from_meta, AssertionHeader, AssertionPlaintext};
 use crate::crypto;
 use crate::identity_store;
-use crate::net::policy::{OverlayAccess, OverlayPolicy, PeerClaims};
-use crate::net::trust::PeerPolicy;
-use crate::pdl::schema::{
-    validate_args, ActionSchema, ConcurrencyMode, CqrsSchema, TypeSpec, Visibility,
-};
+use crate::IdentityState;
 use crate::pkg;
 use crate::repl::aliases::{alias_for_subject, save_aliases};
 use crate::repl::subjects::recent_subjects;
@@ -17,19 +13,21 @@ use crate::runtime::cqrs::{decode_state, default_state_memory, load_state_until,
 use crate::runtime::vm::RuntimeVm;
 use crate::store::index::FrontierIndex;
 use crate::store::state::{
-    append_assertion, append_overlay, list_assertions, list_overlays, save_snapshot,
-    AssertionRecord, Snapshot, SnapshotHeader,
+    append_assertion, append_overlay, list_assertions, list_overlays, save_snapshot, AssertionRecord,
+    Snapshot, SnapshotHeader,
 };
 use crate::store::Store;
-use crate::sync::{Get, Hello, ObjectRef, Subscriptions, SyncMessage};
 use crate::types::{AssertionId, ContractId, EnvelopeId, SchemaId, SubjectId};
 use crate::DharmaError;
-use crate::IdentityState;
+use crate::pdl::schema::{validate_args, ActionSchema, ConcurrencyMode, CqrsSchema, TypeSpec, Visibility};
+use crate::net::policy::{OverlayAccess, OverlayPolicy, PeerClaims};
+use crate::net::trust::PeerPolicy;
+use crate::sync::{Get, Hello, ObjectRef, Subscriptions, SyncMessage};
 use ciborium::value::Value;
 use crossterm::style::{Color, Stylize};
-use dharma::env::Fs;
 use indicatif::{ProgressBar, ProgressStyle};
 use inquire::{Confirm, Password, Select, Text};
+use dharma::env::Fs;
 use rand_core::OsRng;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -37,8 +35,8 @@ use std::io::{self, IsTerminal, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tabled::settings::Style;
 use tabled::{Table, Tabled};
+use tabled::settings::Style;
 
 const OVERLAY_DISABLED: &str = "overlays.disabled";
 const PEERS_FILE: &str = "peers.list";
@@ -226,7 +224,12 @@ fn normalize_command(parts: &[String]) -> Vec<String> {
 fn print_help_section(title: &str, entries: &[(&str, &str)]) {
     println!("{title}");
     println!("-----------------");
-    let width = entries.iter().map(|(cmd, _)| cmd.len()).max().unwrap_or(0) + 2;
+    let width = entries
+        .iter()
+        .map(|(cmd, _)| cmd.len())
+        .max()
+        .unwrap_or(0)
+        + 2;
     for (cmd, desc) in entries {
         println!("{cmd:<width$}{desc}", width = width);
     }
@@ -284,14 +287,8 @@ fn print_help_subject() {
         ("new <contract>", "Create subject for contract"),
         ("do <Action> [k=v...]", "Perform an action on the subject"),
         ("try <Action> [k=v...]", "Simulate an action"),
-        (
-            "can",
-            "Show all allowed actions on subject and their arguments",
-        ),
-        (
-            "can <Action> [k=v...]",
-            "Check if action is allowed on subject",
-        ),
+        ("can", "Show all allowed actions on subject and their arguments"),
+        ("can <Action> [k=v...]", "Check if action is allowed on subject"),
         (
             "why",
             "Explain the current state. Show history, who, what, when",
@@ -353,10 +350,7 @@ fn print_help_session() {
         ("tail [n]", "Show recent assertions"),
         ("log [n]", "Show verbose history"),
         ("show <id> [--json|--raw]", "Show assertion/envelope"),
-        (
-            "overlay <status|list|enable|disable|show>",
-            "Overlay view controls",
-        ),
+        ("overlay <status|list|enable|disable|show>", "Overlay view controls"),
         ("pwd", "Show current context"),
         ("version", "Show build info"),
         ("help", "Show help"),
@@ -801,7 +795,14 @@ fn handle_state(ctx: &mut ReplContext, args: &[&str]) -> Result<(), DharmaError>
     let schema = crate::pdl::schema::CqrsSchema::from_cbor(&schema_bytes)?;
 
     let env = dharma::env::StdEnv::new(&ctx.data_dir);
-    let state = load_state_until(&env, &subject, &schema, &contract_bytes, lens, stop_at)?;
+    let state = load_state_until(
+        &env,
+        &subject,
+        &schema,
+        &contract_bytes,
+        lens,
+        stop_at,
+    )?;
     let mut value = decode_state(&state.memory, &schema)?;
     let disabled = load_overlay_disabled(&ctx.data_dir)?;
     if !overlay_enabled_for_schema(&schema, &disabled) {
@@ -936,10 +937,7 @@ fn parse_state_args(
 
 fn handle_tail(ctx: &mut ReplContext, args: &[&str]) -> Result<(), DharmaError> {
     let subject = current_subject_or_identity(ctx)?;
-    let count = args
-        .get(0)
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(10);
+    let count = args.get(0).and_then(|v| v.parse::<usize>().ok()).unwrap_or(10);
     let env = dharma::env::StdEnv::new(&ctx.data_dir);
     let records = list_assertions(&env, &subject)?;
     if records.is_empty() {
@@ -964,10 +962,7 @@ fn handle_tail(ctx: &mut ReplContext, args: &[&str]) -> Result<(), DharmaError> 
 
 fn handle_log(ctx: &mut ReplContext, args: &[&str]) -> Result<(), DharmaError> {
     let subject = current_subject_or_identity(ctx)?;
-    let count = args
-        .get(0)
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(10);
+    let count = args.get(0).and_then(|v| v.parse::<usize>().ok()).unwrap_or(10);
     let env = dharma::env::StdEnv::new(&ctx.data_dir);
     let records = list_assertions(&env, &subject)?;
     if records.is_empty() {
@@ -1016,15 +1011,10 @@ fn handle_show(ctx: &mut ReplContext, args: &[&str]) -> Result<(), DharmaError> 
         println!("  v: {}", envelope.v);
         println!("  suite: {}", envelope.suite);
         println!("  kid: {}", envelope.kid.to_hex());
-        println!(
-            "  nonce: {}",
-            crate::types::hex_encode(*envelope.nonce.as_bytes())
-        );
+        println!("  nonce: {}", crate::types::hex_encode(*envelope.nonce.as_bytes()));
         println!("  ct_len: {}", envelope.ct.len());
         if let Some(identity) = &ctx.identity {
-            if let Ok(plaintext) =
-                crate::envelope::decrypt_assertion(&envelope, &identity.subject_key)
-            {
+            if let Ok(plaintext) = crate::envelope::decrypt_assertion(&envelope, &identity.subject_key) {
                 if let Ok(assertion) = crate::assertion::AssertionPlaintext::from_cbor(&plaintext) {
                     println!("Decrypted:");
                     print_assertion(&assertion);
@@ -1041,10 +1031,7 @@ fn handle_status(ctx: &mut ReplContext, args: &[&str]) -> Result<(), DharmaError
     let verbose = args.iter().any(|arg| *arg == "--verbose");
     let store = Store::from_root(&ctx.data_dir);
     let index = FrontierIndex::new(&ctx.data_dir)?;
-    if let Some(subject) = ctx
-        .current_subject
-        .or_else(|| ctx.identity.as_ref().map(|id| id.subject_id))
-    {
+    if let Some(subject) = ctx.current_subject.or_else(|| ctx.identity.as_ref().map(|id| id.subject_id)) {
         print_subject_status(ctx, &store, &index, &subject, verbose)?;
     } else {
         println!("No subject selected.");
@@ -1166,10 +1153,7 @@ fn handle_authority(ctx: &mut ReplContext, args: &[&str]) -> Result<(), DharmaEr
         Value::Bytes(plan.subject.as_bytes().to_vec()),
     ));
     if flags.json {
-        println!(
-            "{}",
-            value_to_json(&Value::Map(report.into_iter().collect()))
-        );
+        println!("{}", value_to_json(&Value::Map(report.into_iter().collect())));
     } else {
         println!("Allowed: {}", preview.allowed);
         if let Some(reason) = preview.reason {
@@ -1253,8 +1237,22 @@ fn handle_diff(ctx: &mut ReplContext, args: &[&str]) -> Result<(), DharmaError> 
     let schema_a = CqrsSchema::from_cbor(&schema_bytes_a)?;
     let schema_b = CqrsSchema::from_cbor(&schema_bytes_b)?;
     let env = dharma::env::StdEnv::new(&ctx.data_dir);
-    let state_a = load_state_until(&env, &subject, &schema_a, &contract_bytes_a, lens_a, at_a)?;
-    let state_b = load_state_until(&env, &subject, &schema_b, &contract_bytes_b, lens_b, at_b)?;
+    let state_a = load_state_until(
+        &env,
+        &subject,
+        &schema_a,
+        &contract_bytes_a,
+        lens_a,
+        at_a,
+    )?;
+    let state_b = load_state_until(
+        &env,
+        &subject,
+        &schema_b,
+        &contract_bytes_b,
+        lens_b,
+        at_b,
+    )?;
     let mut value_a = decode_state(&state_a.memory, &schema_a)?;
     let mut value_b = decode_state(&state_b.memory, &schema_b)?;
     let disabled = load_overlay_disabled(&ctx.data_dir)?;
@@ -1288,7 +1286,8 @@ fn handle_why(ctx: &mut ReplContext, args: &[&str]) -> Result<(), DharmaError> {
         println!("History:");
         let mut rows = Vec::new();
         for record in records {
-            if let Ok(assertion) = crate::assertion::AssertionPlaintext::from_cbor(&record.bytes) {
+            if let Ok(assertion) = crate::assertion::AssertionPlaintext::from_cbor(&record.bytes)
+            {
                 let action = assertion
                     .header
                     .typ
@@ -1395,10 +1394,7 @@ fn handle_why(ctx: &mut ReplContext, args: &[&str]) -> Result<(), DharmaError> {
     }
     println!("Changes for {path}:");
     for (seq, id, value) in &changes {
-        let rendered = value
-            .as_ref()
-            .map(value_to_json)
-            .unwrap_or_else(|| "null".to_string());
+        let rendered = value.as_ref().map(value_to_json).unwrap_or_else(|| "null".to_string());
         println!("  seq {:>4} {} => {}", seq, id.to_hex(), rendered);
     }
     Ok(())
@@ -1485,10 +1481,7 @@ fn pkg_list(ctx: &ReplContext, args: &[&str]) -> Result<(), DharmaError> {
             .map(|v| v.to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        println!(
-            "{}  versions [{}]  trust={}",
-            manifest.name, versions, trust
-        );
+        println!("{}  versions [{}]  trust={}", manifest.name, versions, trust);
     }
     Ok(())
 }
@@ -1575,8 +1568,12 @@ fn pkg_install(ctx: &ReplContext, args: &[&str]) -> Result<(), DharmaError> {
         return Err(DharmaError::Validation("package not found".to_string()));
     };
     let mut fetch = |missing: &[EnvelopeId]| fetch_missing_artifacts(ctx, missing);
-    let manifest =
-        pkg::install_from_registry_with_fetch(&ctx.data_dir, registry, version, &mut fetch)?;
+    let manifest = pkg::install_from_registry_with_fetch(
+        &ctx.data_dir,
+        registry,
+        version,
+        &mut fetch,
+    )?;
     pkg::update_config_for_manifest(&ctx.data_dir, &manifest)?;
     let mut deps = Vec::new();
     for version in manifest.versions.values() {
@@ -1627,10 +1624,7 @@ fn pkg_verify(ctx: &ReplContext, args: &[&str]) -> Result<(), DharmaError> {
         ),
     ));
     if let Some(sig) = report.registry_sig_ok {
-        entries.push((
-            Value::Text("registry_signature".to_string()),
-            Value::Bool(sig),
-        ));
+        entries.push((Value::Text("registry_signature".to_string()), Value::Bool(sig)));
     }
     let value = Value::Map(entries);
     if json {
@@ -1765,19 +1759,14 @@ fn fetch_objects_from_peer(
                 }
                 let actual = crate::crypto::envelope_id(&obj.bytes);
                 if actual != env_id {
-                    return Err(DharmaError::Validation(
-                        "artifact hash mismatch".to_string(),
-                    ));
+                    return Err(DharmaError::Validation("artifact hash mismatch".to_string()));
                 }
                 store.put_object(&env_id, &obj.bytes)?;
                 remaining.remove(&env_id);
                 received.push(env_id);
             }
             SyncMessage::Err(err) => {
-                return Err(DharmaError::Validation(format!(
-                    "peer error: {}",
-                    err.message
-                )));
+                return Err(DharmaError::Validation(format!("peer error: {}", err.message)));
             }
             _ => {}
         }
@@ -1946,12 +1935,7 @@ fn handle_sync(ctx: &mut ReplContext, args: &[&str]) -> Result<(), DharmaError> 
             } else {
                 ctx.identity.as_ref().map(|id| id.subject_id)
             };
-            sync_now(
-                ctx,
-                subject,
-                args.iter().any(|arg| *arg == "--json"),
-                verbose,
-            )
+            sync_now(ctx, subject, args.iter().any(|arg| *arg == "--json"), verbose)
         }
         _ => {
             println!("Usage: sync now | sync subject [id] [--verbose]");
@@ -1964,10 +1948,7 @@ fn handle_discover(ctx: &mut ReplContext, args: &[&str]) -> Result<(), DharmaErr
     if args.is_empty() || args[0] == "status" {
         let (enabled, configured) = discovery_state(ctx);
         let source = if configured { "configured" } else { "default" };
-        println!(
-            "Discovery: {} ({source})",
-            if enabled { "ON" } else { "OFF" }
-        );
+        println!("Discovery: {} ({source})", if enabled { "ON" } else { "OFF" });
         return Ok(());
     }
     match args[0] {
@@ -2043,10 +2024,7 @@ fn handle_index(ctx: &mut ReplContext, args: &[&str]) -> Result<(), DharmaError>
             } else if json {
                 let status = collect_index_status(&ctx.data_dir)?;
                 let value = Value::Map(vec![
-                    (
-                        Value::Text("status".to_string()),
-                        Value::Text("built".to_string()),
-                    ),
+                    (Value::Text("status".to_string()), Value::Text("built".to_string())),
                     (
                         Value::Text("partitions".to_string()),
                         Value::Integer((status.partitions as i64).into()),
@@ -2072,10 +2050,9 @@ fn handle_index(ctx: &mut ReplContext, args: &[&str]) -> Result<(), DharmaError>
             }
             drop_index(&ctx.data_dir)?;
             if json {
-                let value = Value::Map(vec![(
-                    Value::Text("status".to_string()),
-                    Value::Text("dropped".to_string()),
-                )]);
+                let value = Value::Map(vec![
+                    (Value::Text("status".to_string()), Value::Text("dropped".to_string())),
+                ]);
                 println!("{}", value_to_json(&value));
             } else {
                 println!("Index dropped.");
@@ -2363,11 +2340,7 @@ fn print_index_status(status: &IndexStatus) {
     println!("Index: DHARMA-Q");
     println!("Partitions: {}", status.partitions);
     println!("Rows: {}", status.rows);
-    let wal_state = if status.wal_bytes > 0 {
-        "dirty"
-    } else {
-        "clean"
-    };
+    let wal_state = if status.wal_bytes > 0 { "dirty" } else { "clean" };
     println!("WAL: {} bytes ({wal_state})", status.wal_bytes);
 }
 
@@ -2444,11 +2417,11 @@ fn overlay_status(ctx: &ReplContext, args: &[&str]) -> Result<(), DharmaError> {
     let view = if enabled_any { "merged" } else { "base-only" };
     if json {
         let mut map = Vec::new();
+        map.push((Value::Text("view".to_string()), Value::Text(view.to_string())));
         map.push((
-            Value::Text("view".to_string()),
-            Value::Text(view.to_string()),
+            Value::Text("overlays".to_string()),
+            Value::Array(entries),
         ));
-        map.push((Value::Text("overlays".to_string()), Value::Array(entries)));
         println!("{}", value_to_json(&Value::Map(map)));
         return Ok(());
     }
@@ -2478,7 +2451,10 @@ fn overlay_list(ctx: &ReplContext, args: &[&str]) -> Result<(), DharmaError> {
     let lens = ctx.current_lens;
     let overlays = overlay_namespace_info(&ctx.data_dir, &subject, lens)?;
     if json {
-        let list = overlays.keys().map(|n| Value::Text(n.clone())).collect();
+        let list = overlays
+            .keys()
+            .map(|n| Value::Text(n.clone()))
+            .collect();
         println!("{}", value_to_json(&Value::Array(list)));
         return Ok(());
     }
@@ -2585,7 +2561,10 @@ fn overlay_show(ctx: &ReplContext, args: &[&str]) -> Result<(), DharmaError> {
         return Ok(());
     }
     for entry in records {
-        let action = entry.action.as_deref().unwrap_or("<unknown>");
+        let action = entry
+            .action
+            .as_deref()
+            .unwrap_or("<unknown>");
         let base = entry
             .base
             .as_ref()
@@ -2606,9 +2585,7 @@ fn pkg_manifest_summary_value(root: &PathBuf, manifest: &pkg::PackageManifest) -
     let report = pkg::verify_manifest(root, manifest).ok();
     let trust = report
         .as_ref()
-        .map(|r| {
-            r.missing.is_empty() && r.mismatched.is_empty() && r.registry_sig_ok != Some(false)
-        })
+        .map(|r| r.missing.is_empty() && r.mismatched.is_empty() && r.registry_sig_ok != Some(false))
         .unwrap_or(false);
     let versions = manifest
         .versions
@@ -2616,17 +2593,11 @@ fn pkg_manifest_summary_value(root: &PathBuf, manifest: &pkg::PackageManifest) -
         .map(|v| Value::Integer((*v as i64).into()))
         .collect::<Vec<_>>();
     let mut entries = Vec::new();
-    entries.push((
-        Value::Text("name".to_string()),
-        Value::Text(manifest.name.clone()),
-    ));
+    entries.push((Value::Text("name".to_string()), Value::Text(manifest.name.clone())));
     entries.push((Value::Text("versions".to_string()), Value::Array(versions)));
     entries.push((Value::Text("trusted".to_string()), Value::Bool(trust)));
     if let Some(pinned) = manifest.pinned {
-        entries.push((
-            Value::Text("pinned".to_string()),
-            Value::Integer((pinned as i64).into()),
-        ));
+        entries.push((Value::Text("pinned".to_string()), Value::Integer((pinned as i64).into())));
     }
     Value::Map(entries)
 }
@@ -2682,25 +2653,13 @@ struct ActionPreview {
 impl ActionPreview {
     fn to_value(&self) -> Value {
         let mut entries = Vec::new();
-        entries.push((
-            Value::Text("allowed".to_string()),
-            Value::Bool(self.allowed),
-        ));
+        entries.push((Value::Text("allowed".to_string()), Value::Bool(self.allowed)));
         if let Some(reason) = &self.reason {
-            entries.push((
-                Value::Text("reason".to_string()),
-                Value::Text(reason.clone()),
-            ));
+            entries.push((Value::Text("reason".to_string()), Value::Text(reason.clone())));
         }
-        entries.push((
-            Value::Text("writes".to_string()),
-            Value::Integer((self.writes as i64).into()),
-        ));
+        entries.push((Value::Text("writes".to_string()), Value::Integer((self.writes as i64).into())));
         entries.push((Value::Text("diff".to_string()), diff_to_value(&self.diff)));
-        entries.push((
-            Value::Text("state_before".to_string()),
-            self.pre_state.clone(),
-        ));
+        entries.push((Value::Text("state_before".to_string()), self.pre_state.clone()));
         if let Some(after) = &self.post_state {
             entries.push((Value::Text("state_after".to_string()), after.clone()));
         }
@@ -2708,10 +2667,7 @@ impl ActionPreview {
     }
 }
 
-fn extract_action_flags(
-    ctx: &ReplContext,
-    args: &[&str],
-) -> Result<(ActionFlags, Vec<String>), DharmaError> {
+fn extract_action_flags(ctx: &ReplContext, args: &[&str]) -> Result<(ActionFlags, Vec<String>), DharmaError> {
     let mut flags = ActionFlags {
         json: false,
         force: false,
@@ -2806,10 +2762,7 @@ fn prepare_action(
     })
 }
 
-fn simulate_action(
-    identity: &crate::IdentityState,
-    plan: &ActionPlan,
-) -> Result<ActionPreview, DharmaError> {
+fn simulate_action(identity: &crate::IdentityState, plan: &ActionPlan) -> Result<ActionPreview, DharmaError> {
     let env = dharma::env::StdEnv::new(&plan.root);
     let mut state = load_state_until(
         &env,
@@ -2836,11 +2789,7 @@ fn simulate_action(
     vm.reduce(&env, &mut state.memory, &plan.args_buffer, Some(&context))?;
     let post_state = decode_state(&state.memory, &plan.schema)?;
     let diff = diff_values(&pre_state, &post_state);
-    let writes = 1 + if is_empty_args(&plan.overlay_args) {
-        0
-    } else {
-        1
-    };
+    let writes = 1 + if is_empty_args(&plan.overlay_args) { 0 } else { 1 };
     Ok(ActionPreview {
         allowed: true,
         reason: None,
@@ -2851,7 +2800,10 @@ fn simulate_action(
     })
 }
 
-fn commit_action(identity: &crate::IdentityState, plan: &ActionPlan) -> Result<Value, DharmaError> {
+fn commit_action(
+    identity: &crate::IdentityState,
+    plan: &ActionPlan,
+) -> Result<Value, DharmaError> {
     let store = Store::from_root(&plan.root);
     let env = dharma::env::StdEnv::new(&plan.root);
     let mut state = load_state_until(
@@ -2863,13 +2815,7 @@ fn commit_action(identity: &crate::IdentityState, plan: &ActionPlan) -> Result<V
         None,
     )?;
     let index = FrontierIndex::new(&plan.root)?;
-    ensure_concurrency(
-        &plan.schema,
-        &index,
-        &plan.subject,
-        plan.ver,
-        state.last_object,
-    )?;
+    ensure_concurrency(&plan.schema, &index, &plan.subject, plan.ver, state.last_object)?;
     let vm = RuntimeVm::new(plan.contract_bytes.clone());
     let context = build_context(identity);
     vm.validate(&env, &mut state.memory, &plan.args_buffer, Some(&context))?;
@@ -2894,8 +2840,7 @@ fn commit_action(identity: &crate::IdentityState, plan: &ActionPlan) -> Result<V
         note: None,
         meta: add_signer_meta(None, &identity.subject_id),
     };
-    let assertion =
-        AssertionPlaintext::sign(header, plan.base_args.clone(), &identity.signing_key)?;
+    let assertion = AssertionPlaintext::sign(header, plan.base_args.clone(), &identity.signing_key)?;
     let bytes = assertion.to_cbor()?;
     let assertion_id = assertion.assertion_id()?;
     let envelope_id = crypto::envelope_id(&bytes);
@@ -2935,11 +2880,8 @@ fn commit_action(identity: &crate::IdentityState, plan: &ActionPlan) -> Result<V
                 &identity.subject_id,
             ),
         };
-        let overlay_assertion = AssertionPlaintext::sign(
-            overlay_header,
-            plan.overlay_args.clone(),
-            &identity.signing_key,
-        )?;
+        let overlay_assertion =
+            AssertionPlaintext::sign(overlay_header, plan.overlay_args.clone(), &identity.signing_key)?;
         let overlay_bytes = overlay_assertion.to_cbor()?;
         let overlay_assertion_id = overlay_assertion.assertion_id()?;
         let overlay_envelope_id = crypto::envelope_id(&overlay_bytes);
@@ -2972,10 +2914,7 @@ fn commit_action(identity: &crate::IdentityState, plan: &ActionPlan) -> Result<V
     }
 
     let mut entries = Vec::new();
-    entries.push((
-        Value::Text("base".to_string()),
-        Value::Bytes(assertion_id.as_bytes().to_vec()),
-    ));
+    entries.push((Value::Text("base".to_string()), Value::Bytes(assertion_id.as_bytes().to_vec())));
     if !overlays_written.is_empty() {
         let overlays = overlays_written
             .iter()
@@ -3016,10 +2955,7 @@ fn handle_diff_usage() {
     println!("Usage: diff --at <idA> <idB> [--lens <verA> <verB>] [--json]");
 }
 
-fn parse_diff_default_args(
-    args: &[&str],
-    default_lens: u64,
-) -> Result<(u64, u64, bool), DharmaError> {
+fn parse_diff_default_args(args: &[&str], default_lens: u64) -> Result<(u64, u64, bool), DharmaError> {
     let mut lens_values = Vec::new();
     let mut json = false;
     let mut iter = args.iter().copied().peekable();
@@ -3101,13 +3037,7 @@ fn parse_diff_args(args: &[&str], default_lens: u64) -> Result<(DiffOpts, bool),
     }
     let lens_a = lens_a.unwrap_or(default_lens);
     let lens_b = lens_b.unwrap_or(lens_a);
-    Ok((
-        DiffOpts {
-            at: (at_a, at_b),
-            lens: (lens_a, lens_b),
-        },
-        json,
-    ))
+    Ok((DiffOpts { at: (at_a, at_b), lens: (lens_a, lens_b) }, json))
 }
 
 fn diff_to_value(diff: &[DiffEntry]) -> Value {
@@ -3115,10 +3045,7 @@ fn diff_to_value(diff: &[DiffEntry]) -> Value {
         .iter()
         .map(|entry| {
             let mut fields = Vec::new();
-            fields.push((
-                Value::Text("path".to_string()),
-                Value::Text(entry.path.clone()),
-            ));
+            fields.push((Value::Text("path".to_string()), Value::Text(entry.path.clone())));
             let before = entry.before.clone().unwrap_or(Value::Null);
             let after = entry.after.clone().unwrap_or(Value::Null);
             fields.push((Value::Text("before".to_string()), before));
@@ -3146,12 +3073,7 @@ fn print_diff(diff: &[DiffEntry], color: bool) {
             }
             (Some(before), Some(after)) => {
                 let sign = paint_diff("~", Color::Yellow, color);
-                println!(
-                    "{sign} {}: {} -> {}",
-                    entry.path,
-                    value_to_json(before),
-                    value_to_json(after)
-                );
+                println!("{sign} {}: {} -> {}", entry.path, value_to_json(before), value_to_json(after));
             }
             _ => {}
         }
@@ -3242,20 +3164,11 @@ fn find_row_value(row: &crate::dharmaq_core::QueryRow) -> Value {
         Value::Text("subject".to_string()),
         Value::Bytes(row.subject.as_bytes().to_vec()),
     ));
-    entries.push((
-        Value::Text("seq".to_string()),
-        Value::Integer((row.seq as i64).into()),
-    ));
+    entries.push((Value::Text("seq".to_string()), Value::Integer((row.seq as i64).into())));
     entries.push((Value::Text("typ".to_string()), Value::Text(row.typ.clone())));
-    entries.push((
-        Value::Text("score".to_string()),
-        Value::Integer((row.score as i64).into()),
-    ));
+    entries.push((Value::Text("score".to_string()), Value::Integer((row.score as i64).into())));
     if let Some(snippet) = &row.snippet {
-        entries.push((
-            Value::Text("snippet".to_string()),
-            Value::Text(snippet.clone()),
-        ));
+        entries.push((Value::Text("snippet".to_string()), Value::Text(snippet.clone())));
     }
     Value::Map(entries)
 }
@@ -3341,14 +3254,10 @@ fn parse_value(raw: &str, typ: &TypeSpec) -> Result<Value, DharmaError> {
             let (id_raw, seq_raw) = raw
                 .split_once('@')
                 .or_else(|| raw.split_once(':'))
-                .ok_or_else(|| {
-                    DharmaError::Validation("subject_ref expects hex@seq".to_string())
-                })?;
+                .ok_or_else(|| DharmaError::Validation("subject_ref expects hex@seq".to_string()))?;
             let bytes = crate::types::hex_decode(id_raw)?;
             if bytes.len() != 32 {
-                return Err(DharmaError::Validation(
-                    "invalid subject_ref id".to_string(),
-                ));
+                return Err(DharmaError::Validation("invalid subject_ref id".to_string()));
             }
             let seq = seq_raw
                 .trim()
@@ -3364,14 +3273,12 @@ fn parse_value(raw: &str, typ: &TypeSpec) -> Result<Value, DharmaError> {
             if parts.len() != 2 {
                 return Err(DharmaError::Validation("invalid geopoint".to_string()));
             }
-            let lat = parts[0]
-                .trim()
-                .parse::<i64>()
-                .map_err(|_| DharmaError::Validation("invalid geopoint".to_string()))?;
-            let lon = parts[1]
-                .trim()
-                .parse::<i64>()
-                .map_err(|_| DharmaError::Validation("invalid geopoint".to_string()))?;
+            let lat = parts[0].trim().parse::<i64>().map_err(|_| {
+                DharmaError::Validation("invalid geopoint".to_string())
+            })?;
+            let lon = parts[1].trim().parse::<i64>().map_err(|_| {
+                DharmaError::Validation("invalid geopoint".to_string())
+            })?;
             Ok(Value::Array(vec![
                 Value::Integer(lat.into()),
                 Value::Integer(lon.into()),
@@ -3387,9 +3294,9 @@ fn parse_value(raw: &str, typ: &TypeSpec) -> Result<Value, DharmaError> {
         TypeSpec::Struct(_) => Err(DharmaError::Validation(
             "struct args unsupported".to_string(),
         )),
-        TypeSpec::List(_) | TypeSpec::Map(_, _) => Err(DharmaError::Validation(
-            "collection args unsupported".to_string(),
-        )),
+        TypeSpec::List(_) | TypeSpec::Map(_, _) => {
+            Err(DharmaError::Validation("collection args unsupported".to_string()))
+        }
     }
 }
 
@@ -3406,9 +3313,7 @@ fn parse_decimal_arg(raw: &str, scale: Option<u32>) -> Result<i64, DharmaError> 
     };
     let scale = scale.unwrap_or(0);
     if frac_part.is_some() && scale == 0 {
-        return Err(DharmaError::Validation(
-            "decimal scale required".to_string(),
-        ));
+        return Err(DharmaError::Validation("decimal scale required".to_string()));
     }
     let int_str = if int_part.is_empty() { "0" } else { int_part };
     let int_val = int_str
@@ -3420,9 +3325,7 @@ fn parse_decimal_arg(raw: &str, scale: Option<u32>) -> Result<i64, DharmaError> 
         .ok_or_else(|| DharmaError::Validation("decimal overflow".to_string()))?;
     if let Some(frac) = frac_part {
         if frac.len() > scale as usize {
-            return Err(DharmaError::Validation(
-                "decimal scale overflow".to_string(),
-            ));
+            return Err(DharmaError::Validation("decimal scale overflow".to_string()));
         }
         let mut frac_buf = String::from(frac);
         while frac_buf.len() < scale as usize {
@@ -3520,11 +3423,7 @@ fn print_transaction_card(plan: &ActionPlan, preview: &ActionPreview, color: boo
         .max(header.len());
     let border = "─".repeat(width + 2);
     println!("┌{border}┐");
-    println!(
-        "│ {}{} │",
-        header,
-        " ".repeat(width.saturating_sub(header.len()))
-    );
+    println!("│ {}{} │", header, " ".repeat(width.saturating_sub(header.len())));
     println!("├{border}┤");
     for line in lines {
         let padding = " ".repeat(width.saturating_sub(line.len()));
@@ -3567,6 +3466,7 @@ fn committed_ids(value: &Value) -> Vec<AssertionId> {
     }
     out
 }
+
 
 fn build_overlay_map(
     root: &PathBuf,
@@ -3688,37 +3588,22 @@ fn overlay_records_for_namespace(
 
 fn overlay_info_value(namespace: &str, info: &OverlayInfo, enabled: bool) -> Value {
     let mut entries = Vec::new();
-    entries.push((
-        Value::Text("namespace".to_string()),
-        Value::Text(namespace.to_string()),
-    ));
-    entries.push((
-        Value::Text("count".to_string()),
-        Value::Integer((info.count as i64).into()),
-    ));
-    entries.push((
-        Value::Text("decryptable".to_string()),
-        Value::Bool(info.decryptable),
-    ));
+    entries.push((Value::Text("namespace".to_string()), Value::Text(namespace.to_string())));
+    entries.push((Value::Text("count".to_string()), Value::Integer((info.count as i64).into())));
+    entries.push((Value::Text("decryptable".to_string()), Value::Bool(info.decryptable)));
     entries.push((Value::Text("enabled".to_string()), Value::Bool(enabled)));
     Value::Map(entries)
 }
 
 fn overlay_record_value(entry: &OverlayRecordView) -> Value {
     let mut entries = Vec::new();
-    entries.push((
-        Value::Text("seq".to_string()),
-        Value::Integer((entry.seq as i64).into()),
-    ));
+    entries.push((Value::Text("seq".to_string()), Value::Integer((entry.seq as i64).into())));
     entries.push((
         Value::Text("assertion".to_string()),
         Value::Bytes(entry.assertion_id.as_bytes().to_vec()),
     ));
     if let Some(action) = &entry.action {
-        entries.push((
-            Value::Text("action".to_string()),
-            Value::Text(action.clone()),
-        ));
+        entries.push((Value::Text("action".to_string()), Value::Text(action.clone())));
     }
     if let Some(base) = &entry.base {
         entries.push((
@@ -3736,7 +3621,10 @@ fn schema_namespace(store: &Store, schema: &SchemaId) -> Option<String> {
     Some(schema.namespace)
 }
 
-fn overlay_enabled_for_schema(schema: &CqrsSchema, disabled: &BTreeSet<String>) -> bool {
+fn overlay_enabled_for_schema(
+    schema: &CqrsSchema,
+    disabled: &BTreeSet<String>,
+) -> bool {
     !disabled.contains(&schema.namespace)
 }
 
@@ -3808,7 +3696,9 @@ fn load_peers(root: &PathBuf) -> Result<Vec<PeerEntry>, DharmaError> {
             .get(2)
             .and_then(|v| crate::types::hex_decode(v).ok())
             .and_then(|bytes| crate::types::IdentityKey::from_slice(&bytes).ok());
-        let last_seen = parts.get(3).and_then(|v| v.parse::<u64>().ok());
+        let last_seen = parts
+            .get(3)
+            .and_then(|v| v.parse::<u64>().ok());
         out.push(PeerEntry {
             addr,
             subject,
@@ -3843,10 +3733,7 @@ fn save_peers(root: &PathBuf, peers: &[PeerEntry]) -> Result<(), DharmaError> {
             .last_seen
             .map(|t| t.to_string())
             .unwrap_or_else(|| "-".to_string());
-        lines.push(format!(
-            "{} {} {} {}",
-            peer.addr, subject, pubkey, last_seen
-        ));
+        lines.push(format!("{} {} {} {}", peer.addr, subject, pubkey, last_seen));
     }
     fs::write(path, lines.join("\n") + "\n")?;
     Ok(())
@@ -3875,27 +3762,15 @@ fn upsert_peer(root: &PathBuf, addr: &str, last_seen: u64) -> Result<(), DharmaE
 
 fn peer_value(ctx: &ReplContext, peer: &PeerEntry, verbose: bool) -> Value {
     let mut entries = Vec::new();
-    entries.push((
-        Value::Text("addr".to_string()),
-        Value::Text(peer.addr.clone()),
-    ));
+    entries.push((Value::Text("addr".to_string()), Value::Text(peer.addr.clone())));
     if let Some(subject) = &peer.subject {
-        entries.push((
-            Value::Text("subject".to_string()),
-            Value::Bytes(subject.as_bytes().to_vec()),
-        ));
+        entries.push((Value::Text("subject".to_string()), Value::Bytes(subject.as_bytes().to_vec())));
     }
     if let Some(pubkey) = &peer.pubkey {
-        entries.push((
-            Value::Text("pubkey".to_string()),
-            Value::Bytes(pubkey.as_bytes().to_vec()),
-        ));
+        entries.push((Value::Text("pubkey".to_string()), Value::Bytes(pubkey.as_bytes().to_vec())));
     }
     if let Some(last) = peer.last_seen {
-        entries.push((
-            Value::Text("last_seen".to_string()),
-            Value::Integer((last as i64).into()),
-        ));
+        entries.push((Value::Text("last_seen".to_string()), Value::Integer((last as i64).into())));
     }
     if verbose {
         entries.push((
@@ -3969,21 +3844,12 @@ fn sync_now(
 
 fn sync_result_value(addr: &str, err: Option<String>) -> Value {
     let mut entries = Vec::new();
-    entries.push((
-        Value::Text("addr".to_string()),
-        Value::Text(addr.to_string()),
-    ));
+    entries.push((Value::Text("addr".to_string()), Value::Text(addr.to_string())));
     if let Some(err) = err {
-        entries.push((
-            Value::Text("status".to_string()),
-            Value::Text("error".to_string()),
-        ));
+        entries.push((Value::Text("status".to_string()), Value::Text("error".to_string())));
         entries.push((Value::Text("error".to_string()), Value::Text(err)));
     } else {
-        entries.push((
-            Value::Text("status".to_string()),
-            Value::Text("ok".to_string()),
-        ));
+        entries.push((Value::Text("status".to_string()), Value::Text("ok".to_string())));
     }
     Value::Map(entries)
 }
@@ -4152,9 +4018,7 @@ fn prove_object(ctx: &ReplContext, store: &Store, bytes: &[u8]) -> Result<Value,
     } else if let Ok(envelope) = crate::envelope::AssertionEnvelope::from_cbor(bytes) {
         canonical_ok = true;
         if let Some(identity) = &ctx.identity {
-            if let Ok(plaintext) =
-                crate::envelope::decrypt_assertion(&envelope, &identity.subject_key)
-            {
+            if let Ok(plaintext) = crate::envelope::decrypt_assertion(&envelope, &identity.subject_key) {
                 if let Ok(assertion) = AssertionPlaintext::from_cbor(&plaintext) {
                     assertion_opt = Some(assertion);
                 }
@@ -4164,13 +4028,7 @@ fn prove_object(ctx: &ReplContext, store: &Store, bytes: &[u8]) -> Result<Value,
 
     if let Some(assertion) = &assertion_opt {
         signature_ok = Some(assertion.verify_signature()?);
-        for dep in assertion
-            .header
-            .refs
-            .iter()
-            .copied()
-            .chain(assertion.header.prev)
-        {
+        for dep in assertion.header.refs.iter().copied().chain(assertion.header.prev) {
             let mut missing = true;
             if let Some(env_id) = store.lookup_envelope(&dep)? {
                 if store.get_object_any(&env_id)?.is_some() {
@@ -4181,14 +4039,9 @@ fn prove_object(ctx: &ReplContext, store: &Store, bytes: &[u8]) -> Result<Value,
                 deps_missing.push(dep);
             }
         }
-        if let Ok(schema_bytes) =
-            store.get_object(&EnvelopeId::from_bytes(*assertion.header.schema.as_bytes()))
-        {
+        if let Ok(schema_bytes) = store.get_object(&EnvelopeId::from_bytes(*assertion.header.schema.as_bytes())) {
             if let Ok(schema) = crate::schema::parse_schema(&schema_bytes) {
-                schema_ok = Some(
-                    crate::schema::validate_body(&schema, &assertion.header.typ, &assertion.body)
-                        .is_ok(),
-                );
+                schema_ok = Some(crate::schema::validate_body(&schema, &assertion.header.typ, &assertion.body).is_ok());
             }
             if let Ok(schema) = CqrsSchema::from_cbor(&schema_bytes) {
                 cqrs_schema = Some(schema);
@@ -4197,11 +4050,8 @@ fn prove_object(ctx: &ReplContext, store: &Store, bytes: &[u8]) -> Result<Value,
         if let Some(schema) = cqrs_schema.as_ref() {
             if let Some(action_name) = assertion.header.typ.strip_prefix("action.") {
                 if let Some(action_schema) = schema.action(action_name) {
-                    let overlay_map = build_overlay_map(
-                        &store.root().to_path_buf(),
-                        &assertion.header.sub,
-                        assertion.header.ver,
-                    )?;
+                    let overlay_map =
+                        build_overlay_map(&store.root().to_path_buf(), &assertion.header.sub, assertion.header.ver)?;
                     let assertion_id = assertion.assertion_id()?;
                     let overlay = overlay_map.get(&assertion_id);
                     let merged = merge_args(&assertion.body, overlay)?;
@@ -4209,13 +4059,15 @@ fn prove_object(ctx: &ReplContext, store: &Store, bytes: &[u8]) -> Result<Value,
                 }
             }
         }
-        if let Ok(contract_bytes) = store.get_object(&EnvelopeId::from_bytes(
-            *assertion.header.contract.as_bytes(),
-        )) {
+        if let Ok(contract_bytes) = store.get_object(&EnvelopeId::from_bytes(*assertion.header.contract.as_bytes())) {
             if let Some(schema) = cqrs_schema.as_ref() {
                 if assertion.header.typ.starts_with("action.") {
-                    let (status, reason) =
-                        prove_cqrs_contract(store, schema, &contract_bytes, assertion)?;
+                    let (status, reason) = prove_cqrs_contract(
+                        store,
+                        schema,
+                        &contract_bytes,
+                        assertion,
+                    )?;
                     contract_status = Some(status);
                     contract_reason = reason;
                 }
@@ -4223,16 +4075,12 @@ fn prove_object(ctx: &ReplContext, store: &Store, bytes: &[u8]) -> Result<Value,
             if contract_status.is_none() {
                 let engine = crate::contract::ContractEngine::new(contract_bytes);
                 let context = Value::Map(vec![
-                    (
-                        Value::Text("subject".to_string()),
-                        Value::Bytes(assertion.header.sub.as_bytes().to_vec()),
-                    ),
+                    (Value::Text("subject".to_string()), Value::Bytes(assertion.header.sub.as_bytes().to_vec())),
                     (Value::Text("accepted".to_string()), Value::Array(vec![])),
                     (Value::Text("lookup".to_string()), Value::Map(vec![])),
                 ]);
                 let context_bytes = crate::cbor::encode_canonical_value(&context)?;
-                let result =
-                    engine.validate_with_env(store.env(), &assertion.to_cbor()?, &context_bytes)?;
+                let result = engine.validate_with_env(store.env(), &assertion.to_cbor()?, &context_bytes)?;
                 contract_status = Some(format!("{:?}", result.status));
                 contract_reason = result.reason.clone();
             }
@@ -4254,15 +4102,9 @@ fn prove_object(ctx: &ReplContext, store: &Store, bytes: &[u8]) -> Result<Value,
     }
 
     let mut entries = Vec::new();
-    entries.push((
-        Value::Text("canonical_decode".to_string()),
-        Value::Bool(canonical_ok),
-    ));
+    entries.push((Value::Text("canonical_decode".to_string()), Value::Bool(canonical_ok)));
     if let Some(sig) = signature_ok {
-        entries.push((
-            Value::Text("signature_verify".to_string()),
-            Value::Bool(sig),
-        ));
+        entries.push((Value::Text("signature_verify".to_string()), Value::Bool(sig)));
     }
     entries.push((
         Value::Text("deps_missing".to_string()),
@@ -4274,27 +4116,15 @@ fn prove_object(ctx: &ReplContext, store: &Store, bytes: &[u8]) -> Result<Value,
         ),
     ));
     if let Some(schema_ok) = schema_ok {
-        entries.push((
-            Value::Text("schema_validation".to_string()),
-            Value::Bool(schema_ok),
-        ));
+        entries.push((Value::Text("schema_validation".to_string()), Value::Bool(schema_ok)));
     }
     if let Some(status) = contract_status {
-        entries.push((
-            Value::Text("contract_validation".to_string()),
-            Value::Text(status),
-        ));
+        entries.push((Value::Text("contract_validation".to_string()), Value::Text(status)));
     }
     if let Some(reason) = contract_reason {
-        entries.push((
-            Value::Text("contract_reason".to_string()),
-            Value::Text(reason),
-        ));
+        entries.push((Value::Text("contract_reason".to_string()), Value::Text(reason)));
     }
-    entries.push((
-        Value::Text("final_status".to_string()),
-        Value::Text(final_status),
-    ));
+    entries.push((Value::Text("final_status".to_string()), Value::Text(final_status)));
     Ok(Value::Map(entries))
 }
 
@@ -4347,10 +4177,7 @@ fn prove_cqrs_contract(
         }
         vm.reduce(env, &mut memory, &args_buffer, Some(&context))?;
     }
-    Ok((
-        "Pending".to_string(),
-        Some("target assertion not found".to_string()),
-    ))
+    Ok(("Pending".to_string(), Some("target assertion not found".to_string())))
 }
 
 fn context_buffer_for_assertion(assertion: &AssertionPlaintext) -> Vec<u8> {
@@ -4411,10 +4238,7 @@ fn print_subject_status(
     let records = list_assertions(store.env(), subject)?;
     let counts = structural_counts(&records)?;
     println!("Accepted: {}", counts.accepted);
-    println!(
-        "Pending: {}",
-        counts.pending + index.pending_objects().len()
-    );
+    println!("Pending: {}", counts.pending + index.pending_objects().len());
     println!("Rejected: {}", counts.rejected);
     if verbose {
         let overlays = list_overlays(store.env(), subject)?;
@@ -4444,7 +4268,10 @@ fn print_assertion_header(assertion: &crate::assertion::AssertionPlaintext) {
     println!("  type: {}", assertion.header.typ);
     println!("  ver: {}", assertion.header.ver);
     println!("  seq: {}", assertion.header.seq);
-    println!("  auth: {}", assertion.header.auth.to_hex());
+    println!(
+        "  auth: {}",
+        assertion.header.auth.to_hex()
+    );
     println!(
         "  prev: {}",
         assertion
@@ -4465,10 +4292,7 @@ fn print_assertion_header(assertion: &crate::assertion::AssertionPlaintext) {
     }
 }
 
-fn load_contract_ids_for_ver(
-    root: &PathBuf,
-    ver: u64,
-) -> Result<(SchemaId, ContractId), DharmaError> {
+fn load_contract_ids_for_ver(root: &PathBuf, ver: u64) -> Result<(SchemaId, ContractId), DharmaError> {
     let config = std::fs::read_to_string(root.join("dharma.toml")).map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
             DharmaError::Config("missing dharma.toml".to_string())
@@ -4498,14 +4322,11 @@ fn load_contract_ids_for_ver(
             }
         }
     }
-    let schema_hex = schema_hex
-        .ok_or_else(|| DharmaError::Config("missing schema in dharma.toml".to_string()))?;
+    let schema_hex =
+        schema_hex.ok_or_else(|| DharmaError::Config("missing schema in dharma.toml".to_string()))?;
     let contract_hex = contract_hex
         .ok_or_else(|| DharmaError::Config("missing contract in dharma.toml".to_string()))?;
-    Ok((
-        SchemaId::from_hex(&schema_hex)?,
-        ContractId::from_hex(&contract_hex)?,
-    ))
+    Ok((SchemaId::from_hex(&schema_hex)?, ContractId::from_hex(&contract_hex)?))
 }
 
 fn load_schema_bytes(root: &PathBuf, id: &SchemaId) -> Result<Vec<u8>, DharmaError> {
@@ -4574,10 +4395,7 @@ fn current_subject_or_identity(ctx: &ReplContext) -> Result<SubjectId, DharmaErr
     Err(DharmaError::Validation("no subject selected".to_string()))
 }
 
-fn resolve_assertion_id_for_subject(
-    ctx: &ReplContext,
-    token: &str,
-) -> Result<AssertionId, DharmaError> {
+fn resolve_assertion_id_for_subject(ctx: &ReplContext, token: &str) -> Result<AssertionId, DharmaError> {
     let subject = current_subject_or_identity(ctx)?;
     let env = dharma::env::StdEnv::new(&ctx.data_dir);
     let records = list_assertions(&env, &subject)?;
@@ -4589,18 +4407,12 @@ fn resolve_assertion_id_from_records(
     token: &str,
 ) -> Result<AssertionId, DharmaError> {
     if let Ok(assertion_id) = AssertionId::from_hex(token) {
-        if records
-            .iter()
-            .any(|record| record.assertion_id == assertion_id)
-        {
+        if records.iter().any(|record| record.assertion_id == assertion_id) {
             return Ok(assertion_id);
         }
     }
     if let Ok(envelope_id) = EnvelopeId::from_hex(token) {
-        if let Some(record) = records
-            .iter()
-            .find(|record| record.envelope_id == envelope_id)
-        {
+        if let Some(record) = records.iter().find(|record| record.envelope_id == envelope_id) {
             return Ok(record.assertion_id);
         }
     }
@@ -4626,9 +4438,7 @@ fn resolve_assertion_id_from_records(
             return Err(DharmaError::Validation("unknown assertion id".to_string()));
         }
     }
-    Err(DharmaError::Validation(
-        "ambiguous assertion id".to_string(),
-    ))
+    Err(DharmaError::Validation("ambiguous assertion id".to_string()))
 }
 
 fn resolve_envelope_id_any(store: &Store, token: &str) -> Result<EnvelopeId, DharmaError> {
@@ -4842,9 +4652,7 @@ fn resolve_contract_by_name(ctx: &ReplContext, name: &str) -> Result<ContractEnt
     if let Some(entry) = select_contract_by_name(collect_local_contracts()?, name) {
         return Ok(entry);
     }
-    Err(DharmaError::Validation(format!(
-        "unknown contract '{name}'"
-    )))
+    Err(DharmaError::Validation(format!("unknown contract '{name}'")))
 }
 
 fn parse_contract_table_name(name: &str, default_lens: u64) -> Result<(String, u64), DharmaError> {
@@ -4874,10 +4682,7 @@ fn parse_contract_table_spec_name(
     Ok((contract, lens, kind))
 }
 
-fn subject_schema_id(
-    ctx: &ReplContext,
-    subject: &SubjectId,
-) -> Result<Option<SchemaId>, DharmaError> {
+fn subject_schema_id(ctx: &ReplContext, subject: &SubjectId) -> Result<Option<SchemaId>, DharmaError> {
     let env = dharma::env::StdEnv::new(&ctx.data_dir);
     let records = list_assertions(&env, subject)?;
     for record in records.iter().rev() {
@@ -5064,7 +4869,9 @@ fn collect_compiled_contracts(
             let path = entry.path();
             let file_type = entry.file_type()?;
             if file_type.is_dir() {
-                if skip_build_dirs && path.file_name().and_then(|s| s.to_str()) == Some("_build") {
+                if skip_build_dirs
+                    && path.file_name().and_then(|s| s.to_str()) == Some("_build")
+                {
                     continue;
                 }
                 stack.push(path);
@@ -5218,7 +5025,11 @@ pub(crate) fn format_type(typ: &TypeSpec) -> String {
         TypeSpec::Struct(name) => format!("Struct<{name}>"),
         TypeSpec::GeoPoint => "GeoPoint".to_string(),
         TypeSpec::List(inner) => format!("List<{}>", format_type(inner)),
-        TypeSpec::Map(key, value) => format!("Map<{}, {}>", format_type(key), format_type(value)),
+        TypeSpec::Map(key, value) => format!(
+            "Map<{}, {}>",
+            format_type(key),
+            format_type(value)
+        ),
         TypeSpec::Optional(inner) => format!("Optional<{}>", format_type(inner)),
     }
 }
@@ -5332,7 +5143,8 @@ fn print_query_table(ctx: &ReplContext, results: &[crate::dharmaq_core::QueryRow
 }
 
 fn subject_label(ctx: &ReplContext, subject: &SubjectId) -> String {
-    alias_for_subject(&ctx.aliases, subject).unwrap_or_else(|| short_hex(&subject.to_hex(), 12))
+    alias_for_subject(&ctx.aliases, subject)
+        .unwrap_or_else(|| short_hex(&subject.to_hex(), 12))
 }
 
 fn sanitize_snippet(snippet: &str) -> String {
@@ -5477,7 +5289,7 @@ mod tests {
             fields,
             actions: BTreeMap::new(),
             queries: BTreeMap::new(),
-            projections: BTreeMap::new(),
+        projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Strict,
         };
         let value = Value::Map(vec![
@@ -5546,7 +5358,10 @@ mod tests {
         .into_iter()
         .map(|s| s.to_string())
         .collect::<Vec<_>>();
-        assert_eq!(parts, expected);
+        assert_eq!(
+            parts,
+            expected
+        );
     }
 
     #[test]

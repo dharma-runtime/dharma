@@ -2,9 +2,7 @@ use crate::cbor;
 use crate::crypto;
 use crate::error::DharmaError;
 use crate::types::{AssertionId, ContractId, IdentityKey, SchemaId, SubjectId};
-use crate::value::{
-    expect_array, expect_bytes, expect_int, expect_map, expect_text, expect_uint, map_get,
-};
+use crate::value::{expect_array, expect_bytes, expect_int, expect_map, expect_text, expect_uint, map_get};
 use ciborium::value::Value;
 use ed25519_dalek::SigningKey;
 
@@ -38,26 +36,17 @@ impl AssertionHeader {
     pub fn to_value(&self) -> Value {
         let mut entries = Vec::new();
         entries.push((Value::Text("v".to_string()), Value::Integer(self.v.into())));
-        entries.push((
-            Value::Text("ver".to_string()),
-            Value::Integer(self.ver.into()),
-        ));
+        entries.push((Value::Text("ver".to_string()), Value::Integer(self.ver.into())));
         entries.push((
             Value::Text("sub".to_string()),
             Value::Bytes(self.sub.as_bytes().to_vec()),
         ));
-        entries.push((
-            Value::Text("typ".to_string()),
-            Value::Text(self.typ.clone()),
-        ));
+        entries.push((Value::Text("typ".to_string()), Value::Text(self.typ.clone())));
         entries.push((
             Value::Text("auth".to_string()),
             Value::Bytes(self.auth.as_bytes().to_vec()),
         ));
-        entries.push((
-            Value::Text("seq".to_string()),
-            Value::Integer(self.seq.into()),
-        ));
+        entries.push((Value::Text("seq".to_string()), Value::Integer(self.seq.into())));
         entries.push((
             Value::Text("prev".to_string()),
             match &self.prev {
@@ -100,57 +89,34 @@ impl AssertionHeader {
 
     pub fn from_value(value: &Value) -> Result<Self, DharmaError> {
         let map = expect_map(value)?;
-        let v = expect_uint(
-            map_get(map, "v").ok_or_else(|| DharmaError::Validation("missing v".to_string()))?,
-        )?;
+        let v = expect_uint(map_get(map, "v").ok_or_else(|| DharmaError::Validation("missing v".to_string()))?)?;
         let ver = match map_get(map, "ver") {
             Some(value) => expect_uint(value)?,
             None => DEFAULT_DATA_VERSION,
         };
-        let sub_bytes = expect_bytes(
-            map_get(map, "sub")
-                .ok_or_else(|| DharmaError::Validation("missing sub".to_string()))?,
-        )?;
-        let typ = expect_text(
-            map_get(map, "typ")
-                .ok_or_else(|| DharmaError::Validation("missing typ".to_string()))?,
-        )?;
-        let auth_bytes = expect_bytes(
-            map_get(map, "auth")
-                .ok_or_else(|| DharmaError::Validation("missing auth".to_string()))?,
-        )?;
-        let seq = expect_uint(
-            map_get(map, "seq")
-                .ok_or_else(|| DharmaError::Validation("missing seq".to_string()))?,
-        )?;
-        let prev_val = map_get(map, "prev")
-            .ok_or_else(|| DharmaError::Validation("missing prev".to_string()))?;
+        let sub_bytes = expect_bytes(map_get(map, "sub").ok_or_else(|| DharmaError::Validation("missing sub".to_string()))?)?;
+        let typ = expect_text(map_get(map, "typ").ok_or_else(|| DharmaError::Validation("missing typ".to_string()))?)?;
+        let auth_bytes = expect_bytes(map_get(map, "auth").ok_or_else(|| DharmaError::Validation("missing auth".to_string()))?)?;
+        let seq = expect_uint(map_get(map, "seq").ok_or_else(|| DharmaError::Validation("missing seq".to_string()))?)?;
+        let prev_val = map_get(map, "prev").ok_or_else(|| DharmaError::Validation("missing prev".to_string()))?;
         let prev = match prev_val {
             Value::Null => None,
             other => Some(AssertionId::from_slice(&expect_bytes(other)?)?),
         };
-        let refs_val = map_get(map, "refs")
-            .ok_or_else(|| DharmaError::Validation("missing refs".to_string()))?;
+        let refs_val = map_get(map, "refs").ok_or_else(|| DharmaError::Validation("missing refs".to_string()))?;
         let refs_array = expect_array(refs_val)?;
         let mut refs = Vec::with_capacity(refs_array.len());
         for entry in refs_array {
             let bytes = expect_bytes(entry)?;
             refs.push(AssertionId::from_slice(&bytes)?);
         }
-        let ts_val =
-            map_get(map, "ts").ok_or_else(|| DharmaError::Validation("missing ts".to_string()))?;
+        let ts_val = map_get(map, "ts").ok_or_else(|| DharmaError::Validation("missing ts".to_string()))?;
         let ts = match ts_val {
             Value::Null => None,
             other => Some(expect_int(other)?),
         };
-        let schema_bytes = expect_bytes(
-            map_get(map, "schema")
-                .ok_or_else(|| DharmaError::Validation("missing schema".to_string()))?,
-        )?;
-        let contract_bytes = expect_bytes(
-            map_get(map, "contract")
-                .ok_or_else(|| DharmaError::Validation("missing contract".to_string()))?,
-        )?;
+        let schema_bytes = expect_bytes(map_get(map, "schema").ok_or_else(|| DharmaError::Validation("missing schema".to_string()))?)?;
+        let contract_bytes = expect_bytes(map_get(map, "contract").ok_or_else(|| DharmaError::Validation("missing contract".to_string()))?)?;
         let note = map_get(map, "note").map(|v| expect_text(v)).transpose()?;
         let meta = map_get(map, "meta").cloned();
 
@@ -218,11 +184,7 @@ pub fn signer_from_meta(meta: &Option<Value>) -> Option<SubjectId> {
 }
 
 impl AssertionPlaintext {
-    pub fn sign(
-        header: AssertionHeader,
-        body: Value,
-        key: &SigningKey,
-    ) -> Result<Self, DharmaError> {
+    pub fn sign(header: AssertionHeader, body: Value, key: &SigningKey) -> Result<Self, DharmaError> {
         let sig = sign_payload(&header, &body, key)?;
         Ok(Self { header, body, sig })
     }
@@ -231,10 +193,7 @@ impl AssertionPlaintext {
         Value::Map(vec![
             (Value::Text("h".to_string()), self.header.to_value()),
             (Value::Text("b".to_string()), self.body.clone()),
-            (
-                Value::Text("sig".to_string()),
-                Value::Bytes(self.sig.clone()),
-            ),
+            (Value::Text("sig".to_string()), Value::Bytes(self.sig.clone())),
         ])
     }
 
@@ -245,19 +204,12 @@ impl AssertionPlaintext {
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, DharmaError> {
         let value = cbor::ensure_canonical(bytes)?;
         let map = expect_map(&value)?;
-        let header_val = map_get(map, "h")
-            .ok_or_else(|| DharmaError::Validation("missing header".to_string()))?;
-        let body_val =
-            map_get(map, "b").ok_or_else(|| DharmaError::Validation("missing body".to_string()))?;
-        let sig_val = map_get(map, "sig")
-            .ok_or_else(|| DharmaError::Validation("missing sig".to_string()))?;
+        let header_val = map_get(map, "h").ok_or_else(|| DharmaError::Validation("missing header".to_string()))?;
+        let body_val = map_get(map, "b").ok_or_else(|| DharmaError::Validation("missing body".to_string()))?;
+        let sig_val = map_get(map, "sig").ok_or_else(|| DharmaError::Validation("missing sig".to_string()))?;
         let header = AssertionHeader::from_value(header_val)?;
         let sig = expect_bytes(sig_val)?;
-        Ok(Self {
-            header,
-            body: body_val.clone(),
-            sig,
-        })
+        Ok(Self { header, body: body_val.clone(), sig })
     }
 
     pub fn verify_signature(&self) -> Result<bool, DharmaError> {
@@ -266,10 +218,7 @@ impl AssertionPlaintext {
     }
 
     pub fn assertion_id(&self) -> Result<AssertionId, DharmaError> {
-        Ok(crypto::assertion_id(&payload_bytes(
-            &self.header,
-            &self.body,
-        )?))
+        Ok(crypto::assertion_id(&payload_bytes(&self.header, &self.body)?))
     }
 }
 

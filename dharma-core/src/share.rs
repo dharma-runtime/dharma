@@ -5,9 +5,7 @@ use crate::ownership::Owner;
 use crate::store::state::{list_assertions, load_ownership};
 use crate::store::Store;
 use crate::types::{IdentityKey, SubjectId};
-use crate::value::{
-    expect_array, expect_bool, expect_bytes, expect_int, expect_map, expect_text, map_get,
-};
+use crate::value::{expect_array, expect_bool, expect_bytes, expect_int, expect_map, expect_text, map_get};
 use std::collections::{BTreeSet, HashMap};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -188,8 +186,7 @@ impl ShareState {
                 self.grants.insert(identity, ShareGrant { scopes, expires });
             }
             (None, Some(role)) if !role.is_empty() => {
-                self.role_grants
-                    .insert(role, ShareGrant { scopes, expires });
+                self.role_grants.insert(role, ShareGrant { scopes, expires });
             }
             _ => {}
         }
@@ -291,9 +288,7 @@ fn parse_optional_identity(
     Ok(Some(IdentityKey::from_slice(&bytes)?))
 }
 
-fn parse_optional_text(
-    value: Option<&ciborium::value::Value>,
-) -> Result<Option<String>, DharmaError> {
+fn parse_optional_text(value: Option<&ciborium::value::Value>) -> Result<Option<String>, DharmaError> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -490,29 +485,13 @@ mod tests {
                 Value::Array(vec![Value::Text("read".to_string())]),
             ),
         ]);
-        append_share_assertion(
-            env,
-            subject,
-            1,
-            "share.grant",
-            owner_id,
-            &owner_sk,
-            grant_body,
-        );
+        append_share_assertion(env, subject, 1, "share.grant", owner_id, &owner_sk, grant_body);
 
         let revoke_body = Value::Map(vec![(
             Value::Text("target_identity".to_string()),
             Value::Bytes(target_id.as_bytes().to_vec()),
         )]);
-        append_share_assertion(
-            env,
-            subject,
-            2,
-            "share.revoke",
-            owner_id,
-            &owner_sk,
-            revoke_body,
-        );
+        append_share_assertion(env, subject, 2, "share.revoke", owner_id, &owner_sk, revoke_body);
 
         let state = ShareState::load(&store, &subject).unwrap();
         assert!(!state.allows_identity(&target_id, &[], 0, "read"));
@@ -599,9 +578,7 @@ mod tests {
             panic!("expected map");
         };
         assert_eq!(entries.len(), 1);
-        assert!(entries
-            .iter()
-            .any(|(k, _)| k == &Value::Text("alpha".to_string())));
+        assert!(entries.iter().any(|(k, _)| k == &Value::Text("alpha".to_string())));
     }
 
     #[test]

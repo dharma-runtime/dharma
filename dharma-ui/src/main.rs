@@ -1,9 +1,7 @@
 mod model;
 
+use gpui::{App, Application, Bounds, Context, Window, WindowBounds, WindowOptions, div, px, rgb, size};
 use gpui::prelude::*;
-use gpui::{
-    div, px, rgb, size, App, Application, Bounds, Context, Window, WindowBounds, WindowOptions,
-};
 use model::{BufferKind, BufferModel};
 
 fn main() {
@@ -14,8 +12,9 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| WorkspaceView::new()),
-        )
+            |_, cx| {
+            cx.new(|_| WorkspaceView::new())
+        })
         .unwrap();
         cx.activate(true);
     });
@@ -41,7 +40,12 @@ impl WorkspaceView {
 
 impl Render for WorkspaceView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut root = div().flex().flex_row().w_full().h_full().bg(rgb(0x0f1115));
+        let mut root = div()
+            .flex()
+            .flex_row()
+            .w_full()
+            .h_full()
+            .bg(rgb(0x0f1115));
 
         let mut sidebar = div()
             .flex()
@@ -58,17 +62,13 @@ impl Render for WorkspaceView {
         for buffer in self.buffers.list() {
             let id = buffer.id;
             let is_selected = self.selected == Some(id);
-            let row_bg = if is_selected {
-                rgb(0x1f2937)
-            } else {
-                rgb(0x14181c)
-            };
-            let row_text = if is_selected {
-                rgb(0xf8fafc)
-            } else {
-                rgb(0xcbd5f5)
-            };
-            let label = format!("#{:02} {}", buffer.id.value(), buffer.title);
+            let row_bg = if is_selected { rgb(0x1f2937) } else { rgb(0x14181c) };
+            let row_text = if is_selected { rgb(0xf8fafc) } else { rgb(0xcbd5f5) };
+            let label = format!(
+                "#{:02} {}",
+                buffer.id.value(),
+                buffer.title
+            );
             let row = div()
                 .id(("buffer", id.value()))
                 .w_full()
@@ -97,12 +97,7 @@ impl Render for WorkspaceView {
         if let Some(id) = self.selected {
             if let Some(buffer) = self.buffers.get(id) {
                 preview = preview
-                    .child(
-                        div()
-                            .text_xl()
-                            .text_color(rgb(0xf8fafc))
-                            .child(buffer.title.clone()),
-                    )
+                    .child(div().text_xl().text_color(rgb(0xf8fafc)).child(buffer.title.clone()))
                     .child(div().text_sm().text_color(rgb(0x94a3b8)).child(format!(
                         "Type: {} · {} chars",
                         buffer.kind,

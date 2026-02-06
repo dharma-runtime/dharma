@@ -1,7 +1,7 @@
 use crate::error::DharmaError;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const DEFAULT_MAX_FRAME_SIZE: usize = 1_048_576;
 static MAX_FRAME_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_FRAME_SIZE);

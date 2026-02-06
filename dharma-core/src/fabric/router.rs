@@ -34,11 +34,7 @@ pub struct Router {
 
 impl Router {
     pub fn new(shard_maps: Vec<ShardMap>, ads: AdStore, config: RouterConfig) -> Self {
-        Self {
-            shard_maps,
-            ads,
-            config,
-        }
+        Self { shard_maps, ads, config }
     }
 
     pub fn resolve_table(&self, table: &str, key: &[u8]) -> Vec<IdentityKey> {
@@ -85,7 +81,10 @@ impl Router {
     }
 
     fn ads_snapshot(&self) -> Vec<(IdentityKey, Advertisement)> {
-        self.ads.get_all().into_iter().collect()
+        self.ads
+            .get_all()
+            .into_iter()
+            .collect()
     }
 
     pub fn hedge_count(&self) -> usize {
@@ -286,23 +285,18 @@ fn token_oracle_allowed(
     })
 }
 
-fn ad_oracle_matches(
-    ad: Advertisement,
-    name: &str,
-    mode: OracleMode,
-    timing: OracleTiming,
-) -> bool {
-    ad.oracles
-        .iter()
-        .any(|oracle| oracle.name == name && oracle.mode == mode && oracle.timing == timing)
+fn ad_oracle_matches(ad: Advertisement, name: &str, mode: OracleMode, timing: OracleTiming) -> bool {
+    ad.oracles.iter().any(|oracle| {
+        oracle.name == name && oracle.mode == mode && oracle.timing == timing
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crypto;
-    use crate::fabric::auth::OracleClaim;
     use crate::fabric::auth::{Flag, Op, Scope};
+    use crate::fabric::auth::OracleClaim;
     use crate::fabric::types::{AdStore, Advertisement, Endpoint, OracleAd, ShardAd};
     use rand::rngs::StdRng;
     use rand::SeedableRng;

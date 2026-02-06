@@ -1,8 +1,8 @@
 use crate::error::DharmaError;
 use crate::pdl::ast::{
-    ActionDef, AggregateDef, ArgDef, Assignment, AstFile, ConcurrencyMode, EmitDef, Expr,
-    ExternalDef, FieldDef, Header, Literal, Op, ProjectionDef, QueryDef, ReactorDef, SourceSpan,
-    Spanned, StructDef, TypeSpec, ViewDef, Visibility,
+    ActionDef, AggregateDef, ArgDef, Assignment, AstFile, ConcurrencyMode, EmitDef, Expr, ExternalDef,
+    FieldDef, Header, Literal, Op, ProjectionDef, QueryDef, ReactorDef, SourceSpan, Spanned,
+    StructDef, TypeSpec, ViewDef, Visibility,
 };
 use crate::pdl::expr::parse_expr;
 use nom::branch::alt;
@@ -134,7 +134,11 @@ fn parse_front_matter(markdown: &str) -> (Header, &str, usize) {
     let mut body_line = 0usize;
     for (idx, line) in markdown.lines().enumerate().skip(1) {
         if line.trim() == "---" {
-            body_start = markdown.lines().take(idx + 1).map(|l| l.len() + 1).sum();
+            body_start = markdown
+                .lines()
+                .take(idx + 1)
+                .map(|l| l.len() + 1)
+                .sum();
             body_line = idx + 1;
             break;
         }
@@ -376,19 +380,14 @@ fn parse_code_block(
                         }
                         idx = scan_idx;
                     }
-                    let (name, args) =
-                        parse_query_header(&header).map_err(|e| with_span(e, &span))?;
+                    let (name, args) = parse_query_header(&header).map_err(|e| with_span(e, &span))?;
                     current_query = Some(QueryDef {
                         name,
                         args,
                         visibility: Visibility::Private,
                         body: Vec::new(),
                         start_line: line_no + 1,
-                        doc: if apply_doc.is_empty() {
-                            None
-                        } else {
-                            Some(apply_doc.clone())
-                        },
+                        doc: if apply_doc.is_empty() { None } else { Some(apply_doc.clone()) },
                     });
                     query_body_started = false;
                     section = Some(Section::Query);
@@ -401,11 +400,7 @@ fn parse_code_block(
                         name: name.to_string(),
                         body: Vec::new(),
                         start_line: line_no + 1,
-                        doc: if apply_doc.is_empty() {
-                            None
-                        } else {
-                            Some(apply_doc.clone())
-                        },
+                        doc: if apply_doc.is_empty() { None } else { Some(apply_doc.clone()) },
                     });
                     projection_body_started = false;
                     section = Some(Section::Projection);
@@ -496,10 +491,9 @@ fn parse_code_block(
                         reactor.trigger = Some(content.to_string());
                         section = None;
                     } else if content.starts_with("emit ") {
-                        reactor.emits.push(
-                            parse_emit_line(content, span.clone())
-                                .map_err(|e| with_span(e, &span))?,
-                        );
+                        reactor
+                            .emits
+                            .push(parse_emit_line(content, span.clone()).map_err(|e| with_span(e, &span))?);
                         section = None;
                     } else {
                         section = None;
@@ -509,8 +503,8 @@ fn parse_code_block(
                     section = Some(Section::External);
                 } else if current_struct.is_some() {
                     if content.contains(':') {
-                        let field = parse_field_line(content, Visibility::Public)
-                            .map_err(|e| with_span(e, &span))?;
+                        let field =
+                            parse_field_line(content, Visibility::Public).map_err(|e| with_span(e, &span))?;
                         if let Some(st) = current_struct.as_mut() {
                             st.fields.push(field);
                         }
@@ -544,108 +538,99 @@ fn parse_code_block(
             2 => {
                 if let Some(reactor) = current_reactor.as_mut() {
                     if content.starts_with("emit ") {
-                        reactor.emits.push(
-                            parse_emit_line(content, span.clone())
-                                .map_err(|e| with_span(e, &span))?,
-                        );
+                        reactor
+                            .emits
+                            .push(parse_emit_line(content, span.clone()).map_err(|e| with_span(e, &span))?);
                         idx += 1;
                         continue;
                     }
                 }
                 match section {
-                    Some(Section::State) => {
-                        let default_vis = current_aggregate
-                            .as_ref()
-                            .and_then(|agg| agg.extends.as_ref())
-                            .map(|_| Visibility::Private)
-                            .unwrap_or(Visibility::Public);
-                        let field = parse_field_line(content, default_vis)
-                            .map_err(|e| with_span(e, &span))?;
-                        if let Some(agg) = current_aggregate.as_mut() {
-                            agg.fields.push(field);
-                        }
+                Some(Section::State) => {
+                    let default_vis = current_aggregate
+                        .as_ref()
+                        .and_then(|agg| agg.extends.as_ref())
+                        .map(|_| Visibility::Private)
+                        .unwrap_or(Visibility::Public);
+                    let field = parse_field_line(content, default_vis).map_err(|e| with_span(e, &span))?;
+                    if let Some(agg) = current_aggregate.as_mut() {
+                        agg.fields.push(field);
                     }
-                    Some(Section::Struct) => {
-                        let field = parse_field_line(content, Visibility::Public)
-                            .map_err(|e| with_span(e, &span))?;
-                        if let Some(st) = current_struct.as_mut() {
-                            st.fields.push(field);
-                        }
-                    }
-                    Some(Section::Validate) => {
-                        let expr = strip_comment(content);
-                        if expr.is_empty() {
-                            idx += 1;
-                            continue;
-                        }
-                        if let Some(action) = current_action.as_mut() {
-                            action.validates.push(Spanned::new(
-                                parse_expr(expr).map_err(|e| with_span(e, &span))?,
-                                span.clone(),
-                            ));
-                        }
-                    }
-                    Some(Section::Apply) => {
-                        let line = strip_comment(content);
-                        if line.is_empty() {
-                            idx += 1;
-                            continue;
-                        }
-                        if let Some(action) = current_action.as_mut() {
-                            if let Some((target, value)) = line.split_once('=') {
-                                let target_path =
-                                    parse_path(target.trim()).map_err(|e| with_span(e, &span))?;
-                                let value_expr =
-                                    parse_expr(value.trim()).map_err(|e| with_span(e, &span))?;
-                                action.applies.push(Spanned::new(
-                                    Assignment {
-                                        target: target_path,
-                                        value: value_expr,
-                                    },
-                                    span.clone(),
-                                ));
-                            } else if let Some(assign) =
-                                parse_apply_call(line).map_err(|e| with_span(e, &span))?
-                            {
-                                action.applies.push(Spanned::new(assign, span.clone()));
-                            }
-                        }
-                    }
-                    Some(Section::ReactorValidate) => {
-                        let expr = strip_comment(content);
-                        if expr.is_empty() {
-                            idx += 1;
-                            continue;
-                        }
-                        if let Some(reactor) = current_reactor.as_mut() {
-                            let expr = strip_if(expr);
-                            reactor.validates.push(Spanned::new(
-                                parse_expr(expr).map_err(|e| with_span(e, &span))?,
-                                span.clone(),
-                            ));
-                        }
-                    }
-                    Some(Section::Invariant) => {
-                        let expr = strip_comment(content);
-                        if expr.is_empty() {
-                            idx += 1;
-                            continue;
-                        }
-                        if let Some(agg) = current_aggregate.as_mut() {
-                            agg.invariants.push(Spanned::new(
-                                parse_expr(expr).map_err(|e| with_span(e, &span))?,
-                                span.clone(),
-                            ));
-                        }
-                    }
-                    Some(Section::Flow) => {}
-                    Some(Section::External) => {}
-                    Some(Section::View) => {}
-                    Some(Section::Query) => {}
-                    Some(Section::Projection) => {}
-                    None => {}
                 }
+                Some(Section::Struct) => {
+                    let field = parse_field_line(content, Visibility::Public).map_err(|e| with_span(e, &span))?;
+                    if let Some(st) = current_struct.as_mut() {
+                        st.fields.push(field);
+                    }
+                }
+                Some(Section::Validate) => {
+                    let expr = strip_comment(content);
+                    if expr.is_empty() {
+                        idx += 1;
+                        continue;
+                    }
+                    if let Some(action) = current_action.as_mut() {
+                        action
+                            .validates
+                            .push(Spanned::new(parse_expr(expr).map_err(|e| with_span(e, &span))?, span.clone()));
+                    }
+                }
+                Some(Section::Apply) => {
+                    let line = strip_comment(content);
+                    if line.is_empty() {
+                        idx += 1;
+                        continue;
+                    }
+                    if let Some(action) = current_action.as_mut() {
+                        if let Some((target, value)) = line.split_once('=') {
+                            let target_path = parse_path(target.trim()).map_err(|e| with_span(e, &span))?;
+                            let value_expr = parse_expr(value.trim()).map_err(|e| with_span(e, &span))?;
+                            action.applies.push(Spanned::new(
+                                Assignment {
+                                    target: target_path,
+                                    value: value_expr,
+                                },
+                                span.clone(),
+                            ));
+                        } else if let Some(assign) =
+                            parse_apply_call(line).map_err(|e| with_span(e, &span))?
+                        {
+                            action.applies.push(Spanned::new(assign, span.clone()));
+                        }
+                    }
+                }
+                Some(Section::ReactorValidate) => {
+                    let expr = strip_comment(content);
+                    if expr.is_empty() {
+                        idx += 1;
+                        continue;
+                    }
+                    if let Some(reactor) = current_reactor.as_mut() {
+                        let expr = strip_if(expr);
+                        reactor
+                            .validates
+                            .push(Spanned::new(parse_expr(expr).map_err(|e| with_span(e, &span))?, span.clone()));
+                    }
+                }
+                Some(Section::Invariant) => {
+                    let expr = strip_comment(content);
+                    if expr.is_empty() {
+                        idx += 1;
+                        continue;
+                    }
+                    if let Some(agg) = current_aggregate.as_mut() {
+                        agg.invariants
+                            .push(Spanned::new(parse_expr(expr).map_err(|e| with_span(e, &span))?, span.clone()));
+                    }
+                }
+                Some(Section::Flow) => {}
+                Some(Section::External) => {}
+                Some(Section::View) => {}
+                Some(Section::Query) => {}
+                Some(Section::Projection) => {}
+                None => {}
             }
+            },
             _ => {}
         }
         idx += 1;
@@ -795,15 +780,13 @@ fn split_type_default(rest: &str) -> (&str, Option<&str>) {
 
 fn parse_action_header(line: &str) -> Result<(String, Vec<ArgDef>), DharmaError> {
     let line = line.trim();
-    let (_, (name, args)) =
-        action_parser(line).map_err(|_| DharmaError::Validation("invalid action".to_string()))?;
+    let (_, (name, args)) = action_parser(line).map_err(|_| DharmaError::Validation("invalid action".to_string()))?;
     Ok((name, args))
 }
 
 fn parse_query_header(line: &str) -> Result<(String, Vec<ArgDef>), DharmaError> {
     let line = line.trim();
-    let (_, (name, args)) =
-        query_parser(line).map_err(|_| DharmaError::Validation("invalid query".to_string()))?;
+    let (_, (name, args)) = query_parser(line).map_err(|_| DharmaError::Validation("invalid query".to_string()))?;
     Ok((name, args))
 }
 
@@ -873,14 +856,10 @@ fn parse_literal(value: &str, typ: &TypeSpec) -> Result<Literal, DharmaError> {
             let lit = expr_to_literal(&expr)?;
             match lit {
                 Literal::Map(_) | Literal::Struct(_, _) => Ok(lit),
-                _ => Err(DharmaError::Validation(
-                    "invalid struct literal".to_string(),
-                )),
+                _ => Err(DharmaError::Validation("invalid struct literal".to_string())),
             }
         }
-        TypeSpec::GeoPoint => Err(DharmaError::Validation(
-            "geopoint literal unsupported".to_string(),
-        )),
+        TypeSpec::GeoPoint => Err(DharmaError::Validation("geopoint literal unsupported".to_string())),
         TypeSpec::List(_) | TypeSpec::Map(_, _) => {
             let expr = parse_expr(value)?;
             let lit = expr_to_literal(&expr)?;
@@ -912,9 +891,7 @@ fn parse_decimal_literal(value: &str, scale: Option<u32>) -> Result<i64, DharmaE
     };
     let scale = scale.unwrap_or(0);
     if frac_part.is_some() && scale == 0 {
-        return Err(DharmaError::Validation(
-            "decimal scale required".to_string(),
-        ));
+        return Err(DharmaError::Validation("decimal scale required".to_string()));
     }
     let int_str = if int_part.is_empty() { "0" } else { int_part };
     let int_val = int_str
@@ -926,9 +903,7 @@ fn parse_decimal_literal(value: &str, scale: Option<u32>) -> Result<i64, DharmaE
         .ok_or_else(|| DharmaError::Validation("decimal overflow".to_string()))?;
     if let Some(frac) = frac_part {
         if frac.len() > scale as usize {
-            return Err(DharmaError::Validation(
-                "decimal scale overflow".to_string(),
-            ));
+            return Err(DharmaError::Validation("decimal scale overflow".to_string()));
         }
         let mut frac_buf = String::from(frac);
         while frac_buf.len() < scale as usize {
@@ -1026,16 +1001,12 @@ fn parse_type_spec(input: &str) -> Result<TypeSpec, DharmaError> {
         return Ok(TypeSpec::Optional(Box::new(inner)));
     }
     if let Some(inner) = input.strip_prefix("List<") {
-        let inner = inner
-            .strip_suffix('>')
-            .ok_or_else(|| DharmaError::Validation("invalid list type".to_string()))?;
+        let inner = inner.strip_suffix('>').ok_or_else(|| DharmaError::Validation("invalid list type".to_string()))?;
         let inner = parse_type_spec(inner)?;
         return Ok(TypeSpec::List(Box::new(inner)));
     }
     if let Some(inner) = input.strip_prefix("Map<") {
-        let inner = inner
-            .strip_suffix('>')
-            .ok_or_else(|| DharmaError::Validation("invalid map type".to_string()))?;
+        let inner = inner.strip_suffix('>').ok_or_else(|| DharmaError::Validation("invalid map type".to_string()))?;
         let parts = split_type_args(inner)?;
         if parts.len() != 2 {
             return Err(DharmaError::Validation("invalid map type".to_string()));
@@ -1065,9 +1036,7 @@ fn parse_path(input: &str) -> Result<Vec<String>, DharmaError> {
         .map(|s| s.to_string())
         .collect();
     if parts.is_empty() {
-        return Err(DharmaError::Validation(
-            "invalid assignment target".to_string(),
-        ));
+        return Err(DharmaError::Validation("invalid assignment target".to_string()));
     }
     Ok(parts)
 }
@@ -1083,9 +1052,7 @@ fn strip_if(expr: &str) -> &str {
 fn parse_flow_transition(line: &str) -> Result<FlowTransition, DharmaError> {
     let parts: Vec<&str> = line.split("->").map(|p| p.trim()).collect();
     if parts.len() != 3 {
-        return Err(DharmaError::Validation(
-            "invalid flow transition".to_string(),
-        ));
+        return Err(DharmaError::Validation("invalid flow transition".to_string()));
     }
     let from = strip_flow_token(parts[0])?;
     let action = strip_flow_action(parts[1])?;
@@ -1380,16 +1347,8 @@ fn arg_parser(input: &str) -> IResult<&str, ArgDef> {
     let (input, name) = identifier(input)?;
     let (input, _) = delimited(space0, char(':'), space0)(input)?;
     let (input, typ_str) = type_str_parser(input)?;
-    let typ = parse_type_spec(typ_str.trim()).map_err(|_| {
-        nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
-    })?;
-    Ok((
-        input,
-        ArgDef {
-            name: name.to_string(),
-            typ,
-        },
-    ))
+    let typ = parse_type_spec(typ_str.trim()).map_err(|_| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail)))?;
+    Ok((input, ArgDef { name: name.to_string(), typ }))
 }
 
 fn type_str_parser(input: &str) -> IResult<&str, &str> {
@@ -1414,12 +1373,7 @@ fn type_str_parser(input: &str) -> IResult<&str, &str> {
             ']' if !in_str => depth_bracket -= 1,
             '{' if !in_str => depth_brace += 1,
             '}' if !in_str => depth_brace -= 1,
-            ',' if !in_str
-                && depth_paren == 0
-                && depth_angle == 0
-                && depth_bracket == 0
-                && depth_brace == 0 =>
-            {
+            ',' if !in_str && depth_paren == 0 && depth_angle == 0 && depth_bracket == 0 && depth_brace == 0 => {
                 return Ok((&input[idx..], &input[..idx]));
             }
             _ => {}
@@ -1483,9 +1437,7 @@ fn type_parser(input: &str) -> IResult<&str, TypeSpec> {
                 char('('),
                 separated_list1(
                     char(','),
-                    map(delimited(space0, identifier, space0), |s: &str| {
-                        s.to_string()
-                    }),
+                    map(delimited(space0, identifier, space0), |s: &str| s.to_string()),
                 ),
                 char(')'),
             ),
@@ -1499,11 +1451,7 @@ fn type_parser(input: &str) -> IResult<&str, TypeSpec> {
     );
     let subject_ref_t = map(
         alt((
-            delimited(
-                tag("SubjectRef<"),
-                terminated(identifier, char('>')),
-                multispace0,
-            ),
+            delimited(tag("SubjectRef<"), terminated(identifier, char('>')), multispace0),
             map(tag("SubjectRef"), |_| "SubjectRef"),
         )),
         |name: &str| {
@@ -1515,11 +1463,7 @@ fn type_parser(input: &str) -> IResult<&str, TypeSpec> {
         },
     );
     let struct_t = map(
-        delimited(
-            tag("Struct<"),
-            terminated(identifier, char('>')),
-            multispace0,
-        ),
+        delimited(tag("Struct<"), terminated(identifier, char('>')), multispace0),
         |name: &str| TypeSpec::Struct(name.to_string()),
     );
     alt((
@@ -1655,7 +1599,10 @@ aggregate CompanyInvoice extends std.finance.Invoice
     #[test]
     fn parse_optional_type() {
         let typ = parse_type_spec("Timestamp?").unwrap();
-        assert_eq!(typ, TypeSpec::Optional(Box::new(TypeSpec::Timestamp)));
+        assert_eq!(
+            typ,
+            TypeSpec::Optional(Box::new(TypeSpec::Timestamp))
+        );
     }
 
     #[test]

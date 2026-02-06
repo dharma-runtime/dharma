@@ -48,9 +48,7 @@ impl VaultDriver for LocalDriver {
 
     fn get_chunk(&self, location: &VaultLocation) -> Result<Vec<u8>, DharmaError> {
         if location.driver != "local" {
-            return Err(DharmaError::Validation(
-                "invalid driver for local".to_string(),
-            ));
+            return Err(DharmaError::Validation("invalid driver for local".to_string()));
         }
         Ok(fs::read(&location.path)?)
     }
@@ -88,8 +86,8 @@ impl VaultDriver for LocalDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vault::{VaultDictionaryRef, VaultSegment, VaultItem};
     use crate::types::{ContractId, SchemaId};
-    use crate::vault::{VaultDictionaryRef, VaultItem, VaultSegment};
     use rand::rngs::StdRng;
     use rand::SeedableRng;
     use tempfile::tempdir;
@@ -101,17 +99,11 @@ mod tests {
         let subject = SubjectId::from_bytes([1u8; 32]);
         let schema = SchemaId::from_bytes([2u8; 32]);
         let contract = ContractId::from_bytes([3u8; 32]);
-        let assertions = vec![VaultItem {
-            seq: 1,
-            bytes: b"abc".to_vec(),
-        }];
-        let segment =
-            VaultSegment::new(subject, schema, contract, assertions, b"snap".to_vec()).unwrap();
+        let assertions = vec![VaultItem { seq: 1, bytes: b"abc".to_vec() }];
+        let segment = VaultSegment::new(subject, schema, contract, assertions, b"snap".to_vec()).unwrap();
         let svk = [9u8; 32];
         let mut rng = StdRng::seed_from_u64(42);
-        let chunk = segment
-            .seal(&svk, VaultDictionaryRef::None, &mut rng)
-            .unwrap();
+        let chunk = segment.seal(&svk, VaultDictionaryRef::None, &mut rng).unwrap();
         let loc = driver.put_chunk(&chunk).unwrap();
         let bytes = driver.get_chunk(&loc).unwrap();
         let roundtrip = DhboxChunk::from_bytes(&bytes).unwrap();

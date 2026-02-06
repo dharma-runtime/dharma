@@ -141,11 +141,7 @@ fn parse_rule(parts: &[&str]) -> Option<PeerRule> {
     if subject.is_none() && key.is_none() {
         return None;
     }
-    Some(PeerRule {
-        subject,
-        key,
-        allow,
-    })
+    Some(PeerRule { subject, key, allow })
 }
 
 fn parse_allow(value: &str) -> Option<bool> {

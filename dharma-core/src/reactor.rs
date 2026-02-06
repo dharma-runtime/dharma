@@ -4,15 +4,26 @@ use crate::identity;
 use crate::runtime::vm::VmLimits;
 use crate::types::hex_encode;
 use crate::types::SubjectId;
-use blake3;
 use ciborium::value::Value;
+use blake3;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use wasmi::core::Trap;
 use wasmi::{
-    Caller, Config, Engine, Extern, FuelConsumptionMode, Instance, Linker, Memory, Module,
-    Store as WasmStore, StoreLimits, StoreLimitsBuilder, Value as WasmValue,
+    Caller,
+    Config,
+    Engine,
+    Extern,
+    FuelConsumptionMode,
+    Instance,
+    Linker,
+    Memory,
+    Module,
+    Store as WasmStore,
+    StoreLimits,
+    StoreLimitsBuilder,
+    Value as WasmValue,
 };
+use wasmi::core::Trap;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReactorPlan {
@@ -90,8 +101,10 @@ impl ReactorVm {
         config.consume_fuel(true);
         config.fuel_consumption_mode(FuelConsumptionMode::Eager);
         let engine = Engine::new(&config);
-        let module = Module::new(&engine, std::io::Cursor::new(&bytes))
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+        let module =
+            Module::new(&engine, std::io::Cursor::new(&bytes)).map_err(|e| {
+                DharmaError::Contract(e.to_string())
+            })?;
         let store_limits = StoreLimitsBuilder::new()
             .memory_size(limits.memory_bytes)
             .build();
@@ -285,21 +298,11 @@ pub fn eval_expr(expr: &Expr, ctx: &EvalContext) -> Result<Value, DharmaError> {
             let left_val = eval_expr(left, ctx)?;
             let right_val = eval_expr(right, ctx)?;
             match op {
-                Op::Add => Ok(Value::Integer(
-                    (as_i64(&left_val)? + as_i64(&right_val)?).into(),
-                )),
-                Op::Sub => Ok(Value::Integer(
-                    (as_i64(&left_val)? - as_i64(&right_val)?).into(),
-                )),
-                Op::Mul => Ok(Value::Integer(
-                    (as_i64(&left_val)? * as_i64(&right_val)?).into(),
-                )),
-                Op::Div => Ok(Value::Integer(
-                    (as_i64(&left_val)? / as_i64(&right_val)?).into(),
-                )),
-                Op::Mod => Ok(Value::Integer(
-                    (as_i64(&left_val)? % as_i64(&right_val)?).into(),
-                )),
+                Op::Add => Ok(Value::Integer((as_i64(&left_val)? + as_i64(&right_val)?).into())),
+                Op::Sub => Ok(Value::Integer((as_i64(&left_val)? - as_i64(&right_val)?).into())),
+                Op::Mul => Ok(Value::Integer((as_i64(&left_val)? * as_i64(&right_val)?).into())),
+                Op::Div => Ok(Value::Integer((as_i64(&left_val)? / as_i64(&right_val)?).into())),
+                Op::Mod => Ok(Value::Integer((as_i64(&left_val)? % as_i64(&right_val)?).into())),
                 Op::Eq => Ok(Value::Bool(value_eq(&left_val, &right_val))),
                 Op::Neq => Ok(Value::Bool(!value_eq(&left_val, &right_val))),
                 Op::Gt => Ok(Value::Bool(as_i64(&left_val)? > as_i64(&right_val)?)),
@@ -333,31 +336,23 @@ fn eval_call(name: &str, args: &[Expr], ctx: &EvalContext) -> Result<Value, Dhar
         }
         "contains" => {
             if args.len() != 2 {
-                return Err(DharmaError::Validation(
-                    "contains expects two args".to_string(),
-                ));
+                return Err(DharmaError::Validation("contains expects two args".to_string()));
             }
             let hay = eval_expr(&args[0], ctx)?;
             let needle = eval_expr(&args[1], ctx)?;
             match hay {
                 Value::Array(items) => Ok(Value::Bool(items.iter().any(|v| value_eq(v, &needle)))),
-                Value::Map(entries) => Ok(Value::Bool(
-                    entries.iter().any(|(k, _)| value_eq(k, &needle)),
-                )),
+                Value::Map(entries) => Ok(Value::Bool(entries.iter().any(|(k, _)| value_eq(k, &needle)))),
                 Value::Text(text) => match needle {
                     Value::Text(needle) => Ok(Value::Bool(text.contains(&needle))),
-                    _ => Err(DharmaError::Validation(
-                        "contains expects text needle".to_string(),
-                    )),
+                    _ => Err(DharmaError::Validation("contains expects text needle".to_string())),
                 },
                 _ => Err(DharmaError::Validation("contains unsupported".to_string())),
             }
         }
         "index" | "get" => {
             if args.len() != 2 {
-                return Err(DharmaError::Validation(
-                    "index expects two args".to_string(),
-                ));
+                return Err(DharmaError::Validation("index expects two args".to_string()));
             }
             let target = eval_expr(&args[0], ctx)?;
             let key = eval_expr(&args[1], ctx)?;
@@ -412,9 +407,7 @@ fn eval_call(name: &str, args: &[Expr], ctx: &EvalContext) -> Result<Value, Dhar
         "has_role" => Ok(Value::Bool(false)),
         "distance" => {
             if args.len() != 2 {
-                return Err(DharmaError::Validation(
-                    "distance expects two args".to_string(),
-                ));
+                return Err(DharmaError::Validation("distance expects two args".to_string()));
             }
             let left = eval_expr(&args[0], ctx)?;
             let right = eval_expr(&args[1], ctx)?;
@@ -441,9 +434,7 @@ fn eval_call(name: &str, args: &[Expr], ctx: &EvalContext) -> Result<Value, Dhar
         }
         "proj_id" => {
             if args.is_empty() {
-                return Err(DharmaError::Validation(
-                    "proj_id expects at least one arg".to_string(),
-                ));
+                return Err(DharmaError::Validation("proj_id expects at least one arg".to_string()));
             }
             let mut items = Vec::new();
             for arg in args {
@@ -471,9 +462,7 @@ fn eval_in(left: &Value, right: &Value) -> Result<Value, DharmaError> {
     match right {
         Value::Array(items) => Ok(Value::Bool(items.iter().any(|v| value_eq(v, left)))),
         Value::Map(entries) => Ok(Value::Bool(entries.iter().any(|(k, _)| value_eq(k, left)))),
-        _ => Err(DharmaError::Validation(
-            "in expects list or map".to_string(),
-        )),
+        _ => Err(DharmaError::Validation("in expects list or map".to_string())),
     }
 }
 
@@ -568,13 +557,15 @@ fn geopoint_from_value(value: &Value) -> Result<(i32, i32), DharmaError> {
                 return Err(DharmaError::Validation("invalid geopoint".to_string()));
             }
             let lat = match &items[0] {
-                Value::Integer(val) => i32::try_from(*val)
-                    .map_err(|_| DharmaError::Validation("invalid geopoint".to_string()))?,
+                Value::Integer(val) => i32::try_from(*val).map_err(|_| {
+                    DharmaError::Validation("invalid geopoint".to_string())
+                })?,
                 _ => return Err(DharmaError::Validation("invalid geopoint".to_string())),
             };
             let lon = match &items[1] {
-                Value::Integer(val) => i32::try_from(*val)
-                    .map_err(|_| DharmaError::Validation("invalid geopoint".to_string()))?,
+                Value::Integer(val) => i32::try_from(*val).map_err(|_| {
+                    DharmaError::Validation("invalid geopoint".to_string())
+                })?,
                 _ => return Err(DharmaError::Validation("invalid geopoint".to_string())),
             };
             Ok((lat, lon))
@@ -590,19 +581,19 @@ fn plan_to_value(plan: &ReactorPlan) -> Value {
         .map(reactor_to_value)
         .collect::<Vec<_>>();
     Value::Map(vec![
-        (
-            Value::Text("v".to_string()),
-            Value::Integer(plan.version.into()),
-        ),
+        (Value::Text("v".to_string()), Value::Integer(plan.version.into())),
         (Value::Text("reactors".to_string()), Value::Array(reactors)),
     ])
 }
 
 fn plan_from_value(value: &Value) -> Result<ReactorPlan, DharmaError> {
     let map = expect_map(value)?;
-    let version = map_get(map, "v").and_then(expect_int).unwrap_or(1);
-    let reactors_value = map_get(map, "reactors")
-        .ok_or_else(|| DharmaError::Validation("missing reactors".to_string()))?;
+    let version = map_get(map, "v")
+        .and_then(expect_int)
+        .unwrap_or(1);
+    let reactors_value = map_get(map, "reactors").ok_or_else(|| {
+        DharmaError::Validation("missing reactors".to_string())
+    })?;
     let reactors_array = expect_array(reactors_value)?;
     let mut reactors = Vec::new();
     for item in reactors_array {
@@ -612,24 +603,21 @@ fn plan_from_value(value: &Value) -> Result<ReactorPlan, DharmaError> {
 }
 
 fn reactor_to_value(spec: &ReactorSpec) -> Value {
-    let mut entries = vec![(
-        Value::Text("name".to_string()),
-        Value::Text(spec.name.clone()),
-    )];
+    let mut entries = vec![
+        (Value::Text("name".to_string()), Value::Text(spec.name.clone())),
+    ];
     if let Some(trigger) = &spec.trigger {
-        entries.push((
-            Value::Text("trigger".to_string()),
-            Value::Text(trigger.clone()),
-        ));
+        entries.push((Value::Text("trigger".to_string()), Value::Text(trigger.clone())));
     }
     if let Some(scope) = &spec.scope {
         entries.push((Value::Text("scope".to_string()), Value::Text(scope.clone())));
     }
-    let validates = spec.validates.iter().map(expr_to_value).collect::<Vec<_>>();
-    entries.push((
-        Value::Text("validates".to_string()),
-        Value::Array(validates),
-    ));
+    let validates = spec
+        .validates
+        .iter()
+        .map(expr_to_value)
+        .collect::<Vec<_>>();
+    entries.push((Value::Text("validates".to_string()), Value::Array(validates)));
     let emits = spec.emits.iter().map(emit_to_value).collect::<Vec<_>>();
     entries.push((Value::Text("emits".to_string()), Value::Array(emits)));
     Value::Map(entries)
@@ -670,10 +658,7 @@ fn emit_to_value(emit: &EmitSpec) -> Value {
         .map(|(k, v)| (Value::Text(k.clone()), expr_to_value(v)))
         .collect::<Vec<_>>();
     Value::Map(vec![
-        (
-            Value::Text("action".to_string()),
-            Value::Text(emit.action.clone()),
-        ),
+        (Value::Text("action".to_string()), Value::Text(emit.action.clone())),
         (Value::Text("args".to_string()), Value::Map(args)),
     ])
 }
@@ -686,8 +671,9 @@ fn emit_from_value(value: &Value) -> Result<EmitSpec, DharmaError> {
     let mut args = Vec::new();
     if let Some(Value::Map(entries)) = map_get(map, "args") {
         for (k, v) in entries {
-            let key = expect_text(k)
-                .ok_or_else(|| DharmaError::Validation("emit arg key must be text".to_string()))?;
+            let key = expect_text(k).ok_or_else(|| {
+                DharmaError::Validation("emit arg key must be text".to_string())
+            })?;
             let expr = expr_from_value(v)?;
             args.push((key, expr));
         }
@@ -702,43 +688,25 @@ fn expr_to_value(expr: &Expr) -> Value {
             (Value::Text("v".to_string()), value.clone()),
         ]),
         Expr::Path(parts) => Value::Map(vec![
-            (
-                Value::Text("t".to_string()),
-                Value::Text("path".to_string()),
-            ),
+            (Value::Text("t".to_string()), Value::Text("path".to_string())),
             (
                 Value::Text("v".to_string()),
                 Value::Array(parts.iter().map(|p| Value::Text(p.clone())).collect()),
             ),
         ]),
         Expr::Unary(op, inner) => Value::Map(vec![
-            (
-                Value::Text("t".to_string()),
-                Value::Text("unary".to_string()),
-            ),
-            (
-                Value::Text("op".to_string()),
-                Value::Text(op_to_str(*op).to_string()),
-            ),
+            (Value::Text("t".to_string()), Value::Text("unary".to_string())),
+            (Value::Text("op".to_string()), Value::Text(op_to_str(*op).to_string())),
             (Value::Text("v".to_string()), expr_to_value(inner)),
         ]),
         Expr::Binary(op, left, right) => Value::Map(vec![
-            (
-                Value::Text("t".to_string()),
-                Value::Text("binary".to_string()),
-            ),
-            (
-                Value::Text("op".to_string()),
-                Value::Text(op_to_str(*op).to_string()),
-            ),
+            (Value::Text("t".to_string()), Value::Text("binary".to_string())),
+            (Value::Text("op".to_string()), Value::Text(op_to_str(*op).to_string())),
             (Value::Text("l".to_string()), expr_to_value(left)),
             (Value::Text("r".to_string()), expr_to_value(right)),
         ]),
         Expr::Call(name, args) => Value::Map(vec![
-            (
-                Value::Text("t".to_string()),
-                Value::Text("call".to_string()),
-            ),
+            (Value::Text("t".to_string()), Value::Text("call".to_string())),
             (Value::Text("name".to_string()), Value::Text(name.clone())),
             (
                 Value::Text("args".to_string()),
@@ -754,9 +722,11 @@ fn expr_from_value(value: &Value) -> Result<Expr, DharmaError> {
         .and_then(expect_text)
         .ok_or_else(|| DharmaError::Validation("expr missing type".to_string()))?;
     match typ.as_str() {
-        "lit" => Ok(Expr::Literal(map_get(map, "v").cloned().ok_or_else(
-            || DharmaError::Validation("literal missing value".to_string()),
-        )?)),
+        "lit" => Ok(Expr::Literal(
+            map_get(map, "v")
+                .cloned()
+                .ok_or_else(|| DharmaError::Validation("literal missing value".to_string()))?,
+        )),
         "path" => {
             let arr = map_get(map, "v")
                 .ok_or_else(|| DharmaError::Validation("path missing value".to_string()))?;
@@ -911,7 +881,10 @@ mod tests {
                 )],
                 emits: vec![EmitSpec {
                     action: "Approve".to_string(),
-                    args: vec![("amount".to_string(), Expr::Path(vec!["amount".to_string()]))],
+                    args: vec![(
+                        "amount".to_string(),
+                        Expr::Path(vec!["amount".to_string()]),
+                    )],
                 }],
             }],
         };

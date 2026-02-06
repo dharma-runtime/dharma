@@ -1,8 +1,8 @@
 use crate::scheduler::SimScheduler;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::{Read, Write};
 
 pub type NodeId = u64;
 
@@ -27,11 +27,7 @@ impl Default for FaultConfig {
 
 #[derive(Clone, Debug)]
 pub enum NetEvent {
-    Deliver {
-        from: NodeId,
-        to: NodeId,
-        bytes: Vec<u8>,
-    },
+    Deliver { from: NodeId, to: NodeId, bytes: Vec<u8> },
 }
 
 pub struct SimNet {
@@ -80,17 +76,8 @@ impl SimNet {
     pub fn set_faults(&mut self, faults: FaultConfig) {
         self.faults = faults;
         let time = self.scheduler.now();
-        self.record(
-            time,
-            0,
-            format!(
-                "faults t={time} drop={} dup={} min_delay={} max_delay={}",
-                self.faults.drop_rate,
-                self.faults.dup_rate,
-                self.faults.min_delay,
-                self.faults.max_delay
-            ),
-        );
+        self.record(time, 0, format!("faults t={time} drop={} dup={} min_delay={} max_delay={}",
+            self.faults.drop_rate, self.faults.dup_rate, self.faults.min_delay, self.faults.max_delay));
     }
 
     pub fn set_partition(&mut self, a: NodeId, b: NodeId, blocked: bool) {
@@ -104,11 +91,7 @@ impl SimNet {
         let time = self.scheduler.now();
         let state = if blocked { "blocked" } else { "open" };
         let order = self.order_key(a.min(b), a.max(b));
-        self.record(
-            time,
-            order,
-            format!("partition t={time} a={a} b={b} state={state}"),
-        );
+        self.record(time, order, format!("partition t={time} a={a} b={b} state={state}"));
     }
 
     pub fn set_online(&mut self, node: NodeId, online: bool) {
@@ -125,11 +108,7 @@ impl SimNet {
         }
         let time = self.scheduler.now();
         let state = if online { "up" } else { "down" };
-        self.record(
-            time,
-            node,
-            format!("online t={time} node={node} state={state}"),
-        );
+        self.record(time, node, format!("online t={time} node={node} state={state}"));
     }
 
     pub fn now(&self) -> i64 {
@@ -171,36 +150,15 @@ impl SimNet {
         let seq = self.next_send_seq(from);
         let order = self.order_key(from, seq);
         if !self.online.contains(&from) || !self.online.contains(&to) {
-            self.record(
-                now,
-                order,
-                format!(
-                    "drop t={now} from={from} to={to} len={} reason=offline",
-                    bytes.len()
-                ),
-            );
+            self.record(now, order, format!("drop t={now} from={from} to={to} len={} reason=offline", bytes.len()));
             return;
         }
         if self.partitions.contains(&(from, to)) {
-            self.record(
-                now,
-                order,
-                format!(
-                    "drop t={now} from={from} to={to} len={} reason=partition",
-                    bytes.len()
-                ),
-            );
+            self.record(now, order, format!("drop t={now} from={from} to={to} len={} reason=partition", bytes.len()));
             return;
         }
         if self.should_drop(from, to, seq) {
-            self.record(
-                now,
-                order,
-                format!(
-                    "drop t={now} from={from} to={to} len={} reason=fault",
-                    bytes.len()
-                ),
-            );
+            self.record(now, order, format!("drop t={now} from={from} to={to} len={} reason=fault", bytes.len()));
             return;
         }
         let delay = self.compute_delay(from, to, seq);
@@ -209,10 +167,7 @@ impl SimNet {
         self.record(
             now,
             order,
-            format!(
-                "send t={now} from={from} to={to} len={} delay={delay} dup={dup}",
-                bytes.len()
-            ),
+            format!("send t={now} from={from} to={to} len={} delay={delay} dup={dup}", bytes.len()),
         );
         self.scheduler.schedule(
             deliver_at,
@@ -227,8 +182,15 @@ impl SimNet {
             let dup_delay = self.compute_delay(from, to, seq ^ 0x9e37).saturating_add(1);
             let dup_at = self.scheduler.now().saturating_add(dup_delay);
             let order = self.order_key(from, seq.wrapping_add(1));
-            self.scheduler
-                .schedule(dup_at, order, NetEvent::Deliver { from, to, bytes });
+            self.scheduler.schedule(
+                dup_at,
+                order,
+                NetEvent::Deliver {
+                    from,
+                    to,
+                    bytes,
+                },
+            );
         }
     }
 
@@ -243,9 +205,7 @@ impl SimNet {
                     self.record(
                         time,
                         order,
-                        format!(
-                            "deliver_drop t={time} from={from} to={to} len={len} reason=offline"
-                        ),
+                        format!("deliver_drop t={time} from={from} to={to} len={len} reason=offline"),
                     );
                     return Some(to);
                 }

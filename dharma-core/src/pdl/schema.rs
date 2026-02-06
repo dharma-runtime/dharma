@@ -143,7 +143,10 @@ impl CqrsSchema {
             for (arg, typ) in &action.args {
                 args_map.push((Value::Text(arg.clone()), typ.to_value()));
             }
-            let mut action_entries = vec![(Value::Text("args".to_string()), Value::Map(args_map))];
+            let mut action_entries = vec![(
+                Value::Text("args".to_string()),
+                Value::Map(args_map),
+            )];
             if !action.arg_vis.is_empty() {
                 let mut vis_map = Vec::new();
                 for (arg, vis) in &action.arg_vis {
@@ -189,14 +192,8 @@ impl CqrsSchema {
         let mut projections = Vec::new();
         for (name, proj) in &self.projections {
             let mut proj_entries = vec![
-                (
-                    Value::Text("dsl".to_string()),
-                    Value::Text(proj.dsl.clone()),
-                ),
-                (
-                    Value::Text("plan".to_string()),
-                    Value::Bytes(proj.plan.clone()),
-                ),
+                (Value::Text("dsl".to_string()), Value::Text(proj.dsl.clone())),
+                (Value::Text("plan".to_string()), Value::Bytes(proj.plan.clone())),
             ];
             if let Some(doc) = &proj.doc {
                 proj_entries.push((Value::Text("doc".to_string()), Value::Text(doc.clone())));
@@ -233,8 +230,14 @@ impl CqrsSchema {
                 self.concurrency.to_value(),
             ),
             (Value::Text("fields".to_string()), Value::Map(fields)),
-            (Value::Text("actions".to_string()), Value::Map(actions)),
-            (Value::Text("queries".to_string()), Value::Map(queries)),
+            (
+                Value::Text("actions".to_string()),
+                Value::Map(actions),
+            ),
+            (
+                Value::Text("queries".to_string()),
+                Value::Map(queries),
+            ),
             (
                 Value::Text("projections".to_string()),
                 Value::Map(projections),
@@ -267,17 +270,17 @@ impl CqrsSchema {
                 .ok_or_else(|| DharmaError::Schema("missing namespace".to_string()))?,
         )?;
         let version = expect_text(
-            map_get(map, "version")
-                .ok_or_else(|| DharmaError::Schema("missing version".to_string()))?,
+            map_get(map, "version").ok_or_else(|| DharmaError::Schema("missing version".to_string()))?,
         )?;
         let aggregate = expect_text(
             map_get(map, "aggregate")
                 .ok_or_else(|| DharmaError::Schema("missing aggregate".to_string()))?,
         )?;
-        let extends = map_get(map, "extends").and_then(|v| match v {
-            Value::Text(text) => Some(text.clone()),
-            _ => None,
-        });
+        let extends = map_get(map, "extends")
+            .and_then(|v| match v {
+                Value::Text(text) => Some(text.clone()),
+                _ => None,
+            });
         let concurrency = match map_get(map, "concurrency") {
             Some(value) => ConcurrencyMode::from_value(value)?,
             None => ConcurrencyMode::Strict,
@@ -299,8 +302,7 @@ impl CqrsSchema {
         for (k, v) in expect_map(fields_val)? {
             let name = expect_text(k)?;
             let field_map = expect_map(v)?;
-            let typ_val = map_get(field_map, "type")
-                .ok_or_else(|| DharmaError::Schema("missing field type".to_string()))?;
+            let typ_val = map_get(field_map, "type").ok_or_else(|| DharmaError::Schema("missing field type".to_string()))?;
             let typ = TypeSpec::from_value(typ_val)?;
             let default = map_get(field_map, "default").cloned();
             let visibility = map_get(field_map, "vis")
@@ -325,9 +327,8 @@ impl CqrsSchema {
                 for (field_k, field_v) in expect_map(v)? {
                     let field_name = expect_text(field_k)?;
                     let field_map = expect_map(field_v)?;
-                    let typ_val = map_get(field_map, "type").ok_or_else(|| {
-                        DharmaError::Schema("missing struct field type".to_string())
-                    })?;
+                    let typ_val = map_get(field_map, "type")
+                        .ok_or_else(|| DharmaError::Schema("missing struct field type".to_string()))?;
                     let typ = TypeSpec::from_value(typ_val)?;
                     let default = map_get(field_map, "default").cloned();
                     struct_fields.insert(
@@ -339,12 +340,7 @@ impl CqrsSchema {
                         },
                     );
                 }
-                structs.insert(
-                    struct_name,
-                    StructSchema {
-                        fields: struct_fields,
-                    },
-                );
+                structs.insert(struct_name, StructSchema { fields: struct_fields });
             }
         }
 
@@ -352,8 +348,7 @@ impl CqrsSchema {
         for (k, v) in expect_map(actions_val)? {
             let name = expect_text(k)?;
             let action_map = expect_map(v)?;
-            let args_val = map_get(action_map, "args")
-                .ok_or_else(|| DharmaError::Schema("missing args".to_string()))?;
+            let args_val = map_get(action_map, "args").ok_or_else(|| DharmaError::Schema("missing args".to_string()))?;
             let mut args = BTreeMap::new();
             for (arg_k, arg_v) in expect_map(args_val)? {
                 let arg_name = expect_text(arg_k)?;
@@ -369,14 +364,17 @@ impl CqrsSchema {
                 }
             }
             for arg_name in args.keys() {
-                arg_vis
-                    .entry(arg_name.clone())
-                    .or_insert(Visibility::Public);
+                arg_vis.entry(arg_name.clone()).or_insert(Visibility::Public);
             }
-            let doc = map_get(action_map, "doc")
-                .map(|v| expect_text(v))
-                .transpose()?;
-            actions.insert(name, ActionSchema { args, arg_vis, doc });
+            let doc = map_get(action_map, "doc").map(|v| expect_text(v)).transpose()?;
+            actions.insert(
+                name,
+                ActionSchema {
+                    args,
+                    arg_vis,
+                    doc,
+                },
+            );
         }
 
         let mut queries = BTreeMap::new();
@@ -404,9 +402,7 @@ impl CqrsSchema {
                     let plan = map_get(query_map, "plan")
                         .map(|v| crate::value::expect_bytes(v))
                         .transpose()?;
-                    let doc = map_get(query_map, "doc")
-                        .map(|v| expect_text(v))
-                        .transpose()?;
+                    let doc = map_get(query_map, "doc").map(|v| expect_text(v)).transpose()?;
                     queries.insert(
                         name,
                         QuerySchema {
@@ -435,10 +431,15 @@ impl CqrsSchema {
                         .map(|v| crate::value::expect_bytes(v))
                         .transpose()?
                         .unwrap_or_default();
-                    let doc = map_get(proj_map, "doc")
-                        .map(|v| expect_text(v))
-                        .transpose()?;
-                    projections.insert(name, ProjectionSchema { dsl, plan, doc });
+                    let doc = map_get(proj_map, "doc").map(|v| expect_text(v)).transpose()?;
+                    projections.insert(
+                        name,
+                        ProjectionSchema {
+                            dsl,
+                            plan,
+                            doc,
+                        },
+                    );
                 }
             }
         }
@@ -514,10 +515,9 @@ impl TypeSpec {
                 Value::Text("map".to_string()),
                 Value::Array(vec![key.to_value(), value.to_value()]),
             )]),
-            TypeSpec::Optional(inner) => Value::Map(vec![(
-                Value::Text("optional".to_string()),
-                inner.to_value(),
-            )]),
+            TypeSpec::Optional(inner) => {
+                Value::Map(vec![(Value::Text("optional".to_string()), inner.to_value())])
+            }
         }
     }
 
@@ -700,11 +700,7 @@ fn collection_capacity(item_size: usize) -> usize {
         return 1;
     }
     let cap = DEFAULT_COLLECTION_BYTES / item_size;
-    if cap == 0 {
-        1
-    } else {
-        cap
-    }
+    if cap == 0 { 1 } else { cap }
 }
 
 pub fn layout_state(schema: &CqrsSchema) -> Vec<LayoutEntry> {
@@ -798,12 +794,10 @@ fn validate_type(typ: &TypeSpec, value: &Value) -> Result<(), DharmaError> {
             Value::Null => Ok(()),
             _ => validate_type(inner, value),
         },
-        TypeSpec::Int | TypeSpec::Decimal(_) | TypeSpec::Duration | TypeSpec::Timestamp => {
-            match value {
-                Value::Integer(_) => Ok(()),
-                _ => Err(DharmaError::Schema("expected int".to_string())),
-            }
-        }
+        TypeSpec::Int | TypeSpec::Decimal(_) | TypeSpec::Duration | TypeSpec::Timestamp => match value {
+            Value::Integer(_) => Ok(()),
+            _ => Err(DharmaError::Schema("expected int".to_string())),
+        },
         TypeSpec::Bool => match value {
             Value::Bool(_) => Ok(()),
             _ => Err(DharmaError::Schema("expected bool".to_string())),

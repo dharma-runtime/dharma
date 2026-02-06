@@ -1,7 +1,5 @@
 use ciborium::value::Value;
-use dharma::assertion::{
-    add_signer_meta, AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION,
-};
+use dharma::assertion::{add_signer_meta, AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION};
 use dharma::crypto;
 use dharma::envelope;
 use dharma::keys::Keyring;
@@ -9,7 +7,7 @@ use dharma::net::ingest::{ingest_object, IngestError};
 use dharma::store::index::FrontierIndex;
 use dharma::store::Store;
 use dharma::types::{AssertionId, Nonce12, SubjectId};
-use dharma::{DharmaError, IdentityState};
+use dharma::{IdentityState, DharmaError};
 use rand_core::OsRng;
 use std::collections::HashMap;
 
@@ -125,15 +123,10 @@ fn resolve_subject(
     if let Some(key) = keys.get(&identity.subject_id) {
         return Ok((identity.subject_id, *key, true));
     }
-    Err(DharmaError::Validation(
-        "no subject key available".to_string(),
-    ))
+    Err(DharmaError::Validation("no subject key available".to_string()))
 }
 
-fn select_tip(
-    subject: &SubjectId,
-    index: &FrontierIndex,
-) -> Result<(AssertionId, u64), DharmaError> {
+fn select_tip(subject: &SubjectId, index: &FrontierIndex) -> Result<(AssertionId, u64), DharmaError> {
     let tips = index.get_tips(subject);
     if tips.is_empty() {
         return Err(DharmaError::Validation("no tips for subject".to_string()));
@@ -228,9 +221,22 @@ mod tests {
         let (signing_key, _) = crypto::generate_identity_keypair(&mut rng);
         let subject = SubjectId::from_bytes([8u8; 32]);
 
-        let first = write_enveloped_assertion(&store, subject, &subject_key, &signing_key, 1, None);
-        let second =
-            write_enveloped_assertion(&store, subject, &subject_key, &signing_key, 2, Some(first));
+        let first = write_enveloped_assertion(
+            &store,
+            subject,
+            &subject_key,
+            &signing_key,
+            1,
+            None,
+        );
+        let second = write_enveloped_assertion(
+            &store,
+            subject,
+            &subject_key,
+            &signing_key,
+            2,
+            Some(first),
+        );
 
         let mut keys = Keyring::new();
         keys.insert_sdk(subject, 0, subject_key);

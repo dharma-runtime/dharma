@@ -281,15 +281,10 @@ mod tests {
             meta: None,
         };
         let body = Value::Map(vec![
-            (
-                Value::Text("domain".to_string()),
-                Value::Text("corp.ph.cmdv".to_string()),
-            ),
+            (Value::Text("domain".to_string()), Value::Text("corp.ph.cmdv".to_string())),
             (
                 Value::Text("policy_hash".to_string()),
-                Value::Text(
-                    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff".to_string(),
-                ),
+                Value::Text("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff".to_string()),
             ),
         ]);
         let assertion = AssertionPlaintext::sign(header, body, &signing_key).unwrap();
@@ -377,20 +372,11 @@ mod tests {
             meta: None,
         };
         let mut entries = vec![
-            (
-                Value::Text("domain".to_string()),
-                Value::Text(domain.to_string()),
-            ),
-            (
-                Value::Text("owner".to_string()),
-                Value::Bytes(owner.as_bytes().to_vec()),
-            ),
+            (Value::Text("domain".to_string()), Value::Text(domain.to_string())),
+            (Value::Text("owner".to_string()), Value::Bytes(owner.as_bytes().to_vec())),
         ];
         if let Some(parent) = parent {
-            entries.push((
-                Value::Text("parent".to_string()),
-                Value::Text(parent.to_string()),
-            ));
+            entries.push((Value::Text("parent".to_string()), Value::Text(parent.to_string())));
         }
         let body = Value::Map(entries);
         let assertion = AssertionPlaintext::sign(header, body, signing_key).unwrap();
@@ -422,14 +408,8 @@ mod tests {
         append_domain_genesis(&store, domain_subject, owner_id, &owner_sk, "corp", None);
 
         let body = Value::Map(vec![
-            (
-                Value::Text("domain".to_string()),
-                Value::Text("corp".to_string()),
-            ),
-            (
-                Value::Text("owner".to_string()),
-                Value::Bytes(other_id.as_bytes().to_vec()),
-            ),
+            (Value::Text("domain".to_string()), Value::Text("corp".to_string())),
+            (Value::Text("owner".to_string()), Value::Bytes(other_id.as_bytes().to_vec())),
         ]);
         append_directory_assertion(
             &store,
@@ -468,14 +448,8 @@ mod tests {
         );
 
         let register_parent_body = Value::Map(vec![
-            (
-                Value::Text("domain".to_string()),
-                Value::Text("corp".to_string()),
-            ),
-            (
-                Value::Text("owner".to_string()),
-                Value::Bytes(parent_id.as_bytes().to_vec()),
-            ),
+            (Value::Text("domain".to_string()), Value::Text("corp".to_string())),
+            (Value::Text("owner".to_string()), Value::Bytes(parent_id.as_bytes().to_vec())),
         ]);
         append_directory_assertion(
             &store,
@@ -489,14 +463,8 @@ mod tests {
         );
 
         let register_child_body = Value::Map(vec![
-            (
-                Value::Text("domain".to_string()),
-                Value::Text("corp.acme".to_string()),
-            ),
-            (
-                Value::Text("owner".to_string()),
-                Value::Bytes(child_id.as_bytes().to_vec()),
-            ),
+            (Value::Text("domain".to_string()), Value::Text("corp.acme".to_string())),
+            (Value::Text("owner".to_string()), Value::Bytes(child_id.as_bytes().to_vec())),
         ]);
         append_directory_assertion(
             &store,
@@ -513,14 +481,8 @@ mod tests {
         assert!(state.owner_for_domain("corp.acme").is_none());
 
         let authorize_body = Value::Map(vec![
-            (
-                Value::Text("domain".to_string()),
-                Value::Text("corp.acme".to_string()),
-            ),
-            (
-                Value::Text("parent".to_string()),
-                Value::Text("corp".to_string()),
-            ),
+            (Value::Text("domain".to_string()), Value::Text("corp.acme".to_string())),
+            (Value::Text("parent".to_string()), Value::Text("corp".to_string())),
             (
                 Value::Text("authorized_owner".to_string()),
                 Value::Bytes(child_id.as_bytes().to_vec()),
@@ -538,14 +500,8 @@ mod tests {
         );
 
         let register_child_body2 = Value::Map(vec![
-            (
-                Value::Text("domain".to_string()),
-                Value::Text("corp.acme".to_string()),
-            ),
-            (
-                Value::Text("owner".to_string()),
-                Value::Bytes(child_id.as_bytes().to_vec()),
-            ),
+            (Value::Text("domain".to_string()), Value::Text("corp.acme".to_string())),
+            (Value::Text("owner".to_string()), Value::Bytes(child_id.as_bytes().to_vec())),
         ]);
         append_directory_assertion(
             &store,

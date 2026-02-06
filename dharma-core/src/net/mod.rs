@@ -1,11 +1,11 @@
 pub mod codec;
+pub mod io;
 pub mod handshake;
 pub mod ingest;
-pub mod io;
 pub mod noise;
 pub mod peer;
 pub mod policy;
-pub mod server;
 pub mod subscriptions;
+pub mod server;
 pub mod sync;
 pub mod trust;

@@ -77,18 +77,12 @@ fn enforce_external(ast: &AstFile) -> Result<(), DharmaError> {
     let datasets = ext.map(|e| e.datasets.as_slice()).unwrap_or(&[]);
     for aggregate in &ast.aggregates {
         for expr in &aggregate.invariants {
-            with_span(
-                &expr.span,
-                validate_external_expr(&expr.value, roles, time, datasets),
-            )?;
+            with_span(&expr.span, validate_external_expr(&expr.value, roles, time, datasets))?;
         }
     }
     for action in &ast.actions {
         for expr in &action.validates {
-            with_span(
-                &expr.span,
-                validate_external_expr(&expr.value, roles, time, datasets),
-            )?;
+            with_span(&expr.span, validate_external_expr(&expr.value, roles, time, datasets))?;
         }
         for assignment in &action.applies {
             with_span(
@@ -99,17 +93,11 @@ fn enforce_external(ast: &AstFile) -> Result<(), DharmaError> {
     }
     for reactor in &ast.reactors {
         for expr in &reactor.validates {
-            with_span(
-                &expr.span,
-                validate_external_expr(&expr.value, roles, time, datasets),
-            )?;
+            with_span(&expr.span, validate_external_expr(&expr.value, roles, time, datasets))?;
         }
         for emit in &reactor.emits {
             for (_, expr) in &emit.args {
-                with_span(
-                    &expr.span,
-                    validate_external_expr(&expr.value, roles, time, datasets),
-                )?;
+                with_span(&expr.span, validate_external_expr(&expr.value, roles, time, datasets))?;
             }
         }
     }
@@ -133,8 +121,9 @@ fn validate_protocol_implements(ast: &AstFile) -> Result<(), DharmaError> {
         actions.insert(action.name.clone());
     }
     for raw in &ast.header.implements {
-        let id = ProtocolId::parse(raw)
-            .map_err(|err| DharmaError::Validation(format!("implements {raw}: {err}")))?;
+        let id = ProtocolId::parse(raw).map_err(|err| {
+            DharmaError::Validation(format!("implements {raw}: {err}"))
+        })?;
         let Some(interface) = protocols::lookup(&id) else {
             return Err(DharmaError::Validation(format!(
                 "implements {raw}: unknown protocol"
@@ -285,10 +274,7 @@ fn dataset_literal(args: &[Expr]) -> Option<String> {
 }
 
 fn is_dataset_path(path: &[String]) -> bool {
-    matches!(
-        path.first().map(|s| s.as_str()),
-        Some("dataset" | "datasets")
-    )
+    matches!(path.first().map(|s| s.as_str()), Some("dataset" | "datasets"))
 }
 
 fn dataset_from_path(path: &[String]) -> Result<String, DharmaError> {
@@ -342,9 +328,7 @@ fn check_assignment(assign: &Assignment, env: &TypeEnv) -> Result<(), DharmaErro
         if matches!(target, TypeSpec::Optional(_)) {
             return Ok(());
         }
-        return Err(DharmaError::Validation(
-            "null assignment requires optional".to_string(),
-        ));
+        return Err(DharmaError::Validation("null assignment requires optional".to_string()));
     }
     if let Expr::Call(name, args) = &assign.value {
         match name.as_str() {
@@ -393,14 +377,13 @@ fn ensure_text_concat(expr: &Expr, env: &TypeEnv) -> Result<(), DharmaError> {
 }
 
 fn resolve_target(assign: &Assignment, env: &TypeEnv) -> Result<TypeSpec, DharmaError> {
-    let target =
-        assign.target.get(0).map(|s| s.as_str()).ok_or_else(|| {
-            DharmaError::Validation("assignment target must be state".to_string())
-        })?;
+    let target = assign
+        .target
+        .get(0)
+        .map(|s| s.as_str())
+        .ok_or_else(|| DharmaError::Validation("assignment target must be state".to_string()))?;
     if target != "state" {
-        return Err(DharmaError::Validation(
-            "assignment target must be state".to_string(),
-        ));
+        return Err(DharmaError::Validation("assignment target must be state".to_string()));
     }
     let field = assign
         .target
@@ -424,9 +407,7 @@ fn check_list_call(
     env: &TypeEnv,
 ) -> Result<(), DharmaError> {
     let TypeSpec::List(elem_type) = target else {
-        return Err(DharmaError::Validation(
-            "list operation on non-list".to_string(),
-        ));
+        return Err(DharmaError::Validation("list operation on non-list".to_string()));
     };
     let list_expr_type = type_of(&args[0], env)?;
     match strip_optional(&list_expr_type) {
@@ -439,9 +420,7 @@ fn check_list_call(
     }
     if name == "normalize" {
         if args.len() != 1 {
-            return Err(DharmaError::Validation(
-                "list.normalize expects no args".to_string(),
-            ));
+            return Err(DharmaError::Validation("list.normalize expects no args".to_string()));
         }
         match **elem_type {
             TypeSpec::Text(_) | TypeSpec::Currency => Ok(()),
@@ -451,9 +430,7 @@ fn check_list_call(
         }
     } else {
         if args.len() != 2 {
-            return Err(DharmaError::Validation(
-                "list operation expects one arg".to_string(),
-            ));
+            return Err(DharmaError::Validation("list operation expects one arg".to_string()));
         }
         let item_type = type_of(&args[1], env)?;
         ensure_assignable(elem_type, &item_type)
@@ -464,14 +441,10 @@ fn check_list_call(
 
 fn check_map_call(args: &[Expr], target: &TypeSpec, env: &TypeEnv) -> Result<(), DharmaError> {
     let TypeSpec::Map(key_type, value_type) = target else {
-        return Err(DharmaError::Validation(
-            "map operation on non-map".to_string(),
-        ));
+        return Err(DharmaError::Validation("map operation on non-map".to_string()));
     };
     if args.len() != 3 {
-        return Err(DharmaError::Validation(
-            "map.set expects two args".to_string(),
-        ));
+        return Err(DharmaError::Validation("map.set expects two args".to_string()));
     }
     let map_expr_type = type_of(&args[0], env)?;
     match strip_optional(&map_expr_type) {
@@ -561,9 +534,9 @@ fn type_of(expr: &Expr, env: &TypeEnv) -> Result<ExprType, DharmaError> {
             "intersects" => check_intersects(args, env),
             "subset" => check_subset(args, env),
             "remote_intersects" => check_remote_intersects(args, env),
-            "push" | "remove" | "set" => Err(DharmaError::Validation(
-                "mutation calls not allowed here".to_string(),
-            )),
+            "push" | "remove" | "set" => {
+                Err(DharmaError::Validation("mutation calls not allowed here".to_string()))
+            }
             _ => Err(DharmaError::Validation("unknown function".to_string())),
         },
     }
@@ -747,22 +720,22 @@ fn resolve_nested(
             optional = true;
             typ = *inner;
         }
-        typ =
-            match typ {
-                TypeSpec::Struct(name) => {
-                    let fields = env.structs.get(&name).ok_or_else(|| {
-                        DharmaError::Validation(format!("unknown struct '{}'", name))
-                    })?;
-                    fields.get(part).cloned().ok_or_else(|| {
-                        DharmaError::Validation("unknown struct field".to_string())
-                    })?
-                }
-                _ => {
-                    return Err(DharmaError::Validation(
-                        "nested path requires struct type".to_string(),
-                    ))
-                }
-            };
+        typ = match typ {
+            TypeSpec::Struct(name) => {
+                let fields = env.structs.get(&name).ok_or_else(|| {
+                    DharmaError::Validation(format!("unknown struct '{}'", name))
+                })?;
+                fields
+                    .get(part)
+                    .cloned()
+                    .ok_or_else(|| DharmaError::Validation("unknown struct field".to_string()))?
+            }
+            _ => {
+                return Err(DharmaError::Validation(
+                    "nested path requires struct type".to_string(),
+                ))
+            }
+        };
     }
     if optional {
         Ok(TypeSpec::Optional(Box::new(typ)))
@@ -918,9 +891,9 @@ fn ensure_expr_compatible(expected: &ExprType, actual: &ExprType) -> Result<(), 
 fn ensure_eq_compatible(left: &ExprType, right: &ExprType) -> Result<(), DharmaError> {
     match (strip_optional(left), strip_optional(right)) {
         (ExprType::Null, other) | (other, ExprType::Null) => match other {
-            ExprType::List(_) | ExprType::Map(_, _) => Err(DharmaError::Validation(
-                "null comparison unsupported".to_string(),
-            )),
+            ExprType::List(_) | ExprType::Map(_, _) => {
+                Err(DharmaError::Validation("null comparison unsupported".to_string()))
+            }
             _ => Ok(()),
         },
         (ExprType::Numeric, ExprType::Numeric) => Ok(()),
@@ -1017,22 +990,16 @@ fn check_len(args: &[Expr], env: &TypeEnv) -> Result<ExprType, DharmaError> {
             let typ = type_of(&args[0], env)?;
             match strip_optional(&typ) {
                 ExprType::Text | ExprType::List(_) | ExprType::Map(_, _) => Ok(ExprType::Numeric),
-                _ => Err(DharmaError::Validation(
-                    "len expects text or collection".to_string(),
-                )),
+                _ => Err(DharmaError::Validation("len expects text or collection".to_string())),
             }
         }
-        _ => Err(DharmaError::Validation(
-            "len expects path or literal collection".to_string(),
-        )),
+        _ => Err(DharmaError::Validation("len expects path or literal collection".to_string())),
     }
 }
 
 fn check_contains(args: &[Expr], env: &TypeEnv) -> Result<ExprType, DharmaError> {
     if args.len() != 2 {
-        return Err(DharmaError::Validation(
-            "contains expects two args".to_string(),
-        ));
+        return Err(DharmaError::Validation("contains expects two args".to_string()));
     }
     match &args[0] {
         Expr::Literal(Literal::List(items)) => {
@@ -1056,32 +1023,22 @@ fn check_contains(args: &[Expr], env: &TypeEnv) -> Result<ExprType, DharmaError>
                     ensure_eq_compatible(key, &key_type)?;
                     Ok(ExprType::Bool)
                 }
-                _ => Err(DharmaError::Validation(
-                    "contains expects list or map".to_string(),
-                )),
+                _ => Err(DharmaError::Validation("contains expects list or map".to_string())),
             }
         }
-        _ => Err(DharmaError::Validation(
-            "contains expects list or map".to_string(),
-        )),
+        _ => Err(DharmaError::Validation("contains expects list or map".to_string())),
     }
 }
 
 fn check_index(args: &[Expr], env: &TypeEnv) -> Result<ExprType, DharmaError> {
     if args.len() != 2 {
-        return Err(DharmaError::Validation(
-            "index expects two args".to_string(),
-        ));
+        return Err(DharmaError::Validation("index expects two args".to_string()));
     }
     match &args[0] {
         Expr::Literal(Literal::List(items)) => {
             let idx = match &args[1] {
                 Expr::Literal(Literal::Int(i)) if *i >= 0 => *i as usize,
-                _ => {
-                    return Err(DharmaError::Validation(
-                        "index expects literal int".to_string(),
-                    ))
-                }
+                _ => return Err(DharmaError::Validation("index expects literal int".to_string())),
             };
             let item = items
                 .get(idx)
@@ -1111,9 +1068,7 @@ fn check_index(args: &[Expr], env: &TypeEnv) -> Result<ExprType, DharmaError> {
                     ensure_eq_compatible(key, &key_type)?;
                     Ok((**value).clone())
                 }
-                _ => Err(DharmaError::Validation(
-                    "index expects list or map".to_string(),
-                )),
+                _ => Err(DharmaError::Validation("index expects list or map".to_string())),
             }
         }
     }
@@ -1174,9 +1129,7 @@ fn check_intersects(args: &[Expr], env: &TypeEnv) -> Result<ExprType, DharmaErro
 
 fn check_subset(args: &[Expr], env: &TypeEnv) -> Result<ExprType, DharmaError> {
     if args.len() != 2 {
-        return Err(DharmaError::Validation(
-            "subset expects two args".to_string(),
-        ));
+        return Err(DharmaError::Validation("subset expects two args".to_string()));
     }
     let left_type = type_of(&args[0], env)?;
     let right_type = type_of(&args[1], env)?;
@@ -1219,45 +1172,29 @@ fn check_has_role(args: &[Expr], env: &TypeEnv) -> Result<ExprType, DharmaError>
     let subject_type = type_of(subject_expr, env)?;
     match strip_optional(&subject_type) {
         ExprType::Identity => {}
-        _ => {
-            return Err(DharmaError::Validation(
-                "has_role expects identity".to_string(),
-            ))
-        }
+        _ => return Err(DharmaError::Validation("has_role expects identity".to_string())),
     }
     let identity_type = type_of(identity_expr, env)?;
     match strip_optional(&identity_type) {
         ExprType::Identity => {}
-        _ => {
-            return Err(DharmaError::Validation(
-                "has_role expects identity".to_string(),
-            ))
-        }
+        _ => return Err(DharmaError::Validation("has_role expects identity".to_string())),
     }
     let role_type = type_of(role_expr, env)?;
     match strip_optional(&role_type) {
         ExprType::Text | ExprType::EnumLit(_) | ExprType::Enum(_) => Ok(ExprType::Bool),
-        _ => Err(DharmaError::Validation(
-            "has_role expects text role".to_string(),
-        )),
+        _ => Err(DharmaError::Validation("has_role expects text role".to_string())),
     }
 }
 
 fn check_distance(args: &[Expr], env: &TypeEnv) -> Result<ExprType, DharmaError> {
     if args.len() != 2 {
-        return Err(DharmaError::Validation(
-            "distance expects two args".to_string(),
-        ));
+        return Err(DharmaError::Validation("distance expects two args".to_string()));
     }
     for arg in args {
         let typ = type_of(arg, env)?;
         match strip_optional(&typ) {
             ExprType::GeoPoint => {}
-            _ => {
-                return Err(DharmaError::Validation(
-                    "distance expects geopoint".to_string(),
-                ))
-            }
+            _ => return Err(DharmaError::Validation("distance expects geopoint".to_string())),
         }
     }
     Ok(ExprType::Numeric)

@@ -122,10 +122,7 @@ impl Advertisement {
 
     pub fn to_value(&self) -> Value {
         let mut entries = self.base_entries();
-        entries.push((
-            Value::Text("sig".to_string()),
-            Value::Bytes(self.sig.clone()),
-        ));
+        entries.push((Value::Text("sig".to_string()), Value::Bytes(self.sig.clone())));
         Value::Map(entries)
     }
 
@@ -139,24 +136,12 @@ impl Advertisement {
                 Value::Text("provider_id".to_string()),
                 Value::Bytes(self.provider_id.as_bytes().to_vec()),
             ),
-            (
-                Value::Text("ts".to_string()),
-                Value::Integer(self.ts.into()),
-            ),
-            (
-                Value::Text("ttl".to_string()),
-                Value::Integer(self.ttl.into()),
-            ),
+            (Value::Text("ts".to_string()), Value::Integer(self.ts.into())),
+            (Value::Text("ttl".to_string()), Value::Integer(self.ttl.into())),
             (Value::Text("endpoints".to_string()), endpoints),
             (Value::Text("shards".to_string()), shards),
-            (
-                Value::Text("load".to_string()),
-                Value::Integer(self.load.into()),
-            ),
-            (
-                Value::Text("domain".to_string()),
-                Value::Text(self.domain.clone()),
-            ),
+            (Value::Text("load".to_string()), Value::Integer(self.load.into())),
+            (Value::Text("domain".to_string()), Value::Text(self.domain.clone())),
             (
                 Value::Text("policy_hash".to_string()),
                 Value::Bytes(self.policy_hash.to_vec()),
@@ -167,20 +152,13 @@ impl Advertisement {
 
     pub fn from_value(value: &Value) -> Result<Self, DharmaError> {
         let map = expect_map(value)?;
-        let v = expect_uint(
-            map_get(map, "v").ok_or_else(|| DharmaError::Validation("missing v".to_string()))?,
-        )?;
+        let v = expect_uint(map_get(map, "v").ok_or_else(|| DharmaError::Validation("missing v".to_string()))?)?;
         let provider_bytes = map_get(map, "provider_id")
             .ok_or_else(|| DharmaError::Validation("missing provider_id".to_string()))?;
         let provider_raw = crate::value::expect_bytes(provider_bytes)?;
         let provider_id = IdentityKey::from_slice(&provider_raw)?;
-        let ts = expect_uint(
-            map_get(map, "ts").ok_or_else(|| DharmaError::Validation("missing ts".to_string()))?,
-        )?;
-        let ttl = expect_uint(
-            map_get(map, "ttl")
-                .ok_or_else(|| DharmaError::Validation("missing ttl".to_string()))?,
-        )?;
+        let ts = expect_uint(map_get(map, "ts").ok_or_else(|| DharmaError::Validation("missing ts".to_string()))?)?;
+        let ttl = expect_uint(map_get(map, "ttl").ok_or_else(|| DharmaError::Validation("missing ttl".to_string()))?)?;
         let ttl_u32: u32 = ttl
             .try_into()
             .map_err(|_| DharmaError::Validation("ttl out of range".to_string()))?;
@@ -190,16 +168,12 @@ impl Advertisement {
         let shards_val = map_get(map, "shards")
             .ok_or_else(|| DharmaError::Validation("missing shards".to_string()))?;
         let shards = parse_array(shards_val, ShardAd::from_value)?;
-        let load = expect_uint(
-            map_get(map, "load")
-                .ok_or_else(|| DharmaError::Validation("missing load".to_string()))?,
-        )?;
+        let load = expect_uint(map_get(map, "load").ok_or_else(|| DharmaError::Validation("missing load".to_string()))?)?;
         let load_u8: u8 = load
             .try_into()
             .map_err(|_| DharmaError::Validation("load out of range".to_string()))?;
         let domain = expect_text(
-            map_get(map, "domain")
-                .ok_or_else(|| DharmaError::Validation("missing domain".to_string()))?,
+            map_get(map, "domain").ok_or_else(|| DharmaError::Validation("missing domain".to_string()))?,
         )?;
         let policy_val = map_get(map, "policy_hash")
             .ok_or_else(|| DharmaError::Validation("missing policy_hash".to_string()))?;
@@ -235,26 +209,18 @@ impl Advertisement {
 impl Endpoint {
     fn to_value(&self) -> Value {
         Value::Map(vec![
-            (
-                Value::Text("proto".to_string()),
-                Value::Text(self.protocol.clone()),
-            ),
-            (
-                Value::Text("addr".to_string()),
-                Value::Text(self.address.clone()),
-            ),
+            (Value::Text("proto".to_string()), Value::Text(self.protocol.clone())),
+            (Value::Text("addr".to_string()), Value::Text(self.address.clone())),
         ])
     }
 
     fn from_value(value: &Value) -> Result<Self, DharmaError> {
         let map = expect_map(value)?;
         let protocol = expect_text(
-            map_get(map, "proto")
-                .ok_or_else(|| DharmaError::Validation("missing proto".to_string()))?,
+            map_get(map, "proto").ok_or_else(|| DharmaError::Validation("missing proto".to_string()))?,
         )?;
         let address = expect_text(
-            map_get(map, "addr")
-                .ok_or_else(|| DharmaError::Validation("missing addr".to_string()))?,
+            map_get(map, "addr").ok_or_else(|| DharmaError::Validation("missing addr".to_string()))?,
         )?;
         Ok(Self { protocol, address })
     }
@@ -263,37 +229,25 @@ impl Endpoint {
 impl ShardAd {
     fn to_value(&self) -> Value {
         Value::Map(vec![
-            (
-                Value::Text("table".to_string()),
-                Value::Text(self.table.clone()),
-            ),
-            (
-                Value::Text("shard".to_string()),
-                Value::Integer(self.shard.into()),
-            ),
-            (
-                Value::Text("watermark".to_string()),
-                Value::Integer(self.watermark.into()),
-            ),
+            (Value::Text("table".to_string()), Value::Text(self.table.clone())),
+            (Value::Text("shard".to_string()), Value::Integer(self.shard.into())),
+            (Value::Text("watermark".to_string()), Value::Integer(self.watermark.into())),
         ])
     }
 
     fn from_value(value: &Value) -> Result<Self, DharmaError> {
         let map = expect_map(value)?;
         let table = expect_text(
-            map_get(map, "table")
-                .ok_or_else(|| DharmaError::Validation("missing table".to_string()))?,
+            map_get(map, "table").ok_or_else(|| DharmaError::Validation("missing table".to_string()))?,
         )?;
         let shard = expect_uint(
-            map_get(map, "shard")
-                .ok_or_else(|| DharmaError::Validation("missing shard".to_string()))?,
+            map_get(map, "shard").ok_or_else(|| DharmaError::Validation("missing shard".to_string()))?,
         )?;
         let shard_u32: u32 = shard
             .try_into()
             .map_err(|_| DharmaError::Validation("shard out of range".to_string()))?;
         let watermark = expect_uint(
-            map_get(map, "watermark")
-                .ok_or_else(|| DharmaError::Validation("missing watermark".to_string()))?,
+            map_get(map, "watermark").ok_or_else(|| DharmaError::Validation("missing watermark".to_string()))?,
         )?;
         Ok(Self {
             table,
@@ -306,18 +260,9 @@ impl ShardAd {
 impl OracleAd {
     fn to_value(&self) -> Value {
         let mut entries = vec![
-            (
-                Value::Text("name".to_string()),
-                Value::Text(self.name.clone()),
-            ),
-            (
-                Value::Text("domain".to_string()),
-                Value::Text(self.domain.clone()),
-            ),
-            (
-                Value::Text("mode".to_string()),
-                Value::Text(self.mode.as_str().to_string()),
-            ),
+            (Value::Text("name".to_string()), Value::Text(self.name.clone())),
+            (Value::Text("domain".to_string()), Value::Text(self.domain.clone())),
+            (Value::Text("mode".to_string()), Value::Text(self.mode.as_str().to_string())),
             (
                 Value::Text("timing".to_string()),
                 Value::Text(self.timing.as_str().to_string()),
@@ -334,16 +279,10 @@ impl OracleAd {
             ));
         }
         if let Some(max_inflight) = self.max_inflight {
-            entries.push((
-                Value::Text("max_inflight".to_string()),
-                Value::Integer(max_inflight.into()),
-            ));
+            entries.push((Value::Text("max_inflight".to_string()), Value::Integer(max_inflight.into())));
         }
         if let Some(timeout_ms) = self.timeout_ms {
-            entries.push((
-                Value::Text("timeout_ms".to_string()),
-                Value::Integer(timeout_ms.into()),
-            ));
+            entries.push((Value::Text("timeout_ms".to_string()), Value::Integer(timeout_ms.into())));
         }
         Value::Map(entries)
     }
@@ -351,20 +290,16 @@ impl OracleAd {
     fn from_value(value: &Value) -> Result<Self, DharmaError> {
         let map = expect_map(value)?;
         let name = expect_text(
-            map_get(map, "name")
-                .ok_or_else(|| DharmaError::Validation("missing name".to_string()))?,
+            map_get(map, "name").ok_or_else(|| DharmaError::Validation("missing name".to_string()))?,
         )?;
         let domain = expect_text(
-            map_get(map, "domain")
-                .ok_or_else(|| DharmaError::Validation("missing domain".to_string()))?,
+            map_get(map, "domain").ok_or_else(|| DharmaError::Validation("missing domain".to_string()))?,
         )?;
         let mode_text = expect_text(
-            map_get(map, "mode")
-                .ok_or_else(|| DharmaError::Validation("missing mode".to_string()))?,
+            map_get(map, "mode").ok_or_else(|| DharmaError::Validation("missing mode".to_string()))?,
         )?;
         let timing_text = expect_text(
-            map_get(map, "timing")
-                .ok_or_else(|| DharmaError::Validation("missing timing".to_string()))?,
+            map_get(map, "timing").ok_or_else(|| DharmaError::Validation("missing timing".to_string()))?,
         )?;
         let input_schema_val = map_get(map, "input_schema")
             .ok_or_else(|| DharmaError::Validation("missing input_schema".to_string()))?;
@@ -380,9 +315,10 @@ impl OracleAd {
         let max_inflight = match map_get(map, "max_inflight") {
             Some(val) => {
                 let raw = expect_uint(val)?;
-                Some(raw.try_into().map_err(|_| {
-                    DharmaError::Validation("max_inflight out of range".to_string())
-                })?)
+                Some(
+                    raw.try_into()
+                        .map_err(|_| DharmaError::Validation("max_inflight out of range".to_string()))?,
+                )
             }
             None => None,
         };
@@ -474,8 +410,7 @@ impl AdStore {
     }
 
     pub fn prune(&mut self, now: u64) {
-        self.ads
-            .retain(|_, ad| ad.ts.saturating_add(ad.ttl as u64) >= now);
+        self.ads.retain(|_, ad| ad.ts.saturating_add(ad.ttl as u64) >= now);
         self.rebuild_index();
     }
 

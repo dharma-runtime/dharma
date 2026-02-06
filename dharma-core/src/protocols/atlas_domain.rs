@@ -33,7 +33,13 @@ const REQUIRED_FIELDS: &[&str] = &[
 ];
 
 const REQUIRED_ACTIONS: &[&str] = &[
-    "Genesis", "Invite", "Request", "Approve", "Revoke", "Leave", "Policy",
+    "Genesis",
+    "Invite",
+    "Request",
+    "Approve",
+    "Revoke",
+    "Leave",
+    "Policy",
 ];
 
 const REQUIRED_ASSERTIONS: &[&str] = &[

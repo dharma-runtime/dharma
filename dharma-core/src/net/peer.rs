@@ -1,9 +1,7 @@
 use crate::assertion::AssertionPlaintext;
 use crate::env::Env;
 use crate::error::DharmaError;
-use crate::identity::{
-    delegate_allows, is_verified_identity, root_key_for_identity, IDENTITY_PROFILE,
-};
+use crate::identity::{delegate_allows, is_verified_identity, root_key_for_identity, IDENTITY_PROFILE};
 use crate::net::policy::PeerClaims;
 use crate::store::state::list_assertions;
 use crate::types::{IdentityKey, SubjectId};
@@ -151,10 +149,7 @@ mod tests {
             meta: None,
         };
         let body = Value::Map(vec![
-            (
-                Value::Text("org".to_string()),
-                Value::Text("cmdv".to_string()),
-            ),
+            (Value::Text("org".to_string()), Value::Text("cmdv".to_string())),
             (
                 Value::Text("roles".to_string()),
                 Value::Array(vec![Value::Text("Accountant".to_string())]),

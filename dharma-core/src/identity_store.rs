@@ -1,16 +1,14 @@
-use crate::assertion::{
-    add_signer_meta, AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION,
-};
+use crate::assertion::{add_signer_meta, AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION};
 use crate::builtins;
 use crate::config;
 use crate::crypto;
 use crate::env::Env;
 use crate::error::DharmaError;
 use crate::identity::{IdentityState, ATLAS_IDENTITY_GENESIS};
-use crate::keys;
 use crate::keystore::{decrypt_key, encrypt_key, KeystoreData};
-use crate::store::state::append_assertion;
+use crate::keys;
 use crate::store::Store;
+use crate::store::state::append_assertion;
 use crate::types::SubjectId;
 use ciborium::value::Value;
 use rand_core::{OsRng, RngCore};
@@ -122,18 +120,12 @@ where
         meta: add_signer_meta(None, &subject_id),
     };
     let genesis_body = Value::Map(vec![
-        (
-            Value::Text("atlas_name".to_string()),
-            Value::Text(atlas_name),
-        ),
+        (Value::Text("atlas_name".to_string()), Value::Text(atlas_name)),
         (
             Value::Text("owner_key".to_string()),
             Value::Bytes(root_identity_key.as_bytes().to_vec()),
         ),
-        (
-            Value::Text("doc_type".to_string()),
-            Value::Text("identity".to_string()),
-        ),
+        (Value::Text("doc_type".to_string()), Value::Text("identity".to_string())),
         (
             Value::Text("schema".to_string()),
             Value::Bytes(schema_id.as_bytes().to_vec()),
@@ -142,10 +134,7 @@ where
             Value::Text("contract".to_string()),
             Value::Bytes(contract_id.as_bytes().to_vec()),
         ),
-        (
-            Value::Text("title".to_string()),
-            Value::Text(alias.to_string()),
-        ),
+        (Value::Text("title".to_string()), Value::Text(alias.to_string())),
         (
             Value::Text("members".to_string()),
             Value::Array(vec![Value::Bytes(root_identity_key.as_bytes().to_vec())]),
@@ -234,10 +223,7 @@ where
             Value::Text("delegate".to_string()),
             Value::Bytes(device_identity_key.as_bytes().to_vec()),
         ),
-        (
-            Value::Text("scope".to_string()),
-            Value::Text("all".to_string()),
-        ),
+        (Value::Text("scope".to_string()), Value::Text("all".to_string())),
         (Value::Text("expires".to_string()), Value::Integer(0.into())),
     ]);
     let delegate_typ = delegate_header.typ.clone();
@@ -351,10 +337,7 @@ mod tests {
         let loaded = load_identity(&env, passphrase).unwrap();
         assert_eq!(created.subject_id.as_bytes(), loaded.subject_id.as_bytes());
         assert_eq!(created.public_key.as_bytes(), loaded.public_key.as_bytes());
-        assert_eq!(
-            created.root_public_key.as_bytes(),
-            loaded.root_public_key.as_bytes()
-        );
+        assert_eq!(created.root_public_key.as_bytes(), loaded.root_public_key.as_bytes());
         assert_eq!(created.subject_key, loaded.subject_key);
     }
 

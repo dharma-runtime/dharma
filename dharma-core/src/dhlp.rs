@@ -57,14 +57,8 @@ impl ProjectionPlan {
             emit_args.push((Value::Text(name.clone()), expr_to_value(expr)));
         }
         let emit_map = Value::Map(vec![
-            (
-                Value::Text("verb".to_string()),
-                Value::Text(self.emit.verb.clone()),
-            ),
-            (
-                Value::Text("target".to_string()),
-                Value::Text(self.emit.target.clone()),
-            ),
+            (Value::Text("verb".to_string()), Value::Text(self.emit.verb.clone())),
+            (Value::Text("target".to_string()), Value::Text(self.emit.target.clone())),
             (Value::Text("args".to_string()), Value::Map(emit_args)),
         ]);
         let triggers = Value::Array(
@@ -74,10 +68,7 @@ impl ProjectionPlan {
                 .collect(),
         );
         let mut entries = vec![
-            (
-                Value::Text("v".to_string()),
-                Value::Integer((self.version as u64).into()),
-            ),
+            (Value::Text("v".to_string()), Value::Integer((self.version as u64).into())),
             (Value::Text("triggers".to_string()), triggers),
             (Value::Text("scope".to_string()), Value::Map(scope_entries)),
             (
@@ -116,9 +107,7 @@ impl ProjectionPlan {
         let mut triggers = Vec::new();
         if let Some(list) = map_get(map, "triggers") {
             for item in expect_array(list)? {
-                triggers.push(TriggerSpec {
-                    name: expect_text(item)?,
-                });
+                triggers.push(TriggerSpec { name: expect_text(item)? });
             }
         }
         let mut scope = Vec::new();
@@ -174,9 +163,7 @@ impl ProjectionPlan {
                     keys.push(expect_text(item)?);
                 }
             }
-            let predicate = map_get(prune_map, "where")
-                .map(expr_from_value)
-                .transpose()?;
+            let predicate = map_get(prune_map, "where").map(expr_from_value).transpose()?;
             Some(PruneSpec { keys, predicate })
         } else {
             None

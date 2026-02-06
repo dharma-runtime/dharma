@@ -1,9 +1,5 @@
-use crate::cmd::action::{
-    apply_action_prepared, load_contract_bytes, load_contract_ids_for_ver, load_schema_bytes,
-};
+use crate::cmd::action::{apply_action_prepared, load_contract_bytes, load_contract_ids_for_ver, load_schema_bytes};
 use crate::dhlq;
-use blake3;
-use ciborium::value::Value;
 use dharma::assertion::DEFAULT_DATA_VERSION;
 use dharma::config::Config;
 use dharma::env::Env;
@@ -14,6 +10,8 @@ use dharma::store::state;
 use dharma::types::{hex_decode, EnvelopeId, SubjectId};
 use dharma::value::{expect_bytes, expect_int, expect_map, expect_text, map_get};
 use dharma::{DharmaError, Store};
+use ciborium::value::Value;
+use blake3;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -64,7 +62,10 @@ pub fn doctor() -> Result<(), DharmaError> {
     } else if failed_peers.is_empty() {
         println!("[ok] peers: {reachable}/{total} reachable");
     } else {
-        warnings.push(format!("{} peers unreachable", failed_peers.len()));
+        warnings.push(format!(
+            "{} peers unreachable",
+            failed_peers.len()
+        ));
         println!(
             "[warn] peers: {reachable}/{total} reachable ({} failed)",
             failed_peers.len()
@@ -126,7 +127,8 @@ pub fn gc(args: &[&str]) -> Result<(), DharmaError> {
     let cutoff = if now < 0 {
         0
     } else {
-        (now as u64).saturating_sub(config.storage.prune_pending_hours.saturating_mul(3600))
+        (now as u64)
+            .saturating_sub(config.storage.prune_pending_hours.saturating_mul(3600))
     };
     let removed = pending::prune_pending(&env, cutoff)?;
     println!("gc: pending entries pruned: {removed}");
@@ -371,7 +373,10 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), DharmaError> {
 }
 
 fn collect_peers(root: &Path, configured: &[String]) -> Vec<String> {
-    let mut peers: Vec<String> = configured.iter().map(|addr| normalize_addr(addr)).collect();
+    let mut peers: Vec<String> = configured
+        .iter()
+        .map(|addr| normalize_addr(addr))
+        .collect();
     let path = root.join("peers.list");
     if let Ok(contents) = fs::read_to_string(&path) {
         for line in contents.lines() {
@@ -420,7 +425,10 @@ fn check_storage(data_dir: &Path) -> Result<String, DharmaError> {
             )));
         }
     }
-    Ok(format!("{} free", human_bytes(free)))
+    Ok(format!(
+        "{} free",
+        human_bytes(free)
+    ))
 }
 
 fn check_listen_port(port: u16) -> Result<String, String> {
@@ -430,14 +438,19 @@ fn check_listen_port(port: u16) -> Result<String, String> {
             drop(listener);
             Ok(format!("port {port} available"))
         }
-        Err(err) => match TcpStream::connect_timeout(&addr, Duration::from_secs(1)) {
-            Ok(_) => Ok(format!("port {port} in use (server reachable)")),
-            Err(_) => Err(format!("cannot bind or connect to port {port}: {err}")),
-        },
+        Err(err) => {
+            match TcpStream::connect_timeout(&addr, Duration::from_secs(1)) {
+                Ok(_) => Ok(format!("port {port} in use (server reachable)")),
+                Err(_) => Err(format!("cannot bind or connect to port {port}: {err}")),
+            }
+        }
     }
 }
 
-fn check_peers(peers: &[String], timeout: Duration) -> (usize, usize, Vec<String>) {
+fn check_peers(
+    peers: &[String],
+    timeout: Duration,
+) -> (usize, usize, Vec<String>) {
     let mut ok = 0usize;
     let mut failed = Vec::new();
     for addr in peers {
@@ -542,8 +555,7 @@ fn load_config_envelopes(root: &Path) -> Result<Vec<EnvelopeId>, DharmaError> {
             continue;
         };
         let key = k.trim();
-        if !(key.starts_with("schema") || key.starts_with("contract") || key.starts_with("reactor"))
-        {
+        if !(key.starts_with("schema") || key.starts_with("contract") || key.starts_with("reactor")) {
             continue;
         }
         let value = v.trim().trim_matches('"');
@@ -610,12 +622,8 @@ std.commerce.inventory.ledger
     let mut released: HashSet<(SubjectId, String)> = HashSet::new();
     for row in release_rows {
         let map = expect_map(&row)?;
-        let Some(line_val) = map_get(map, "line_id") else {
-            continue;
-        };
-        let Some(event_val) = map_get(map, "event_id") else {
-            continue;
-        };
+        let Some(line_val) = map_get(map, "line_id") else { continue };
+        let Some(event_val) = map_get(map, "event_id") else { continue };
         if matches!(line_val, Value::Null) || matches!(event_val, Value::Null) {
             continue;
         }
@@ -636,9 +644,7 @@ std.commerce.inventory.ledger
 
     for row in rows {
         let map = expect_map(&row)?;
-        let Some(hold_val) = map_get(map, "hold_id") else {
-            continue;
-        };
+        let Some(hold_val) = map_get(map, "hold_id") else { continue };
         let hold_id = subject_from_value(hold_val)?;
 
         let line_id = map_get(map, "ref_line_id")
@@ -650,7 +656,7 @@ std.commerce.inventory.ledger
             .map(expect_text)
             .transpose()?;
         if let (Some(line_id), Some(event_id)) = (&line_id, &event_id) {
-            if released.contains(&(*line_id, event_id.clone())) {
+            if released.contains(&( *line_id, event_id.clone())) {
                 continue;
             }
         }
@@ -666,14 +672,10 @@ std.commerce.inventory.ledger
         let batch_id = map_get(map, "batch_id").cloned().unwrap_or(Value::Null);
         let item_id = map_get(map, "item_id").cloned().unwrap_or(Value::Null);
         let warehouse_id = map_get(map, "warehouse_id").cloned().unwrap_or(Value::Null);
-        let qty_val = map_get(map, "qty")
-            .cloned()
-            .unwrap_or(Value::Integer(0.into()));
+        let qty_val = map_get(map, "qty").cloned().unwrap_or(Value::Integer(0.into()));
         let qty = expect_int(&qty_val)?;
         let neg_qty = Value::Integer((-qty).into());
-        let ref_line_val = line_id
-            .map(|id| Value::Bytes(id.as_bytes().to_vec()))
-            .unwrap_or(Value::Null);
+        let ref_line_val = line_id.map(|id| Value::Bytes(id.as_bytes().to_vec())).unwrap_or(Value::Null);
         let ref_event_val = event_id.map(Value::Text).unwrap_or(Value::Null);
 
         if !dry_run {
@@ -681,18 +683,12 @@ std.commerce.inventory.ledger
                 (Value::Text("batch_id".to_string()), batch_id),
                 (Value::Text("item_id".to_string()), item_id),
                 (Value::Text("warehouse_id".to_string()), warehouse_id),
-                (
-                    Value::Text("entry_type".to_string()),
-                    Value::Text("ExpireHold".to_string()),
-                ),
+                (Value::Text("entry_type".to_string()), Value::Text("ExpireHold".to_string())),
                 (Value::Text("qty".to_string()), neg_qty),
                 (Value::Text("expires_at".to_string()), Value::Null),
                 (Value::Text("ref_line_id".to_string()), ref_line_val),
                 (Value::Text("ref_event_id".to_string()), ref_event_val),
-                (
-                    Value::Text("reason".to_string()),
-                    Value::Text("reserve_hold_expired".to_string()),
-                ),
+                (Value::Text("reason".to_string()), Value::Text("reserve_hold_expired".to_string())),
             ]);
             let _ = apply_action_prepared(
                 &data_dir,
@@ -729,17 +725,15 @@ fn subject_from_value(value: &Value) -> Result<SubjectId, DharmaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::action::{
-        apply_action_prepared, load_contract_bytes, load_contract_ids_for_ver, load_schema_bytes,
-    };
     use crate::compile_dhl;
+    use crate::cmd::action::{apply_action_prepared, load_contract_bytes, load_contract_ids_for_ver, load_schema_bytes};
     use dharma::identity_store;
     use dharma::pdl::schema::CqrsSchema;
     use dharma::types::SubjectId;
-    use rand::rngs::StdRng;
     use rand::SeedableRng;
-    use std::sync::{Mutex, MutexGuard};
+    use rand::rngs::StdRng;
     use tempfile::TempDir;
+    use std::sync::{Mutex, MutexGuard};
 
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -806,10 +800,7 @@ keystore_path = "keystore"
         ))
     }
 
-    fn copy_contract(
-        root: &std::path::Path,
-        filename: &str,
-    ) -> Result<std::path::PathBuf, DharmaError> {
+    fn copy_contract(root: &std::path::Path, filename: &str) -> Result<std::path::PathBuf, DharmaError> {
         let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let source = repo_root.join("contracts").join("std").join(filename);
         let target = root.join("contracts").join("std").join(filename);
@@ -824,8 +815,7 @@ keystore_path = "keystore"
     #[test]
     fn reserve_expire_creates_expire_hold_entry() -> Result<(), DharmaError> {
         let (_ctx, identity) = setup_temp_project()?;
-        let ledger_path =
-            copy_contract(&std::env::current_dir()?, "commerce_inventory_ledger.dhl")?;
+        let ledger_path = copy_contract(&std::env::current_dir()?, "commerce_inventory_ledger.dhl")?;
         compile_dhl(ledger_path.to_str().unwrap())?;
         let data_dir = crate::ensure_data_dir()?;
         let env = StdEnv::new(&data_dir);
@@ -845,75 +835,33 @@ keystore_path = "keystore"
         if let Some(field) = schema.fields.get("lines") {
             println!("lines field type: {:?}", field.typ);
         }
-        println!(
-            "credit_note struct keys: {:?}",
-            schema.structs.keys().cloned().collect::<Vec<_>>()
-        );
+        println!("credit_note struct keys: {:?}", schema.structs.keys().cloned().collect::<Vec<_>>());
         if let Some(def) = schema.structs.get("CreditLine") {
-            println!(
-                "CreditLine field keys: {:?}",
-                def.fields.keys().cloned().collect::<Vec<_>>()
-            );
+            println!("CreditLine field keys: {:?}", def.fields.keys().cloned().collect::<Vec<_>>());
         }
-        println!(
-            "credit_note structs: {:?}",
-            schema.structs.keys().cloned().collect::<Vec<_>>()
-        );
+        println!("credit_note structs: {:?}", schema.structs.keys().cloned().collect::<Vec<_>>());
         if let Some(action) = schema.actions.get("IssueCreditNoteForLine") {
             println!("credit_note action args: {:?}", action.args);
         }
         if let Some(def) = schema.structs.get("CreditLine") {
-            println!(
-                "CreditLine fields: {:?}",
-                def.fields.keys().cloned().collect::<Vec<_>>()
-            );
+            println!("CreditLine fields: {:?}", def.fields.keys().cloned().collect::<Vec<_>>());
         }
         if let Some(action) = schema.actions.get("IssueCreditNoteForLine") {
             println!("schema action args: {:?}", action.args);
         }
-        println!(
-            "schema fields: {:?}",
-            schema.fields.keys().cloned().collect::<Vec<_>>()
-        );
+        println!("schema fields: {:?}", schema.fields.keys().cloned().collect::<Vec<_>>());
 
         let expires_at = env.now() as i64 - 60;
         let args = Value::Map(vec![
-            (
-                Value::Text("batch_id".to_string()),
-                Value::Bytes(batch_id.as_bytes().to_vec()),
-            ),
-            (
-                Value::Text("item_id".to_string()),
-                Value::Bytes(item_id.as_bytes().to_vec()),
-            ),
-            (
-                Value::Text("warehouse_id".to_string()),
-                Value::Bytes(warehouse_id.as_bytes().to_vec()),
-            ),
-            (
-                Value::Text("entry_type".to_string()),
-                Value::Text("ReserveHold".to_string()),
-            ),
-            (
-                Value::Text("qty".to_string()),
-                Value::Integer(1_000_000i64.into()),
-            ),
-            (
-                Value::Text("expires_at".to_string()),
-                Value::Integer(expires_at.into()),
-            ),
-            (
-                Value::Text("ref_line_id".to_string()),
-                Value::Bytes(line_id.as_bytes().to_vec()),
-            ),
-            (
-                Value::Text("ref_event_id".to_string()),
-                Value::Text(allocation_id.clone()),
-            ),
-            (
-                Value::Text("reason".to_string()),
-                Value::Text("reserve_hold_accepted".to_string()),
-            ),
+            (Value::Text("batch_id".to_string()), Value::Bytes(batch_id.as_bytes().to_vec())),
+            (Value::Text("item_id".to_string()), Value::Bytes(item_id.as_bytes().to_vec())),
+            (Value::Text("warehouse_id".to_string()), Value::Bytes(warehouse_id.as_bytes().to_vec())),
+            (Value::Text("entry_type".to_string()), Value::Text("ReserveHold".to_string())),
+            (Value::Text("qty".to_string()), Value::Integer(1_000_000i64.into())),
+            (Value::Text("expires_at".to_string()), Value::Integer(expires_at.into())),
+            (Value::Text("ref_line_id".to_string()), Value::Bytes(line_id.as_bytes().to_vec())),
+            (Value::Text("ref_event_id".to_string()), Value::Text(allocation_id.clone())),
+            (Value::Text("reason".to_string()), Value::Text("reserve_hold_accepted".to_string())),
         ]);
         let _ = apply_action_prepared(
             &data_dir,
@@ -938,11 +886,7 @@ std.commerce.inventory.ledger
 | sel subject as subject, qty as qty
 "#;
         let plan = dhlq::parse_plan(query, 1)?;
-        let rows = dharma::dhlq::execute(
-            &data_dir,
-            &plan,
-            &Value::Array(vec![Value::Text(allocation_id)]),
-        )?;
+        let rows = dharma::dhlq::execute(&data_dir, &plan, &Value::Array(vec![Value::Text(allocation_id)]))?;
         assert_eq!(rows.len(), 1);
         let map = expect_map(&rows[0])?;
         let qty = expect_int(map_get(map, "qty").unwrap())?;
@@ -966,22 +910,10 @@ std.commerce.inventory.ledger
         let schema = CqrsSchema::from_cbor(&schema_bytes)?;
 
         let auth_args = Value::Map(vec![
-            (
-                Value::Text("provider".to_string()),
-                Value::Text("test".to_string()),
-            ),
-            (
-                Value::Text("method".to_string()),
-                Value::Text("card".to_string()),
-            ),
-            (
-                Value::Text("currency".to_string()),
-                Value::Text("EUR".to_string()),
-            ),
-            (
-                Value::Text("authorized_amount_minor".to_string()),
-                Value::Integer(1000i64.into()),
-            ),
+            (Value::Text("provider".to_string()), Value::Text("test".to_string())),
+            (Value::Text("method".to_string()), Value::Text("card".to_string())),
+            (Value::Text("currency".to_string()), Value::Text("EUR".to_string())),
+            (Value::Text("authorized_amount_minor".to_string()), Value::Integer(1000i64.into())),
             (Value::Text("external_id".to_string()), Value::Null),
             (Value::Text("human_ref".to_string()), Value::Null),
         ]);
@@ -998,10 +930,9 @@ std.commerce.inventory.ledger
             &contract_bytes,
             None,
         )?;
-        let capture_args = Value::Map(vec![(
-            Value::Text("captured_amount_minor".to_string()),
-            Value::Integer(1000i64.into()),
-        )]);
+        let capture_args = Value::Map(vec![
+            (Value::Text("captured_amount_minor".to_string()), Value::Integer(1000i64.into())),
+        ]);
         let _ = apply_action_prepared(
             &data_dir,
             &identity,
@@ -1016,14 +947,8 @@ std.commerce.inventory.ledger
             None,
         )?;
         let refund_args = Value::Map(vec![
-            (
-                Value::Text("refund_amount_minor".to_string()),
-                Value::Integer(1000i64.into()),
-            ),
-            (
-                Value::Text("final_state".to_string()),
-                Value::Text("Refunded".to_string()),
-            ),
+            (Value::Text("refund_amount_minor".to_string()), Value::Integer(1000i64.into())),
+            (Value::Text("final_state".to_string()), Value::Text("Refunded".to_string())),
         ]);
         let _ = apply_action_prepared(
             &data_dir,
@@ -1046,11 +971,7 @@ std.commerce.payment
 | take 1
 "#;
         let plan = dhlq::parse_plan(query, 1)?;
-        let rows = dharma::dhlq::execute(
-            &data_dir,
-            &plan,
-            &Value::Array(vec![Value::Bytes(payment_subject.as_bytes().to_vec())]),
-        )?;
+        let rows = dharma::dhlq::execute(&data_dir, &plan, &Value::Array(vec![Value::Bytes(payment_subject.as_bytes().to_vec())]))?;
         assert_eq!(rows.len(), 1);
         let map = expect_map(&rows[0])?;
         let state = expect_text(map_get(map, "state").unwrap())?;
@@ -1066,11 +987,7 @@ std.commerce.payment
         let credit_path = copy_contract(&std::env::current_dir()?, "commerce_credit_note.dhl")?;
         let contents = std::fs::read_to_string(&credit_path)?;
         let ast = crate::pdl::parser::parse(&contents)?;
-        if let Some(action) = ast
-            .actions
-            .iter()
-            .find(|a| a.name == "IssueCreditNoteForLine")
-        {
+        if let Some(action) = ast.actions.iter().find(|a| a.name == "IssueCreditNoteForLine") {
             for apply in &action.applies {
                 if apply.value.target == vec!["state".to_string(), "lines".to_string()] {
                     if let crate::pdl::ast::Expr::Call(name, args) = &apply.value.value {
@@ -1093,35 +1010,14 @@ std.commerce.payment
         let schema = CqrsSchema::from_cbor(&schema_bytes)?;
 
         let args = Value::Map(vec![
-            (
-                Value::Text("invoice_id".to_string()),
-                Value::Bytes(invoice_id.as_bytes().to_vec()),
-            ),
-            (
-                Value::Text("currency".to_string()),
-                Value::Text("EUR".to_string()),
-            ),
-            (
-                Value::Text("credit_line_id".to_string()),
-                Value::Text("line-1".to_string()),
-            ),
-            (
-                Value::Text("line_id".to_string()),
-                Value::Bytes(line_id.as_bytes().to_vec()),
-            ),
+            (Value::Text("invoice_id".to_string()), Value::Bytes(invoice_id.as_bytes().to_vec())),
+            (Value::Text("currency".to_string()), Value::Text("EUR".to_string())),
+            (Value::Text("credit_line_id".to_string()), Value::Text("line-1".to_string())),
+            (Value::Text("line_id".to_string()), Value::Bytes(line_id.as_bytes().to_vec())),
             (Value::Text("fulfillment_id".to_string()), Value::Null),
-            (
-                Value::Text("description".to_string()),
-                Value::Text("cancel".to_string()),
-            ),
-            (
-                Value::Text("qty".to_string()),
-                Value::Integer(2_000_000i64.into()),
-            ),
-            (
-                Value::Text("unit_price_minor".to_string()),
-                Value::Integer(500i64.into()),
-            ),
+            (Value::Text("description".to_string()), Value::Text("cancel".to_string())),
+            (Value::Text("qty".to_string()), Value::Integer(2_000_000i64.into())),
+            (Value::Text("unit_price_minor".to_string()), Value::Integer(500i64.into())),
             (Value::Text("external_id".to_string()), Value::Null),
             (Value::Text("human_ref".to_string()), Value::Null),
         ]);
@@ -1165,11 +1061,7 @@ std.commerce.credit_note
 | take 1
 "#;
         let plan = dhlq::parse_plan(query, 1)?;
-        let rows = dharma::dhlq::execute(
-            &data_dir,
-            &plan,
-            &Value::Array(vec![Value::Bytes(credit_subject.as_bytes().to_vec())]),
-        )?;
+        let rows = dharma::dhlq::execute(&data_dir, &plan, &Value::Array(vec![Value::Bytes(credit_subject.as_bytes().to_vec())]))?;
         assert_eq!(rows.len(), 1);
         let map = expect_map(&rows[0])?;
         let line_val = map_get(map, "line").unwrap().clone();
@@ -1187,10 +1079,8 @@ std.commerce.credit_note
     #[test]
     fn variant_availability_status_transitions() -> Result<(), DharmaError> {
         let (_ctx, identity) = setup_temp_project()?;
-        let item_bucket_path = copy_contract(
-            &std::env::current_dir()?,
-            "commerce_availability_item_bucket.dhl",
-        )?;
+        let item_bucket_path =
+            copy_contract(&std::env::current_dir()?, "commerce_availability_item_bucket.dhl")?;
         compile_dhl(item_bucket_path.to_str().unwrap())?;
         let data_dir = crate::ensure_data_dir()?;
 
@@ -1204,31 +1094,19 @@ std.commerce.credit_note
         let contract_bytes = load_contract_bytes(&data_dir, &contract_id)?;
         let schema = CqrsSchema::from_cbor(&schema_bytes)?;
 
-        let apply_upsert = |on_hand: i64, backorder: i64, preorder: i64, preorder_allowed: bool| {
+        let apply_upsert = |on_hand: i64,
+                            backorder: i64,
+                            preorder: i64,
+                            preorder_allowed: bool| {
             let args = Value::Map(vec![
-                (
-                    Value::Text("item_id".to_string()),
-                    Value::Bytes(item_id.as_bytes().to_vec()),
-                ),
-                (
-                    Value::Text("warehouse_id".to_string()),
-                    Value::Bytes(warehouse_id.as_bytes().to_vec()),
-                ),
+                (Value::Text("item_id".to_string()), Value::Bytes(item_id.as_bytes().to_vec())),
+                (Value::Text("warehouse_id".to_string()), Value::Bytes(warehouse_id.as_bytes().to_vec())),
                 (Value::Text("channel_id".to_string()), Value::Null),
                 (Value::Text("delivery_area".to_string()), Value::Null),
                 (Value::Text("bucket_date".to_string()), Value::Null),
-                (
-                    Value::Text("on_hand_qty".to_string()),
-                    Value::Integer(on_hand.into()),
-                ),
-                (
-                    Value::Text("inbound_committed_qty".to_string()),
-                    Value::Integer(0i64.into()),
-                ),
-                (
-                    Value::Text("reserved_qty".to_string()),
-                    Value::Integer(0i64.into()),
-                ),
+                (Value::Text("on_hand_qty".to_string()), Value::Integer(on_hand.into())),
+                (Value::Text("inbound_committed_qty".to_string()), Value::Integer(0i64.into())),
+                (Value::Text("reserved_qty".to_string()), Value::Integer(0i64.into())),
                 (
                     Value::Text("available_on_hand_qty".to_string()),
                     Value::Integer(on_hand.into()),
@@ -1249,10 +1127,7 @@ std.commerce.credit_note
                     Value::Text("preorder_capacity".to_string()),
                     Value::Integer(5_000_000i64.into()),
                 ),
-                (
-                    Value::Text("preorder_unverified".to_string()),
-                    Value::Bool(false),
-                ),
+                (Value::Text("preorder_unverified".to_string()), Value::Bool(false)),
                 (
                     Value::Text("shelf_life_status".to_string()),
                     Value::Text("Unknown".to_string()),
@@ -1292,8 +1167,7 @@ std.commerce.availability.item_bucket
             let on_hand = expect_int(map_get(map, "available_on_hand_qty").unwrap())?;
             let backorder = expect_int(map_get(map, "available_backorder_qty").unwrap())?;
             let preorder = expect_int(map_get(map, "available_preorder_qty").unwrap())?;
-            let preorder_allowed =
-                dharma::value::expect_bool(map_get(map, "preorder_allowed").unwrap())?;
+            let preorder_allowed = dharma::value::expect_bool(map_get(map, "preorder_allowed").unwrap())?;
             Ok((on_hand, backorder, preorder, preorder_allowed))
         };
 

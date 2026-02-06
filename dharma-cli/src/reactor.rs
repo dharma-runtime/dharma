@@ -7,10 +7,10 @@ use ciborium::value::Value;
 use dharma::assertion::{is_overlay, signer_from_meta, AssertionPlaintext};
 use dharma::config::Config;
 use dharma::env::StdEnv;
-use dharma::pdl::schema::CqrsSchema;
-use dharma::reactor::ReactorVm;
 use dharma::runtime::cqrs::{action_index, decode_args_buffer, encode_args_buffer};
 use dharma::runtime::vm::{ARGS_BASE, CONTEXT_BASE, STATE_BASE};
+use dharma::pdl::schema::CqrsSchema;
+use dharma::reactor::ReactorVm;
 use dharma::store::state::list_assertions;
 use dharma::types::{EnvelopeId, SubjectId};
 use dharma::vault::drain_archive_queue;
@@ -419,10 +419,7 @@ fn reactor_meta(name: &str) -> Value {
     ])
 }
 
-fn last_seq_for_subject(
-    env: &dyn dharma::env::Env,
-    subject: &SubjectId,
-) -> Result<u64, DharmaError> {
+fn last_seq_for_subject(env: &dyn dharma::env::Env, subject: &SubjectId) -> Result<u64, DharmaError> {
     let records = list_assertions(env, subject)?;
     Ok(records.last().map(|r| r.seq).unwrap_or(0))
 }
@@ -430,7 +427,9 @@ fn last_seq_for_subject(
 fn load_reactor_ids(root: &Path) -> Result<HashMap<u64, EnvelopeId>, DharmaError> {
     let config = match std::fs::read_to_string(root.join("dharma.toml")) {
         Ok(config) => config,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HashMap::new())
+        }
         Err(err) => return Err(DharmaError::from(err)),
     };
     let mut out = HashMap::new();
@@ -533,7 +532,8 @@ fn prepared_contract_by_ids(
 
 fn build_context_buffer(assertion: &AssertionPlaintext) -> Vec<u8> {
     let mut buf = vec![0u8; 40];
-    let signer = signer_from_meta(&assertion.header.meta).unwrap_or_else(|| assertion.header.sub);
+    let signer = signer_from_meta(&assertion.header.meta)
+        .unwrap_or_else(|| assertion.header.sub);
     buf[..32].copy_from_slice(signer.as_bytes());
     let ts = assertion
         .header
@@ -719,18 +719,16 @@ mod tests {
     use super::*;
     use crate::pdl::parser;
     use dharma::assertion::{AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION};
-    use dharma::crypto;
     use dharma::pdl::schema::layout_action;
-    use dharma::pdl::schema::ConcurrencyMode;
     use dharma::reactor::{Expr, Op, ReactorPlan, ReactorSpec, ReactorVm};
-    use dharma::runtime::cqrs::{
-        action_index, decode_args_buffer, default_state_memory, encode_args_buffer,
-    };
+    use dharma::runtime::cqrs::{action_index, decode_args_buffer, default_state_memory, encode_args_buffer};
     use dharma::store::state::append_assertion;
     use dharma::types::{ContractId, SchemaId};
-    use rand::rngs::StdRng;
+    use dharma::crypto;
     use rand::SeedableRng;
+    use rand::rngs::StdRng;
     use std::collections::BTreeMap;
+    use dharma::pdl::schema::ConcurrencyMode;
 
     #[test]
     fn trigger_matching_accepts_action_prefix() {
@@ -752,7 +750,7 @@ mod tests {
             fields: BTreeMap::new(),
             actions: BTreeMap::new(),
             queries: BTreeMap::new(),
-            projections: BTreeMap::new(),
+        projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Strict,
         };
         assert!(scope_matches(None, &schema));
@@ -874,8 +872,7 @@ reactor Auto
             note: None,
             meta: None,
         };
-        let genesis =
-            AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
+        let genesis = AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
         let genesis_bytes = genesis.to_cbor().unwrap();
         let genesis_id = genesis.assertion_id().unwrap();
         let genesis_env = crypto::envelope_id(&genesis_bytes);
@@ -989,8 +986,7 @@ reactor Auto
             note: None,
             meta: None,
         };
-        let genesis =
-            AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
+        let genesis = AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
         let genesis_bytes = genesis.to_cbor().unwrap();
         let genesis_id = genesis.assertion_id().unwrap();
         let genesis_env = crypto::envelope_id(&genesis_bytes);
@@ -1102,10 +1098,7 @@ reactor Auto
 
     #[test]
     fn trigger_matches_ignores_cron() {
-        assert!(!trigger_matches(
-            Some("Cron(\"0 0 * * *\")"),
-            "action.Approve"
-        ));
+        assert!(!trigger_matches(Some("Cron(\"0 0 * * *\")"), "action.Approve"));
     }
 
     #[test]

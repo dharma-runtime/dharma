@@ -1,7 +1,7 @@
 use dharma_core::env::{Env, Fs, MappedBytes};
 use dharma_core::error::DharmaError;
-use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
+use rand_chacha::rand_core::{RngCore, SeedableRng};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,7 +12,7 @@ pub mod scheduler;
 pub mod timeline;
 
 pub use net::{FaultConfig, NodeId, SimHub, SimNet, SimStream, SimStreamControl};
-pub use scheduler::{ScheduledEvent, SimScheduler};
+pub use scheduler::{SimScheduler, ScheduledEvent};
 pub use timeline::{FaultEvent, FaultTimeline};
 
 pub struct TraceSink {
@@ -194,14 +194,14 @@ impl SimEnv {
 
 impl Env for SimEnv {
     fn now(&self) -> i64 {
-        let mut clock = self.clock.lock().expect("clock lock poisoned");
+        let mut clock = self
+            .clock
+            .lock()
+            .expect("clock lock poisoned");
         clock.calls = clock.calls.wrapping_add(1);
-        let mut t = clock.now.saturating_add(
-            clock
-                .faults
-                .drift_per_call
-                .saturating_mul(clock.calls as i64),
-        );
+        let mut t = clock
+            .now
+            .saturating_add(clock.faults.drift_per_call.saturating_mul(clock.calls as i64));
         if let Some(freq) = clock.faults.jump_every {
             if freq > 0 && clock.calls % freq == 0 {
                 t = t.saturating_add(clock.faults.jump_amount);
@@ -231,11 +231,7 @@ impl Fs for SimEnv {
         let result = self.fs.read(path);
         match &result {
             Ok(bytes) => {
-                self.trace_line(format!(
-                    "fs.read path={} len={}",
-                    path.display(),
-                    bytes.len()
-                ));
+                self.trace_line(format!("fs.read path={} len={}", path.display(), bytes.len()));
             }
             Err(err) => {
                 self.trace_line(format!("fs.read path={} err={}", path.display(), err));
@@ -322,11 +318,7 @@ impl Fs for SimEnv {
         let result = self.fs.remove_dir_all(path);
         match &result {
             Ok(()) => self.trace_line(format!("fs.remove_dir_all path={} ok", path.display())),
-            Err(err) => self.trace_line(format!(
-                "fs.remove_dir_all path={} err={}",
-                path.display(),
-                err
-            )),
+            Err(err) => self.trace_line(format!("fs.remove_dir_all path={} err={}", path.display(), err)),
         }
         result
     }
@@ -335,11 +327,7 @@ impl Fs for SimEnv {
         let result = self.fs.remove_file(path);
         match &result {
             Ok(()) => self.trace_line(format!("fs.remove_file path={} ok", path.display())),
-            Err(err) => self.trace_line(format!(
-                "fs.remove_file path={} err={}",
-                path.display(),
-                err
-            )),
+            Err(err) => self.trace_line(format!("fs.remove_file path={} err={}", path.display(), err)),
         }
         result
     }
@@ -375,11 +363,7 @@ impl Fs for SimEnv {
         let result = self.fs.create_dir_all(path);
         match &result {
             Ok(()) => self.trace_line(format!("fs.create_dir_all path={} ok", path.display())),
-            Err(err) => self.trace_line(format!(
-                "fs.create_dir_all path={} err={}",
-                path.display(),
-                err
-            )),
+            Err(err) => self.trace_line(format!("fs.create_dir_all path={} err={}", path.display(), err)),
         }
         result
     }
@@ -432,12 +416,10 @@ impl SimFs {
         if len == 0 {
             return Ok(FaultPlan::ok(0));
         }
-        let mut state = self.faults.lock().map_err(|_| {
-            DharmaError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "fs lock poisoned",
-            ))
-        })?;
+        let mut state = self
+            .faults
+            .lock()
+            .map_err(|_| DharmaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "fs lock poisoned")))?;
         if let Some(limit) = state.config.enospc_after {
             if state.bytes_written.saturating_add(len as u64) > limit {
                 return Err(DharmaError::Io(std::io::Error::new(
@@ -463,12 +445,10 @@ impl SimFs {
     }
 
     fn insert_dir_chain(&self, path: &Path) -> Result<(), DharmaError> {
-        let mut dirs = self.dirs.lock().map_err(|_| {
-            DharmaError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "fs lock poisoned",
-            ))
-        })?;
+        let mut dirs = self
+            .dirs
+            .lock()
+            .map_err(|_| DharmaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "fs lock poisoned")))?;
         for ancestor in path.ancestors() {
             if ancestor.as_os_str().is_empty() {
                 continue;
@@ -482,18 +462,14 @@ impl SimFs {
 impl Fs for SimFs {
     fn read(&self, path: &Path) -> Result<Vec<u8>, DharmaError> {
         let data = {
-            let files = self.files.lock().map_err(|_| {
-                DharmaError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "fs lock poisoned",
-                ))
-            })?;
-            files.get(path).cloned().ok_or_else(|| {
-                DharmaError::Io(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "file not found",
-                ))
-            })?
+            let files = self
+                .files
+                .lock()
+                .map_err(|_| DharmaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "fs lock poisoned")))?;
+            files
+                .get(path)
+                .cloned()
+                .ok_or_else(|| DharmaError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "file not found")))?
         };
         let mut data = data;
         if let Ok(mut state) = self.faults.lock() {
@@ -517,21 +493,14 @@ impl Fs for SimFs {
     }
 
     fn file_len(&self, path: &Path) -> Result<u64, DharmaError> {
-        let files = self.files.lock().map_err(|_| {
-            DharmaError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "fs lock poisoned",
-            ))
-        })?;
+        let files = self
+            .files
+            .lock()
+            .map_err(|_| DharmaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "fs lock poisoned")))?;
         let len = files
             .get(path)
             .map(|data| data.len() as u64)
-            .ok_or_else(|| {
-                DharmaError::Io(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "file not found",
-                ))
-            })?;
+            .ok_or_else(|| DharmaError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "file not found")))?;
         Ok(len)
     }
 
@@ -540,12 +509,10 @@ impl Fs for SimFs {
             self.insert_dir_chain(parent)?;
         }
         let plan = self.fault_plan(data.len())?;
-        let mut files = self.files.lock().map_err(|_| {
-            DharmaError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "fs lock poisoned",
-            ))
-        })?;
+        let mut files = self
+            .files
+            .lock()
+            .map_err(|_| DharmaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "fs lock poisoned")))?;
         let bytes = data.get(..plan.write_len).unwrap_or(&[]);
         files.insert(path.to_path_buf(), bytes.to_vec());
         if plan.error {
@@ -562,17 +529,12 @@ impl Fs for SimFs {
             self.insert_dir_chain(parent)?;
         }
         let plan = self.fault_plan(data.len())?;
-        let mut files = self.files.lock().map_err(|_| {
-            DharmaError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "fs lock poisoned",
-            ))
-        })?;
+        let mut files = self
+            .files
+            .lock()
+            .map_err(|_| DharmaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "fs lock poisoned")))?;
         let bytes = data.get(..plan.write_len).unwrap_or(&[]);
-        files
-            .entry(path.to_path_buf())
-            .or_default()
-            .extend_from_slice(bytes);
+        files.entry(path.to_path_buf()).or_default().extend_from_slice(bytes);
         if plan.error {
             return Err(DharmaError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -583,30 +545,24 @@ impl Fs for SimFs {
     }
 
     fn remove_dir_all(&self, path: &Path) -> Result<(), DharmaError> {
-        let mut files = self.files.lock().map_err(|_| {
-            DharmaError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "fs lock poisoned",
-            ))
-        })?;
+        let mut files = self
+            .files
+            .lock()
+            .map_err(|_| DharmaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "fs lock poisoned")))?;
         files.retain(|p, _| !p.starts_with(path));
-        let mut dirs = self.dirs.lock().map_err(|_| {
-            DharmaError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "fs lock poisoned",
-            ))
-        })?;
+        let mut dirs = self
+            .dirs
+            .lock()
+            .map_err(|_| DharmaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "fs lock poisoned")))?;
         dirs.retain(|p| !p.starts_with(path));
         Ok(())
     }
 
     fn remove_file(&self, path: &Path) -> Result<(), DharmaError> {
-        let mut files = self.files.lock().map_err(|_| {
-            DharmaError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "fs lock poisoned",
-            ))
-        })?;
+        let mut files = self
+            .files
+            .lock()
+            .map_err(|_| DharmaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "fs lock poisoned")))?;
         files.remove(path);
         Ok(())
     }
@@ -652,12 +608,10 @@ impl Fs for SimFs {
 
     fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, DharmaError> {
         let mut out = HashSet::new();
-        let files = self.files.lock().map_err(|_| {
-            DharmaError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "fs lock poisoned",
-            ))
-        })?;
+        let files = self
+            .files
+            .lock()
+            .map_err(|_| DharmaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "fs lock poisoned")))?;
         for file in files.keys() {
             if let Some(parent) = file.parent() {
                 if parent == path {
@@ -665,12 +619,10 @@ impl Fs for SimFs {
                 }
             }
         }
-        let dirs = self.dirs.lock().map_err(|_| {
-            DharmaError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "fs lock poisoned",
-            ))
-        })?;
+        let dirs = self
+            .dirs
+            .lock()
+            .map_err(|_| DharmaError::Io(std::io::Error::new(std::io::ErrorKind::Other, "fs lock poisoned")))?;
         for dir in dirs.iter() {
             if let Some(parent) = dir.parent() {
                 if parent == path {

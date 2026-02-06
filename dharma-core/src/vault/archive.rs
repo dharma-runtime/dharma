@@ -8,8 +8,8 @@ use crate::store::state::{list_assertions, load_latest_snapshot_for_ver};
 use crate::store::Store;
 use crate::types::{AssertionId, ContractId, EnvelopeId, IdentityKey, SchemaId, SubjectId};
 use crate::vault::{
-    CompressionAlg, DhboxChunk, EncryptionAlg, VaultConfig, VaultDictionary, VaultDictionaryRef,
-    VaultDriver, VaultHash, VaultItem, VaultLocation, VaultSegmentBuilder, DHBOX_VERSION_V1,
+    CompressionAlg, DhboxChunk, EncryptionAlg, VaultDictionary, VaultDictionaryRef, VaultDriver,
+    VaultItem, VaultLocation, VaultSegmentBuilder, VaultConfig, VaultHash, DHBOX_VERSION_V1,
 };
 use ciborium::value::Value;
 use rand_core::OsRng;
@@ -65,9 +65,7 @@ pub fn archive_subject(
         if assertion.header.ver != input.ver {
             continue;
         }
-        if assertion.header.schema != input.schema_id
-            || assertion.header.contract != input.contract_id
-        {
+        if assertion.header.schema != input.schema_id || assertion.header.contract != input.contract_id {
             continue;
         }
         let item = VaultItem {

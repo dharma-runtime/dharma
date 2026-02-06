@@ -32,20 +32,19 @@ pub fn compile(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
     let schema = CqrsSchema::from_cbor(&schema_bytes)?;
     let public_layout = layout_public(&schema);
     let private_layout = layout_private(&schema);
-    let public_size = public_layout.last().map(|f| f.offset + f.size).unwrap_or(0);
+    let public_size = public_layout
+        .last()
+        .map(|f| f.offset + f.size)
+        .unwrap_or(0);
     if public_size > STATE_SIZE as usize {
-        return Err(DharmaError::Validation(
-            "public state exceeds 0x1000".to_string(),
-        ));
+        return Err(DharmaError::Validation("public state exceeds 0x1000".to_string()));
     }
     let private_size = private_layout
         .last()
         .map(|f| f.offset + f.size)
         .unwrap_or(0);
     if private_size > STATE_SIZE as usize {
-        return Err(DharmaError::Validation(
-            "private state exceeds 0x1000".to_string(),
-        ));
+        return Err(DharmaError::Validation("private state exceeds 0x1000".to_string()));
     }
 
     let mut action_order = schema.actions.keys().cloned().collect::<Vec<_>>();
@@ -59,9 +58,7 @@ pub fn compile(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
         let layout = layout_action(action_schema, &schema.structs);
         let total = layout.last().map(|f| f.offset + f.size).unwrap_or(4);
         if total > ARGS_SIZE as usize {
-            return Err(DharmaError::Validation(
-                "args size exceeds 0x1000".to_string(),
-            ));
+            return Err(DharmaError::Validation("args size exceeds 0x1000".to_string()));
         }
         action_layouts.insert(name.clone(), layout);
     }
@@ -75,16 +72,7 @@ pub fn compile(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
     let read_bool_type = 2u32;
     types.function([ValType::I32, ValType::I32, ValType::I32], [ValType::I32]);
     let read_text_type = 3u32;
-    types.function(
-        [
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-        ],
-        [ValType::I32],
-    );
+    types.function([ValType::I32, ValType::I32, ValType::I32, ValType::I32, ValType::I32], [ValType::I32]);
     let remote_intersects_type = 4u32;
     types.function([], [ValType::I32]);
     let validate_type = 5u32;
@@ -95,41 +83,13 @@ pub fn compile(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
     module.section(&types);
 
     let mut imports = ImportSection::new();
-    imports.import(
-        "env",
-        "has_role",
-        wasm_encoder::EntityType::Function(has_role_type),
-    );
-    imports.import(
-        "env",
-        "read_int",
-        wasm_encoder::EntityType::Function(read_int_type),
-    );
-    imports.import(
-        "env",
-        "read_bool",
-        wasm_encoder::EntityType::Function(read_bool_type),
-    );
-    imports.import(
-        "env",
-        "read_text",
-        wasm_encoder::EntityType::Function(read_text_type),
-    );
-    imports.import(
-        "env",
-        "read_identity",
-        wasm_encoder::EntityType::Function(read_text_type),
-    );
-    imports.import(
-        "env",
-        "read_subject_ref",
-        wasm_encoder::EntityType::Function(read_text_type),
-    );
-    imports.import(
-        "env",
-        "subject_id",
-        wasm_encoder::EntityType::Function(read_bool_type),
-    );
+    imports.import("env", "has_role", wasm_encoder::EntityType::Function(has_role_type));
+    imports.import("env", "read_int", wasm_encoder::EntityType::Function(read_int_type));
+    imports.import("env", "read_bool", wasm_encoder::EntityType::Function(read_bool_type));
+    imports.import("env", "read_text", wasm_encoder::EntityType::Function(read_text_type));
+    imports.import("env", "read_identity", wasm_encoder::EntityType::Function(read_text_type));
+    imports.import("env", "read_subject_ref", wasm_encoder::EntityType::Function(read_text_type));
+    imports.import("env", "subject_id", wasm_encoder::EntityType::Function(read_bool_type));
     imports.import(
         "env",
         "remote_intersects",
@@ -237,11 +197,7 @@ pub fn compile_reactor(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
     module.section(&types);
 
     let mut imports = ImportSection::new();
-    imports.import(
-        "env",
-        "has_role",
-        wasm_encoder::EntityType::Function(has_role_type),
-    );
+    imports.import("env", "has_role", wasm_encoder::EntityType::Function(has_role_type));
     module.section(&imports);
 
     let mut functions = FunctionSection::new();
@@ -258,9 +214,9 @@ pub fn compile_reactor(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
             &empty_layout
         } else {
             let trigger_action = reactor_trigger_action(reactor.trigger.as_deref())?;
-            action_layouts.get(&trigger_action).ok_or_else(|| {
-                DharmaError::Validation("unknown reactor trigger action".to_string())
-            })?
+            action_layouts
+                .get(&trigger_action)
+                .ok_or_else(|| DharmaError::Validation("unknown reactor trigger action".to_string()))?
         };
         let env = Env::new(
             &schema,
@@ -829,7 +785,12 @@ fn insert_field(
             offset: offset + cursor,
             typ: field.typ.clone(),
         };
-        insert_field(map, format!("{name}.{field_name}"), child, schema);
+        insert_field(
+            map,
+            format!("{name}.{field_name}"),
+            child,
+            schema,
+        );
         cursor += crate::pdl::schema::type_size(&field.typ, &schema.structs) as u32;
     }
 }
@@ -845,9 +806,7 @@ enum ExprType {
 fn compile_bool_expr(expr: &Expr, env: &Env<'_>, func: &mut Function) -> Result<(), DharmaError> {
     let expr_type = compile_expr(expr, env, func)?;
     if expr_type != ExprType::Bool {
-        return Err(DharmaError::Validation(
-            "expected bool expression".to_string(),
-        ));
+        return Err(DharmaError::Validation("expected bool expression".to_string()));
     }
     Ok(())
 }
@@ -863,40 +822,36 @@ fn compile_expr(expr: &Expr, env: &Env<'_>, func: &mut Function) -> Result<ExprT
                 func.instruction(&Instruction::I32Const(if *value { 1 } else { 0 }));
                 Ok(ExprType::Bool)
             }
-            Literal::Text(_) => Err(DharmaError::Validation(
-                "text unsupported in expression".to_string(),
-            )),
-            Literal::Enum(_) => Err(DharmaError::Validation(
-                "enum literal requires context".to_string(),
-            )),
-            Literal::Null => Err(DharmaError::Validation(
-                "null unsupported in expression".to_string(),
-            )),
-            Literal::List(_) | Literal::Map(_) | Literal::Struct(_, _) => Err(
-                DharmaError::Validation("collection literal unsupported in expression".to_string()),
-            ),
+            Literal::Text(_) => Err(DharmaError::Validation("text unsupported in expression".to_string())),
+            Literal::Enum(_) => Err(DharmaError::Validation("enum literal requires context".to_string())),
+            Literal::Null => Err(DharmaError::Validation("null unsupported in expression".to_string())),
+            Literal::List(_) | Literal::Map(_) | Literal::Struct(_, _) => {
+                Err(DharmaError::Validation("collection literal unsupported in expression".to_string()))
+            }
         },
         Expr::Path(path) => compile_path_expr(path, env, func),
-        Expr::UnaryOp(op, inner) => match op {
-            Op::Not => {
-                let t = compile_expr(inner, env, func)?;
-                if t != ExprType::Bool {
-                    return Err(DharmaError::Validation("expected bool for !".to_string()));
+        Expr::UnaryOp(op, inner) => {
+            match op {
+                Op::Not => {
+                    let t = compile_expr(inner, env, func)?;
+                    if t != ExprType::Bool {
+                        return Err(DharmaError::Validation("expected bool for !".to_string()));
+                    }
+                    func.instruction(&Instruction::I32Eqz);
+                    Ok(ExprType::Bool)
                 }
-                func.instruction(&Instruction::I32Eqz);
-                Ok(ExprType::Bool)
-            }
-            Op::Neg => {
-                func.instruction(&Instruction::I64Const(0));
-                let t = compile_expr(inner, env, func)?;
-                if t != ExprType::Int {
-                    return Err(DharmaError::Validation("expected int for -".to_string()));
+                Op::Neg => {
+                    func.instruction(&Instruction::I64Const(0));
+                    let t = compile_expr(inner, env, func)?;
+                    if t != ExprType::Int {
+                        return Err(DharmaError::Validation("expected int for -".to_string()));
+                    }
+                    func.instruction(&Instruction::I64Sub);
+                    Ok(ExprType::Int)
                 }
-                func.instruction(&Instruction::I64Sub);
-                Ok(ExprType::Int)
+                _ => Err(DharmaError::Validation("invalid unary op".to_string())),
             }
-            _ => Err(DharmaError::Validation("invalid unary op".to_string())),
-        },
+        }
         Expr::BinaryOp(op, left, right) => match op {
             Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod => {
                 let left_type = compile_expr(left, env, func)?;
@@ -924,7 +879,9 @@ fn compile_expr(expr: &Expr, env: &Env<'_>, func: &mut Function) -> Result<ExprT
                 }
                 Ok(ExprType::Int)
             }
-            Op::In => compile_in_expr(left, right, env, func),
+            Op::In => {
+                compile_in_expr(left, right, env, func)
+            }
             Op::Eq | Op::Neq => {
                 if let Some((left_info, right_info)) = bytes32_paths(left, right, env)? {
                     return compile_bytes32_eq(op, &left_info, &right_info, func);
@@ -933,9 +890,10 @@ fn compile_expr(expr: &Expr, env: &Env<'_>, func: &mut Function) -> Result<ExprT
                     let info = resolve_path_info(path, env)?;
                     let info = unwrap_optional_info(info);
                     if let TypeSpec::Enum(variants) = &info.typ {
-                        let idx = variants.iter().position(|v| v == lit).ok_or_else(|| {
-                            DharmaError::Validation("unknown enum literal".to_string())
-                        })?;
+                        let idx = variants
+                            .iter()
+                            .position(|v| v == lit)
+                            .ok_or_else(|| DharmaError::Validation("unknown enum literal".to_string()))?;
                         func.instruction(&Instruction::I32Const(info.base as i32));
                         func.instruction(&Instruction::I32Const(info.offset as i32));
                         func.instruction(&Instruction::I32Add);
@@ -956,9 +914,7 @@ fn compile_expr(expr: &Expr, env: &Env<'_>, func: &mut Function) -> Result<ExprT
                 if let Some((text, other)) = text_literal_pair(left, right) {
                     let other_type = compile_expr(other, env, func)?;
                     let ExprType::Text(max) = other_type else {
-                        return Err(DharmaError::Validation(
-                            "text literal comparison expects text".to_string(),
-                        ));
+                        return Err(DharmaError::Validation("text literal comparison expects text".to_string()));
                     };
                     func.instruction(&Instruction::LocalSet(2));
                     let bytes = text_bytes(text, max);
@@ -1002,9 +958,7 @@ fn compile_expr(expr: &Expr, env: &Env<'_>, func: &mut Function) -> Result<ExprT
                             return Err(DharmaError::Validation("invalid eq types".to_string()));
                         };
                         if left_len != right_len {
-                            return Err(DharmaError::Validation(
-                                "bytes width mismatch".to_string(),
-                            ));
+                            return Err(DharmaError::Validation("bytes width mismatch".to_string()));
                         }
                         func.instruction(&Instruction::LocalSet(3));
                         compile_mem_eq_ptrs(func, left_len);
@@ -1091,41 +1045,32 @@ fn compile_expr(expr: &Expr, env: &Env<'_>, func: &mut Function) -> Result<ExprT
                         let info = resolve_path_info(path, env)?;
                         let info = unwrap_optional_info(info);
                         match info.typ {
-                            TypeSpec::Text(_)
-                            | TypeSpec::Currency
-                            | TypeSpec::List(_)
-                            | TypeSpec::Map(_, _) => {
+                            TypeSpec::Text(_) | TypeSpec::Currency | TypeSpec::List(_) | TypeSpec::Map(_, _) => {
                                 emit_len_load(&info, func);
                                 func.instruction(&Instruction::I64ExtendI32U);
                                 Ok(ExprType::Int)
                             }
-                            _ => Err(DharmaError::Validation(
-                                "len requires text or collection".to_string(),
-                            )),
+                            _ => Err(DharmaError::Validation("len requires text or collection".to_string())),
                         }
                     }
-                    _ => Err(DharmaError::Validation(
-                        "len expects path or literal collection".to_string(),
-                    )),
+                    _ => Err(DharmaError::Validation("len expects path or literal collection".to_string())),
                 }
             }
             "contains" => {
                 if args.len() != 2 {
-                    return Err(DharmaError::Validation(
-                        "contains expects two args".to_string(),
-                    ));
+                    return Err(DharmaError::Validation("contains expects two args".to_string()));
                 }
                 compile_contains_expr(&args[0], &args[1], env, func)
             }
             "index" | "get" => {
                 if args.len() != 2 {
-                    return Err(DharmaError::Validation(
-                        "index expects two args".to_string(),
-                    ));
+                    return Err(DharmaError::Validation("index expects two args".to_string()));
                 }
                 compile_index_expr(&args[0], &args[1], env, func)
             }
-            "has_role" => compile_has_role(args, env, func),
+            "has_role" => {
+                compile_has_role(args, env, func)
+            }
             "now" => {
                 let info = env
                     .context
@@ -1145,9 +1090,7 @@ fn compile_expr(expr: &Expr, env: &Env<'_>, func: &mut Function) -> Result<ExprT
             "days_until" => compile_days_between_expr(args, env, func, true),
             "distance" => {
                 if args.len() != 2 {
-                    return Err(DharmaError::Validation(
-                        "distance expects two args".to_string(),
-                    ));
+                    return Err(DharmaError::Validation("distance expects two args".to_string()));
                 }
                 compile_distance_expr(&args[0], &args[1], env, func)
             }
@@ -1182,11 +1125,7 @@ fn compile_days_between_expr(
             "days_between expects two args".to_string(),
         ));
     }
-    let (start, end) = if swap {
-        (&args[1], &args[0])
-    } else {
-        (&args[0], &args[1])
-    };
+    let (start, end) = if swap { (&args[1], &args[0]) } else { (&args[0], &args[1]) };
     let end_type = compile_expr(end, env, func)?;
     let start_type = compile_expr(start, env, func)?;
     if end_type != ExprType::Int || start_type != ExprType::Int {
@@ -1215,11 +1154,7 @@ fn compile_days_between_expr(
     Ok(ExprType::Int)
 }
 
-fn compile_has_role(
-    args: &[Expr],
-    env: &Env<'_>,
-    func: &mut Function,
-) -> Result<ExprType, DharmaError> {
+fn compile_has_role(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
     if !(args.len() == 2 || args.len() == 3) {
         return Err(DharmaError::Validation(
             "has_role expects two or three args".to_string(),
@@ -1239,21 +1174,13 @@ fn compile_has_role(
     let subject_type = compile_expr(subject_expr, env, func)?;
     match subject_type {
         ExprType::Bytes(32) => {}
-        _ => {
-            return Err(DharmaError::Validation(
-                "has_role expects identity".to_string(),
-            ))
-        }
+        _ => return Err(DharmaError::Validation("has_role expects identity".to_string())),
     }
 
     let identity_type = compile_expr(identity_expr, env, func)?;
     match identity_type {
         ExprType::Bytes(32) => {}
-        _ => {
-            return Err(DharmaError::Validation(
-                "has_role expects identity".to_string(),
-            ))
-        }
+        _ => return Err(DharmaError::Validation("has_role expects identity".to_string())),
     }
 
     match role_expr {
@@ -1294,15 +1221,15 @@ const ELEM_KIND_TEXT: i32 = 1;
 const ELEM_KIND_IDENTITY: i32 = 2;
 const ELEM_KIND_SUBJECT_REF: i32 = 3;
 
-fn compile_path_literal_arg(
-    expr: &Expr,
-    env: &Env<'_>,
-    func: &mut Function,
-) -> Result<u32, DharmaError> {
+fn compile_path_literal_arg(expr: &Expr, env: &Env<'_>, func: &mut Function) -> Result<u32, DharmaError> {
     let text = match expr {
         Expr::Literal(Literal::Text(text)) => text,
         Expr::Literal(Literal::Enum(text)) => text,
-        _ => return Err(DharmaError::Validation("path must be literal".to_string())),
+        _ => {
+            return Err(DharmaError::Validation(
+                "path must be literal".to_string(),
+            ))
+        }
     };
     if text.len() > MAX_PATH_LEN {
         return Err(DharmaError::Validation("path literal too long".to_string()));
@@ -1313,21 +1240,13 @@ fn compile_path_literal_arg(
     Ok(env.literal_base)
 }
 
-fn compile_read_int(
-    args: &[Expr],
-    env: &Env<'_>,
-    func: &mut Function,
-) -> Result<ExprType, DharmaError> {
+fn compile_read_int(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
     if args.len() != 2 {
-        return Err(DharmaError::Validation(
-            "read_int expects two args".to_string(),
-        ));
+        return Err(DharmaError::Validation("read_int expects two args".to_string()));
     }
     let subject_type = compile_expr(&args[0], env, func)?;
     if subject_type != ExprType::Bytes(40) {
-        return Err(DharmaError::Validation(
-            "read_int expects subject_ref".to_string(),
-        ));
+        return Err(DharmaError::Validation("read_int expects subject_ref".to_string()));
     }
     let _ = compile_path_literal_arg(&args[1], env, func)?;
     let Some(read_int) = env.host.read_int_func else {
@@ -1337,21 +1256,13 @@ fn compile_read_int(
     Ok(ExprType::Int)
 }
 
-fn compile_read_bool(
-    args: &[Expr],
-    env: &Env<'_>,
-    func: &mut Function,
-) -> Result<ExprType, DharmaError> {
+fn compile_read_bool(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
     if args.len() != 2 {
-        return Err(DharmaError::Validation(
-            "read_bool expects two args".to_string(),
-        ));
+        return Err(DharmaError::Validation("read_bool expects two args".to_string()));
     }
     let subject_type = compile_expr(&args[0], env, func)?;
     if subject_type != ExprType::Bytes(40) {
-        return Err(DharmaError::Validation(
-            "read_bool expects subject_ref".to_string(),
-        ));
+        return Err(DharmaError::Validation("read_bool expects subject_ref".to_string()));
     }
     let _ = compile_path_literal_arg(&args[1], env, func)?;
     let Some(read_bool) = env.host.read_bool_func else {
@@ -1361,21 +1272,13 @@ fn compile_read_bool(
     Ok(ExprType::Bool)
 }
 
-fn compile_read_text(
-    args: &[Expr],
-    env: &Env<'_>,
-    func: &mut Function,
-) -> Result<ExprType, DharmaError> {
+fn compile_read_text(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
     if args.len() != 2 {
-        return Err(DharmaError::Validation(
-            "read_text expects two args".to_string(),
-        ));
+        return Err(DharmaError::Validation("read_text expects two args".to_string()));
     }
     let subject_type = compile_expr(&args[0], env, func)?;
     if subject_type != ExprType::Bytes(40) {
-        return Err(DharmaError::Validation(
-            "read_text expects subject_ref".to_string(),
-        ));
+        return Err(DharmaError::Validation("read_text expects subject_ref".to_string()));
     }
     let _ = compile_path_literal_arg(&args[1], env, func)?;
     let scratch = env.alloc_scratch((4 + DEFAULT_TEXT_LEN) as u32)?;
@@ -1387,56 +1290,36 @@ fn compile_read_text(
     Ok(ExprType::Text(DEFAULT_TEXT_LEN))
 }
 
-fn compile_read_identity(
-    args: &[Expr],
-    env: &Env<'_>,
-    func: &mut Function,
-) -> Result<ExprType, DharmaError> {
+fn compile_read_identity(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
     if args.len() != 2 {
-        return Err(DharmaError::Validation(
-            "read_identity expects two args".to_string(),
-        ));
+        return Err(DharmaError::Validation("read_identity expects two args".to_string()));
     }
     let subject_type = compile_expr(&args[0], env, func)?;
     if subject_type != ExprType::Bytes(40) {
-        return Err(DharmaError::Validation(
-            "read_identity expects subject_ref".to_string(),
-        ));
+        return Err(DharmaError::Validation("read_identity expects subject_ref".to_string()));
     }
     let _ = compile_path_literal_arg(&args[1], env, func)?;
     let scratch = env.alloc_scratch(32)?;
     func.instruction(&Instruction::I32Const(scratch as i32));
     let Some(read_identity) = env.host.read_identity_func else {
-        return Err(DharmaError::Validation(
-            "read_identity unsupported".to_string(),
-        ));
+        return Err(DharmaError::Validation("read_identity unsupported".to_string()));
     };
     func.instruction(&Instruction::Call(read_identity));
     Ok(ExprType::Bytes(32))
 }
 
-fn compile_subject_id(
-    args: &[Expr],
-    env: &Env<'_>,
-    func: &mut Function,
-) -> Result<ExprType, DharmaError> {
+fn compile_subject_id(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
     if args.len() != 1 {
-        return Err(DharmaError::Validation(
-            "subject_id expects one arg".to_string(),
-        ));
+        return Err(DharmaError::Validation("subject_id expects one arg".to_string()));
     }
     let subject_type = compile_expr(&args[0], env, func)?;
     if subject_type != ExprType::Bytes(40) {
-        return Err(DharmaError::Validation(
-            "subject_id expects subject_ref".to_string(),
-        ));
+        return Err(DharmaError::Validation("subject_id expects subject_ref".to_string()));
     }
     let scratch = env.alloc_scratch(32)?;
     func.instruction(&Instruction::I32Const(scratch as i32));
     let Some(subject_id) = env.host.subject_id_func else {
-        return Err(DharmaError::Validation(
-            "subject_id unsupported".to_string(),
-        ));
+        return Err(DharmaError::Validation("subject_id unsupported".to_string()));
     };
     func.instruction(&Instruction::Call(subject_id));
     Ok(ExprType::Bytes(32))
@@ -1462,19 +1345,13 @@ fn compile_read_subject_ref(
     let scratch = env.alloc_scratch(40)?;
     func.instruction(&Instruction::I32Const(scratch as i32));
     let Some(read_subject_ref) = env.host.read_subject_ref_func else {
-        return Err(DharmaError::Validation(
-            "read_subject_ref unsupported".to_string(),
-        ));
+        return Err(DharmaError::Validation("read_subject_ref unsupported".to_string()));
     };
     func.instruction(&Instruction::Call(read_subject_ref));
     Ok(ExprType::Bytes(40))
 }
 
-fn compile_path_expr(
-    path: &[String],
-    env: &Env<'_>,
-    func: &mut Function,
-) -> Result<ExprType, DharmaError> {
+fn compile_path_expr(path: &[String], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
     let info = resolve_path_info(path, env)?;
     let info = unwrap_optional_info(info);
     match info.typ {
@@ -1550,15 +1427,9 @@ fn compile_path_expr(
             func.instruction(&Instruction::I32Add);
             Ok(ExprType::Bytes(8))
         }
-        TypeSpec::Struct(_) => Err(DharmaError::Validation(
-            "struct unsupported in expression".to_string(),
-        )),
-        TypeSpec::List(_) | TypeSpec::Map(_, _) => Err(DharmaError::Validation(
-            "collection unsupported in expression".to_string(),
-        )),
-        TypeSpec::Optional(_) => Err(DharmaError::Validation(
-            "optional unsupported in expression".to_string(),
-        )),
+        TypeSpec::Struct(_) => Err(DharmaError::Validation("struct unsupported in expression".to_string())),
+        TypeSpec::List(_) | TypeSpec::Map(_, _) => Err(DharmaError::Validation("collection unsupported in expression".to_string())),
+        TypeSpec::Optional(_) => Err(DharmaError::Validation("optional unsupported in expression".to_string())),
     }
 }
 
@@ -1571,9 +1442,7 @@ fn compile_in_expr(
     match right {
         Expr::Literal(Literal::List(items)) => compile_in_list(left, items, env, func),
         Expr::Path(path) => compile_contains_path(path, left, env, func),
-        _ => Err(DharmaError::Validation(
-            "in requires list literal or list path".to_string(),
-        )),
+        _ => Err(DharmaError::Validation("in requires list literal or list path".to_string())),
     }
 }
 
@@ -1586,9 +1455,7 @@ fn compile_contains_expr(
     match list_expr {
         Expr::Literal(Literal::List(items)) => compile_in_list(item_expr, items, env, func),
         Expr::Path(path) => compile_contains_path(path, item_expr, env, func),
-        _ => Err(DharmaError::Validation(
-            "contains requires list literal or list path".to_string(),
-        )),
+        _ => Err(DharmaError::Validation("contains requires list literal or list path".to_string())),
     }
 }
 
@@ -1621,16 +1488,12 @@ fn compile_index_expr(
             let info = resolve_path_info(path, env)?;
             let info = unwrap_optional_info(info);
             match &info.typ {
-                TypeSpec::List(inner) => compile_list_index(&info, inner, index, env, func),
-                TypeSpec::Map(key, val) => compile_map_index(&info, key, val, index, env, func),
-                _ => Err(DharmaError::Validation(
-                    "indexing on non-collection unsupported".to_string(),
-                )),
-            }
-        }
-        _ => Err(DharmaError::Validation(
-            "indexing on non-literal unsupported".to_string(),
-        )),
+        TypeSpec::List(inner) => compile_list_index(&info, inner, index, env, func),
+        TypeSpec::Map(key, val) => compile_map_index(&info, key, val, index, env, func),
+        _ => Err(DharmaError::Validation("indexing on non-collection unsupported".to_string())),
+    }
+}
+        _ => Err(DharmaError::Validation("indexing on non-literal unsupported".to_string())),
     }
 }
 
@@ -1665,11 +1528,7 @@ fn compile_distance_expr(
     Ok(ExprType::Int)
 }
 
-fn compile_sum_expr(
-    expr: &Expr,
-    env: &Env<'_>,
-    func: &mut Function,
-) -> Result<ExprType, DharmaError> {
+fn compile_sum_expr(expr: &Expr, env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
     match expr {
         Expr::Literal(Literal::List(items)) => {
             let mut total: i64 = 0;
@@ -1679,9 +1538,7 @@ fn compile_sum_expr(
                         .checked_add(*value)
                         .ok_or_else(|| DharmaError::Validation("sum overflow".to_string()))?;
                 } else {
-                    return Err(DharmaError::Validation(
-                        "sum literal expects int list".to_string(),
-                    ));
+                    return Err(DharmaError::Validation("sum literal expects int list".to_string()));
                 }
             }
             func.instruction(&Instruction::I64Const(total));
@@ -1695,21 +1552,13 @@ fn compile_sum_expr(
                 _ => Err(DharmaError::Validation("sum expects list".to_string())),
             }
         }
-        _ => Err(DharmaError::Validation(
-            "sum expects list literal or path".to_string(),
-        )),
+        _ => Err(DharmaError::Validation("sum expects list literal or path".to_string())),
     }
 }
 
-fn compile_intersects(
-    args: &[Expr],
-    env: &Env<'_>,
-    func: &mut Function,
-) -> Result<ExprType, DharmaError> {
+fn compile_intersects(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
     if args.len() != 2 {
-        return Err(DharmaError::Validation(
-            "intersects expects two args".to_string(),
-        ));
+        return Err(DharmaError::Validation("intersects expects two args".to_string()));
     }
     match (&args[0], &args[1]) {
         (Expr::Literal(Literal::List(left)), Expr::Literal(Literal::List(right))) => {
@@ -1753,37 +1602,23 @@ fn compile_intersects(
             let left_info = unwrap_optional_info(resolve_path_info(left, env)?);
             let right_info = unwrap_optional_info(resolve_path_info(right, env)?);
             let TypeSpec::List(left_elem) = &left_info.typ else {
-                return Err(DharmaError::Validation(
-                    "intersects expects list".to_string(),
-                ));
+                return Err(DharmaError::Validation("intersects expects list".to_string()));
             };
             let TypeSpec::List(right_elem) = &right_info.typ else {
-                return Err(DharmaError::Validation(
-                    "intersects expects list".to_string(),
-                ));
+                return Err(DharmaError::Validation("intersects expects list".to_string()));
             };
             if left_elem.as_ref() != right_elem.as_ref() {
-                return Err(DharmaError::Validation(
-                    "intersects list type mismatch".to_string(),
-                ));
+                return Err(DharmaError::Validation("intersects list type mismatch".to_string()));
             }
             compile_list_intersects_paths(&left_info, &right_info, left_elem, env, func)
         }
-        _ => Err(DharmaError::Validation(
-            "intersects expects lists".to_string(),
-        )),
+        _ => Err(DharmaError::Validation("intersects expects lists".to_string())),
     }
 }
 
-fn compile_subset(
-    args: &[Expr],
-    env: &Env<'_>,
-    func: &mut Function,
-) -> Result<ExprType, DharmaError> {
+fn compile_subset(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
     if args.len() != 2 {
-        return Err(DharmaError::Validation(
-            "subset expects two args".to_string(),
-        ));
+        return Err(DharmaError::Validation("subset expects two args".to_string()));
     }
     match (&args[0], &args[1]) {
         (Expr::Literal(Literal::List(left)), Expr::Literal(Literal::List(right))) => {
@@ -1841,9 +1676,7 @@ fn compile_subset(
                 return Err(DharmaError::Validation("subset expects list".to_string()));
             };
             if left_elem.as_ref() != right_elem.as_ref() {
-                return Err(DharmaError::Validation(
-                    "subset list type mismatch".to_string(),
-                ));
+                return Err(DharmaError::Validation("subset list type mismatch".to_string()));
             }
             compile_list_subset_paths(&left_info, &right_info, left_elem, env, func)
         }
@@ -1896,9 +1729,7 @@ fn compile_remote_intersects(
 
 fn remote_elem_kind(elem: &TypeSpec, env: &Env<'_>) -> Result<(i32, usize), DharmaError> {
     match elem {
-        TypeSpec::Text(_) | TypeSpec::Currency => {
-            Ok((ELEM_KIND_TEXT, type_size(elem, &env._schema.structs)))
-        }
+        TypeSpec::Text(_) | TypeSpec::Currency => Ok((ELEM_KIND_TEXT, type_size(elem, &env._schema.structs))),
         TypeSpec::Identity | TypeSpec::Ref(_) => Ok((ELEM_KIND_IDENTITY, 32)),
         TypeSpec::SubjectRef(_) => Ok((ELEM_KIND_SUBJECT_REF, 40)),
         _ => Err(DharmaError::Validation(
@@ -1962,16 +1793,12 @@ fn emit_list_elem_load(
 
 fn resolve_geopoint_info(expr: &Expr, env: &Env<'_>) -> Result<FieldInfo, DharmaError> {
     let Expr::Path(path) = expr else {
-        return Err(DharmaError::Validation(
-            "distance expects geopoint path".to_string(),
-        ));
+        return Err(DharmaError::Validation("distance expects geopoint path".to_string()));
     };
     let info = resolve_path_info(path, env)?;
     let info = unwrap_optional_info(info);
     if !matches!(info.typ, TypeSpec::GeoPoint) {
-        return Err(DharmaError::Validation(
-            "distance expects geopoint".to_string(),
-        ));
+        return Err(DharmaError::Validation("distance expects geopoint".to_string()));
     }
     Ok(info)
 }
@@ -2024,9 +1851,7 @@ fn compile_contains_path(
     match &info.typ {
         TypeSpec::List(inner) => compile_list_contains(&info, inner, item_expr, env, func),
         TypeSpec::Map(key, val) => compile_map_contains(&info, key, val, item_expr, env, func),
-        _ => Err(DharmaError::Validation(
-            "contains requires list or map path".to_string(),
-        )),
+        _ => Err(DharmaError::Validation("contains requires list or map path".to_string())),
     }
 }
 
@@ -2081,9 +1906,7 @@ fn compile_list_intersects_paths(
         let mut first_inner = true;
         for idx_right in 0..cap_right {
             emit_idx_in_len(right_info, idx_right, func);
-            compile_list_elem_eq_offsets(
-                left_info, right_info, idx_left, idx_right, elem_type, env, func,
-            )?;
+            compile_list_elem_eq_offsets(left_info, right_info, idx_left, idx_right, elem_type, env, func)?;
             func.instruction(&Instruction::I32And);
             if first_inner {
                 first_inner = false;
@@ -2128,9 +1951,7 @@ fn compile_list_subset_paths(
         let mut first_inner = true;
         for idx_right in 0..cap_right {
             emit_idx_in_len(right_info, idx_right, func);
-            compile_list_elem_eq_offsets(
-                left_info, right_info, idx_left, idx_right, elem_type, env, func,
-            )?;
+            compile_list_elem_eq_offsets(left_info, right_info, idx_left, idx_right, elem_type, env, func)?;
             func.instruction(&Instruction::I32And);
             if first_inner {
                 first_inner = false;
@@ -2277,15 +2098,11 @@ fn compile_map_key_eq(
         }
         TypeSpec::Identity | TypeSpec::Ref(_) => {
             let Expr::Path(path) = key_expr else {
-                return Err(DharmaError::Validation(
-                    "map key expects identity path".to_string(),
-                ));
+                return Err(DharmaError::Validation("map key expects identity path".to_string()));
             };
             let info = resolve_path_info(path, env)?;
             if !matches!(info.typ, TypeSpec::Identity | TypeSpec::Ref(_)) {
-                return Err(DharmaError::Validation(
-                    "map key expects identity path".to_string(),
-                ));
+                return Err(DharmaError::Validation("map key expects identity path".to_string()));
             }
             let info = unwrap_optional_info(info);
             compile_mem_eq(
@@ -2299,15 +2116,11 @@ fn compile_map_key_eq(
         }
         TypeSpec::GeoPoint => {
             let Expr::Path(path) = key_expr else {
-                return Err(DharmaError::Validation(
-                    "map key expects geopoint path".to_string(),
-                ));
+                return Err(DharmaError::Validation("map key expects geopoint path".to_string()));
             };
             let info = resolve_path_info(path, env)?;
             if !matches!(info.typ, TypeSpec::GeoPoint) {
-                return Err(DharmaError::Validation(
-                    "map key expects geopoint path".to_string(),
-                ));
+                return Err(DharmaError::Validation("map key expects geopoint path".to_string()));
             }
             let info = unwrap_optional_info(info);
             compile_mem_eq(
@@ -2321,15 +2134,11 @@ fn compile_map_key_eq(
         }
         TypeSpec::Ratio => {
             let Expr::Path(path) = key_expr else {
-                return Err(DharmaError::Validation(
-                    "map key expects ratio path".to_string(),
-                ));
+                return Err(DharmaError::Validation("map key expects ratio path".to_string()));
             };
             let info = resolve_path_info(path, env)?;
             if !matches!(info.typ, TypeSpec::Ratio) {
-                return Err(DharmaError::Validation(
-                    "map key expects ratio path".to_string(),
-                ));
+                return Err(DharmaError::Validation("map key expects ratio path".to_string()));
             }
             let info = unwrap_optional_info(info);
             compile_mem_eq(
@@ -2356,9 +2165,7 @@ fn compile_map_key_eq(
                     let info = resolve_path_info(path, env)?;
                     let info = unwrap_optional_info(info);
                     if !matches!(info.typ, TypeSpec::Text(_) | TypeSpec::Currency) {
-                        return Err(DharmaError::Validation(
-                            "map key expects text path".to_string(),
-                        ));
+                        return Err(DharmaError::Validation("map key expects text path".to_string()));
                     }
                     compile_mem_eq(
                         func,
@@ -2369,18 +2176,10 @@ fn compile_map_key_eq(
                         4 + max,
                     );
                 }
-                _ => {
-                    return Err(DharmaError::Validation(
-                        "map key expects text literal or path".to_string(),
-                    ))
-                }
+                _ => return Err(DharmaError::Validation("map key expects text literal or path".to_string())),
             }
         }
-        _ => {
-            return Err(DharmaError::Validation(
-                "map key type unsupported".to_string(),
-            ))
-        }
+        _ => return Err(DharmaError::Validation("map key type unsupported".to_string())),
     }
     Ok(())
 }
@@ -2432,15 +2231,11 @@ fn compile_list_elem_eq(
         }
         TypeSpec::Identity | TypeSpec::Ref(_) => {
             let Expr::Path(path) = item_expr else {
-                return Err(DharmaError::Validation(
-                    "contains expects identity path".to_string(),
-                ));
+                return Err(DharmaError::Validation("contains expects identity path".to_string()));
             };
             let info = resolve_path_info(path, env)?;
             if !matches!(info.typ, TypeSpec::Identity | TypeSpec::Ref(_)) {
-                return Err(DharmaError::Validation(
-                    "contains expects identity path".to_string(),
-                ));
+                return Err(DharmaError::Validation("contains expects identity path".to_string()));
             }
             let info = unwrap_optional_info(info);
             compile_mem_eq(
@@ -2454,15 +2249,11 @@ fn compile_list_elem_eq(
         }
         TypeSpec::GeoPoint => {
             let Expr::Path(path) = item_expr else {
-                return Err(DharmaError::Validation(
-                    "contains expects geopoint path".to_string(),
-                ));
+                return Err(DharmaError::Validation("contains expects geopoint path".to_string()));
             };
             let info = resolve_path_info(path, env)?;
             if !matches!(info.typ, TypeSpec::GeoPoint) {
-                return Err(DharmaError::Validation(
-                    "contains expects geopoint path".to_string(),
-                ));
+                return Err(DharmaError::Validation("contains expects geopoint path".to_string()));
             }
             let info = unwrap_optional_info(info);
             compile_mem_eq(
@@ -2476,15 +2267,11 @@ fn compile_list_elem_eq(
         }
         TypeSpec::Ratio => {
             let Expr::Path(path) = item_expr else {
-                return Err(DharmaError::Validation(
-                    "contains expects ratio path".to_string(),
-                ));
+                return Err(DharmaError::Validation("contains expects ratio path".to_string()));
             };
             let info = resolve_path_info(path, env)?;
             if !matches!(info.typ, TypeSpec::Ratio) {
-                return Err(DharmaError::Validation(
-                    "contains expects ratio path".to_string(),
-                ));
+                return Err(DharmaError::Validation("contains expects ratio path".to_string()));
             }
             let info = unwrap_optional_info(info);
             compile_mem_eq(
@@ -2511,9 +2298,7 @@ fn compile_list_elem_eq(
                     let info = resolve_path_info(path, env)?;
                     let info = unwrap_optional_info(info);
                     if !matches!(info.typ, TypeSpec::Text(_) | TypeSpec::Currency) {
-                        return Err(DharmaError::Validation(
-                            "contains expects text path".to_string(),
-                        ));
+                        return Err(DharmaError::Validation("contains expects text path".to_string()));
                     }
                     compile_mem_eq(
                         func,
@@ -2524,11 +2309,7 @@ fn compile_list_elem_eq(
                         4 + max,
                     );
                 }
-                _ => {
-                    return Err(DharmaError::Validation(
-                        "contains expects text literal or path".to_string(),
-                    ))
-                }
+                _ => return Err(DharmaError::Validation("contains expects text literal or path".to_string())),
             }
         }
         _ => {
@@ -2767,24 +2548,18 @@ fn compile_list_mutation(
     func: &mut Function,
 ) -> Result<(), DharmaError> {
     let Expr::Call(name, args) = expr else {
-        return Err(DharmaError::Validation(
-            "list assignment expects push/remove".to_string(),
-        ));
+        return Err(DharmaError::Validation("list assignment expects push/remove".to_string()));
     };
     match name.as_str() {
         "push" => {
             if args.len() != 2 {
-                return Err(DharmaError::Validation(
-                    "list.push expects one arg".to_string(),
-                ));
+                return Err(DharmaError::Validation("list.push expects one arg".to_string()));
             }
             compile_list_push(list_info, elem_type, &args[1], env, func)
         }
         "remove" => {
             if args.len() != 2 {
-                return Err(DharmaError::Validation(
-                    "list.remove expects one arg".to_string(),
-                ));
+                return Err(DharmaError::Validation("list.remove expects one arg".to_string()));
             }
             compile_list_remove(list_info, elem_type, &args[1], env, func)
         }
@@ -2796,9 +2571,7 @@ fn compile_list_mutation(
             }
             compile_list_normalize(list_info, elem_type, env, func)
         }
-        _ => Err(DharmaError::Validation(
-            "list assignment expects push/remove".to_string(),
-        )),
+        _ => Err(DharmaError::Validation("list assignment expects push/remove".to_string())),
     }
 }
 
@@ -2929,10 +2702,7 @@ fn emit_list_remove_at_idx(
         push_addr(func, list_info.base, dest_offset as u32);
         push_addr(func, list_info.base, src_offset as u32);
         func.instruction(&Instruction::I32Const(elem_size as i32));
-        func.instruction(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        func.instruction(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
         func.instruction(&Instruction::End);
     }
 
@@ -2968,23 +2738,24 @@ fn compile_map_index(
         TypeSpec::SubjectRef(_) => (ExprType::Bytes(40), ValType::I32),
         TypeSpec::Ratio => (ExprType::Bytes(16), ValType::I32),
         TypeSpec::GeoPoint => (ExprType::Bytes(8), ValType::I32),
-        TypeSpec::Text(len) => (
-            ExprType::Text(len.unwrap_or(DEFAULT_TEXT_LEN)),
-            ValType::I32,
-        ),
+        TypeSpec::Text(len) => (ExprType::Text(len.unwrap_or(DEFAULT_TEXT_LEN)), ValType::I32),
         TypeSpec::Currency => (ExprType::Text(DEFAULT_TEXT_LEN), ValType::I32),
-        _ => {
-            return Err(DharmaError::Validation(
-                "map value type unsupported".to_string(),
-            ))
-        }
+        _ => return Err(DharmaError::Validation("map value type unsupported".to_string())),
     };
     if cap == 0 {
         func.instruction(&Instruction::Unreachable);
         return Ok(expr_type);
     }
     compile_map_index_branch(
-        0, cap, map_info, key_type, value_type, key_expr, env, func, wasm_type,
+        0,
+        cap,
+        map_info,
+        key_type,
+        value_type,
+        key_expr,
+        env,
+        func,
+        wasm_type,
     )?;
     Ok(expr_type)
 }
@@ -2998,25 +2769,17 @@ fn compile_map_mutation(
     func: &mut Function,
 ) -> Result<(), DharmaError> {
     let Expr::Call(name, args) = expr else {
-        return Err(DharmaError::Validation(
-            "map assignment expects set".to_string(),
-        ));
+        return Err(DharmaError::Validation("map assignment expects set".to_string()));
     };
     if name != "set" {
-        return Err(DharmaError::Validation(
-            "map assignment expects set".to_string(),
-        ));
+        return Err(DharmaError::Validation("map assignment expects set".to_string()));
     }
     if args.len() != 3 {
-        return Err(DharmaError::Validation(
-            "map.set expects two args".to_string(),
-        ));
+        return Err(DharmaError::Validation("map.set expects two args".to_string()));
     }
     let key_expr = &args[1];
     let val_expr = &args[2];
-    compile_map_set(
-        map_info, key_type, value_type, key_expr, val_expr, env, func,
-    )
+    compile_map_set(map_info, key_type, value_type, key_expr, val_expr, env, func)
 }
 
 fn compile_map_set(
@@ -3034,7 +2797,15 @@ fn compile_map_set(
         return Ok(());
     }
     compile_map_set_branch(
-        0, cap, map_info, key_type, value_type, key_expr, val_expr, env, func,
+        0,
+        cap,
+        map_info,
+        key_type,
+        value_type,
+        key_expr,
+        val_expr,
+        env,
+        func,
     )
 }
 
@@ -3050,9 +2821,7 @@ fn compile_map_set_branch(
     func: &mut Function,
 ) -> Result<(), DharmaError> {
     if idx >= cap {
-        return emit_map_append(
-            map_info, key_type, value_type, key_expr, val_expr, env, func,
-        );
+        return emit_map_append(map_info, key_type, value_type, key_expr, val_expr, env, func);
     }
     emit_idx_in_len(map_info, idx, func);
     compile_map_key_eq(map_info, key_type, value_type, key_expr, idx, env, func)?;
@@ -3163,14 +2932,7 @@ fn compile_map_index_branch(
     compile_map_key_eq(map_info, key_type, value_type, key_expr, idx, env, func)?;
     func.instruction(&Instruction::I32And);
     func.instruction(&Instruction::If(BlockType::Result(wasm_type)));
-    emit_map_value(
-        map_info,
-        key_type,
-        value_type,
-        idx,
-        &env._schema.structs,
-        func,
-    )?;
+    emit_map_value(map_info, key_type, value_type, idx, &env._schema.structs, func)?;
     func.instruction(&Instruction::Else);
     compile_map_index_branch(
         idx + 1,
@@ -3254,9 +3016,7 @@ fn emit_map_value(
         TypeSpec::GeoPoint => Ok(ExprType::Bytes(8)),
         TypeSpec::Text(len) => Ok(ExprType::Text(len.unwrap_or(DEFAULT_TEXT_LEN))),
         TypeSpec::Currency => Ok(ExprType::Text(DEFAULT_TEXT_LEN)),
-        _ => Err(DharmaError::Validation(
-            "map value type unsupported".to_string(),
-        )),
+        _ => Err(DharmaError::Validation("map value type unsupported".to_string())),
     }
 }
 
@@ -3766,45 +3526,31 @@ fn emit_store_value_at_ptr(
         }
         TypeSpec::Identity | TypeSpec::Ref(_) => {
             let Expr::Path(path) = expr else {
-                return Err(DharmaError::Validation(
-                    "expected identity path".to_string(),
-                ));
+                return Err(DharmaError::Validation("expected identity path".to_string()));
             };
             let info = resolve_path_info(path, env)?;
             if !matches!(info.typ, TypeSpec::Identity | TypeSpec::Ref(_)) {
-                return Err(DharmaError::Validation(
-                    "expected identity path".to_string(),
-                ));
+                return Err(DharmaError::Validation("expected identity path".to_string()));
             }
             let info = unwrap_optional_info(info);
             func.instruction(&Instruction::LocalGet(1));
             push_addr(func, info.base, info.offset);
             func.instruction(&Instruction::I32Const(32));
-            func.instruction(&Instruction::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            });
+            func.instruction(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
         }
         TypeSpec::SubjectRef(_) => {
             let Expr::Path(path) = expr else {
-                return Err(DharmaError::Validation(
-                    "expected subject ref path".to_string(),
-                ));
+                return Err(DharmaError::Validation("expected subject ref path".to_string()));
             };
             let info = resolve_path_info(path, env)?;
             if !matches!(info.typ, TypeSpec::SubjectRef(_)) {
-                return Err(DharmaError::Validation(
-                    "expected subject ref path".to_string(),
-                ));
+                return Err(DharmaError::Validation("expected subject ref path".to_string()));
             }
             let info = unwrap_optional_info(info);
             func.instruction(&Instruction::LocalGet(1));
             push_addr(func, info.base, info.offset);
             func.instruction(&Instruction::I32Const(40));
-            func.instruction(&Instruction::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            });
+            func.instruction(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
         }
         TypeSpec::Ratio => {
             let Expr::Path(path) = expr else {
@@ -3818,31 +3564,21 @@ fn emit_store_value_at_ptr(
             func.instruction(&Instruction::LocalGet(1));
             push_addr(func, info.base, info.offset);
             func.instruction(&Instruction::I32Const(16));
-            func.instruction(&Instruction::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            });
+            func.instruction(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
         }
         TypeSpec::GeoPoint => {
             let Expr::Path(path) = expr else {
-                return Err(DharmaError::Validation(
-                    "expected geopoint path".to_string(),
-                ));
+                return Err(DharmaError::Validation("expected geopoint path".to_string()));
             };
             let info = resolve_path_info(path, env)?;
             if !matches!(info.typ, TypeSpec::GeoPoint) {
-                return Err(DharmaError::Validation(
-                    "expected geopoint path".to_string(),
-                ));
+                return Err(DharmaError::Validation("expected geopoint path".to_string()));
             }
             let info = unwrap_optional_info(info);
             func.instruction(&Instruction::LocalGet(1));
             push_addr(func, info.base, info.offset);
             func.instruction(&Instruction::I32Const(8));
-            func.instruction(&Instruction::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            });
+            func.instruction(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
         }
         TypeSpec::Text(_) | TypeSpec::Currency => {
             let max = match typ {
@@ -3899,67 +3635,60 @@ fn emit_store_value_at_ptr(
                     func.instruction(&Instruction::LocalGet(1));
                     push_addr(func, info.base, info.offset);
                     func.instruction(&Instruction::I32Const((4 + max) as i32));
-                    func.instruction(&Instruction::MemoryCopy {
-                        src_mem: 0,
-                        dst_mem: 0,
-                    });
+                    func.instruction(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
                 }
                 _ => {
-                    return Err(DharmaError::Validation(
-                        "expected text literal or path".to_string(),
-                    ));
+                    return Err(DharmaError::Validation("expected text literal or path".to_string()));
                 }
             }
         }
-        TypeSpec::Optional(inner) => match expr {
-            Expr::Literal(Literal::Null) => {
-                func.instruction(&Instruction::LocalGet(1));
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Store8(wasm_encoder::MemArg {
-                    offset: 0,
-                    align: 0,
-                    memory_index: 0,
-                }));
-                let size = type_size(inner, &env._schema.structs);
-                func.instruction(&Instruction::LocalGet(1));
-                func.instruction(&Instruction::I32Const(1));
-                func.instruction(&Instruction::I32Add);
-                func.instruction(&Instruction::I32Const(0));
-                func.instruction(&Instruction::I32Const(size as i32));
-                func.instruction(&Instruction::MemoryFill(0));
+        TypeSpec::Optional(inner) => {
+            match expr {
+                Expr::Literal(Literal::Null) => {
+                    func.instruction(&Instruction::LocalGet(1));
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::I32Store8(wasm_encoder::MemArg {
+                        offset: 0,
+                        align: 0,
+                        memory_index: 0,
+                    }));
+                    let size = type_size(inner, &env._schema.structs);
+                    func.instruction(&Instruction::LocalGet(1));
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::I32Const(size as i32));
+                    func.instruction(&Instruction::MemoryFill(0));
+                }
+                _ => {
+                    func.instruction(&Instruction::LocalGet(1));
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::I32Store8(wasm_encoder::MemArg {
+                        offset: 0,
+                        align: 0,
+                        memory_index: 0,
+                    }));
+                    func.instruction(&Instruction::LocalGet(1));
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::I32Add);
+                    emit_store_value_at_ptr(inner, expr, env, func)?;
+                }
             }
-            _ => {
-                func.instruction(&Instruction::LocalGet(1));
-                func.instruction(&Instruction::I32Const(1));
-                func.instruction(&Instruction::I32Store8(wasm_encoder::MemArg {
-                    offset: 0,
-                    align: 0,
-                    memory_index: 0,
-                }));
-                func.instruction(&Instruction::LocalGet(1));
-                func.instruction(&Instruction::I32Const(1));
-                func.instruction(&Instruction::I32Add);
-                emit_store_value_at_ptr(inner, expr, env, func)?;
-            }
-        },
+        }
         TypeSpec::Struct(name) => {
             let mut values = BTreeMap::new();
             match expr {
                 Expr::Literal(Literal::Map(entries)) => {
                     for (k, v) in entries {
                         let Expr::Literal(Literal::Text(key)) = k else {
-                            return Err(DharmaError::Validation(
-                                "struct field name must be text".to_string(),
-                            ));
+                            return Err(DharmaError::Validation("struct field name must be text".to_string()));
                         };
                         values.insert(key.clone(), v.clone());
                     }
                 }
                 Expr::Literal(Literal::Struct(lit_name, entries)) => {
                     if lit_name != name {
-                        return Err(DharmaError::Validation(
-                            "struct literal type mismatch".to_string(),
-                        ));
+                        return Err(DharmaError::Validation("struct literal type mismatch".to_string()));
                     }
                     for (k, v) in entries {
                         values.insert(k.clone(), v.clone());
@@ -3975,16 +3704,11 @@ fn emit_store_value_at_ptr(
                     push_addr(func, info.base, info.offset);
                     let size = type_size(typ, &env._schema.structs);
                     func.instruction(&Instruction::I32Const(size as i32));
-                    func.instruction(&Instruction::MemoryCopy {
-                        src_mem: 0,
-                        dst_mem: 0,
-                    });
+                    func.instruction(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
                     return Ok(());
                 }
                 _ => {
-                    return Err(DharmaError::Validation(
-                        "expected struct literal or path".to_string(),
-                    ));
+                    return Err(DharmaError::Validation("expected struct literal or path".to_string()));
                 }
             }
             let Some(def) = env._schema.structs.get(name) else {
@@ -4012,18 +3736,12 @@ fn emit_store_value_at_ptr(
                             }));
                             func.instruction(&Instruction::I32Const(cursor as i32));
                             func.instruction(&Instruction::I32Add);
-                            emit_store_value_at_ptr(
-                                &field.typ,
-                                &Expr::Literal(Literal::Null),
-                                env,
-                                func,
-                            )?;
+                            emit_store_value_at_ptr(&field.typ, &Expr::Literal(Literal::Null), env, func)?;
                             cursor += type_size(&field.typ, &env._schema.structs);
                             continue;
                         }
                         return Err(DharmaError::Validation(format!(
-                            "missing struct field '{}'",
-                            field_name
+                            "missing struct field '{}'", field_name
                         )));
                     }
                 };
@@ -4039,11 +3757,7 @@ fn emit_store_value_at_ptr(
                 cursor += type_size(&field.typ, &env._schema.structs);
             }
         }
-        _ => {
-            return Err(DharmaError::Validation(
-                "collection value unsupported".to_string(),
-            ))
-        }
+        _ => return Err(DharmaError::Validation("collection value unsupported".to_string())),
     }
     Ok(())
 }
@@ -4073,9 +3787,7 @@ fn collect_text_parts(
             let info = resolve_path_info(path, env)?;
             let info = unwrap_optional_info(info);
             if !matches!(info.typ, TypeSpec::Text(_) | TypeSpec::Currency) {
-                return Err(DharmaError::Validation(
-                    "concat expects text path".to_string(),
-                ));
+                return Err(DharmaError::Validation("concat expects text path".to_string()));
             }
             parts.push(TextPart::Path(path.clone()));
             Ok(())
@@ -4155,10 +3867,7 @@ fn emit_concat_text_parts(
         func.instruction(&Instruction::I32Const(4));
         func.instruction(&Instruction::I32Add);
         func.instruction(&Instruction::LocalGet(2));
-        func.instruction(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
+        func.instruction(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
 
         func.instruction(&Instruction::LocalGet(0));
         func.instruction(&Instruction::LocalGet(2));
@@ -4193,18 +3902,14 @@ fn emit_concat_text_parts(
 fn literal_index(expr: &Expr) -> Result<usize, DharmaError> {
     match expr {
         Expr::Literal(Literal::Int(value)) if *value >= 0 => Ok(*value as usize),
-        _ => Err(DharmaError::Validation(
-            "index must be literal int".to_string(),
-        )),
+        _ => Err(DharmaError::Validation("index must be literal int".to_string())),
     }
 }
 
 fn literal_key(expr: &Expr) -> Result<Literal, DharmaError> {
     match expr {
         Expr::Literal(lit) => Ok(lit.clone()),
-        _ => Err(DharmaError::Validation(
-            "map key must be literal".to_string(),
-        )),
+        _ => Err(DharmaError::Validation("map key must be literal".to_string())),
     }
 }
 
@@ -4310,7 +4015,10 @@ fn bytes32_paths(
     Ok(None)
 }
 
-fn resolve_path_info<'a>(path: &[String], env: &'a Env<'_>) -> Result<&'a FieldInfo, DharmaError> {
+fn resolve_path_info<'a>(
+    path: &[String],
+    env: &'a Env<'_>,
+) -> Result<&'a FieldInfo, DharmaError> {
     if path.is_empty() {
         return Err(DharmaError::Validation("empty path".to_string()));
     }
@@ -4530,14 +4238,10 @@ fn compile_null_eq(
             func.instruction(&Instruction::I32And);
         }
         TypeSpec::List(_) | TypeSpec::Map(_, _) | TypeSpec::SubjectRef(_) | TypeSpec::Struct(_) => {
-            return Err(DharmaError::Validation(
-                "null comparison unsupported".to_string(),
-            ));
+            return Err(DharmaError::Validation("null comparison unsupported".to_string()));
         }
         TypeSpec::Optional(_) => {
-            return Err(DharmaError::Validation(
-                "null comparison unsupported".to_string(),
-            ));
+            return Err(DharmaError::Validation("null comparison unsupported".to_string()));
         }
     }
     if *op == Op::Neq {
@@ -4557,9 +4261,7 @@ fn compile_assignment(
         .map(|s| s.as_str())
         .ok_or_else(|| DharmaError::Validation("assignment target must be state".to_string()))?;
     if target != "state" {
-        return Err(DharmaError::Validation(
-            "assignment target must be state".to_string(),
-        ));
+        return Err(DharmaError::Validation("assignment target must be state".to_string()));
     }
     let field = assignment
         .target
@@ -4631,9 +4333,7 @@ fn compile_assignment_inner(
             push_addr(func, target_info.base, target_info.offset);
             let typ = compile_expr(&expr, env, func)?;
             if typ != ExprType::Int {
-                return Err(DharmaError::Validation(
-                    "expected int assignment".to_string(),
-                ));
+                return Err(DharmaError::Validation("expected int assignment".to_string()));
             }
             func.instruction(&Instruction::I64Store(wasm_encoder::MemArg {
                 offset: 0,
@@ -4645,9 +4345,7 @@ fn compile_assignment_inner(
             push_addr(func, target_info.base, target_info.offset);
             let typ = compile_expr(&expr, env, func)?;
             if typ != ExprType::Bool {
-                return Err(DharmaError::Validation(
-                    "expected bool assignment".to_string(),
-                ));
+                return Err(DharmaError::Validation("expected bool assignment".to_string()));
             }
             func.instruction(&Instruction::I32Store8(wasm_encoder::MemArg {
                 offset: 0,
@@ -4659,18 +4357,17 @@ fn compile_assignment_inner(
             push_addr(func, target_info.base, target_info.offset);
             if let Expr::Literal(Literal::Enum(name)) = expr {
                 if let TypeSpec::Enum(variants) = &target_info.typ {
-                    let idx = variants.iter().position(|v| v == name).ok_or_else(|| {
-                        DharmaError::Validation("unknown enum literal".to_string())
-                    })?;
+                    let idx = variants
+                        .iter()
+                        .position(|v| v == name)
+                        .ok_or_else(|| DharmaError::Validation("unknown enum literal".to_string()))?;
                     func.instruction(&Instruction::I64Const(idx as i64));
                     func.instruction(&Instruction::I32WrapI64);
                 }
             } else {
                 let typ = compile_expr(&expr, env, func)?;
                 if typ != ExprType::Int {
-                    return Err(DharmaError::Validation(
-                        "expected enum assignment".to_string(),
-                    ));
+                    return Err(DharmaError::Validation("expected enum assignment".to_string()));
                 }
                 func.instruction(&Instruction::I32WrapI64);
             }
@@ -4684,9 +4381,7 @@ fn compile_assignment_inner(
             if let Expr::Path(path) = expr {
                 let source = resolve_path_info(path, env)?;
                 if !matches!(source.typ, TypeSpec::Identity | TypeSpec::Ref(_)) {
-                    return Err(DharmaError::Validation(
-                        "expected identity source".to_string(),
-                    ));
+                    return Err(DharmaError::Validation("expected identity source".to_string()));
                 }
                 copy_bytes(
                     func,
@@ -4697,9 +4392,7 @@ fn compile_assignment_inner(
                     32,
                 )?;
             } else {
-                return Err(DharmaError::Validation(
-                    "expected identity assignment".to_string(),
-                ));
+                return Err(DharmaError::Validation("expected identity assignment".to_string()));
             }
         }
         TypeSpec::SubjectRef(_) => {
@@ -4739,9 +4432,7 @@ fn compile_assignment_inner(
                     16,
                 )?;
             } else {
-                return Err(DharmaError::Validation(
-                    "expected ratio assignment".to_string(),
-                ));
+                return Err(DharmaError::Validation("expected ratio assignment".to_string()));
             }
         }
         TypeSpec::Text(len) => {
@@ -4756,9 +4447,7 @@ fn compile_assignment_inner(
             if let Expr::Path(path) = expr {
                 let source = resolve_path_info(path, env)?;
                 if !matches!(source.typ, TypeSpec::GeoPoint) {
-                    return Err(DharmaError::Validation(
-                        "expected geopoint source".to_string(),
-                    ));
+                    return Err(DharmaError::Validation("expected geopoint source".to_string()));
                 }
                 copy_bytes(
                     func,
@@ -4769,9 +4458,7 @@ fn compile_assignment_inner(
                     8,
                 )?;
             } else {
-                return Err(DharmaError::Validation(
-                    "expected geopoint assignment".to_string(),
-                ));
+                return Err(DharmaError::Validation("expected geopoint assignment".to_string()));
             }
         }
         TypeSpec::List(inner) => {
@@ -4813,9 +4500,7 @@ fn compile_assignment_inner(
             return compile_map_mutation(target_info, &key, &val, expr, env, func);
         }
         TypeSpec::Optional(_) => {
-            return Err(DharmaError::Validation(
-                "optional assignment unsupported".to_string(),
-            ));
+            return Err(DharmaError::Validation("optional assignment unsupported".to_string()));
         }
         TypeSpec::Struct(_) => {
             push_addr(func, target_info.base, target_info.offset);
@@ -4847,10 +4532,7 @@ fn copy_bytes(
     func.instruction(&Instruction::I32Const(src_offset as i32));
     func.instruction(&Instruction::I32Add);
     func.instruction(&Instruction::I32Const(len as i32));
-    func.instruction(&Instruction::MemoryCopy {
-        src_mem: 0,
-        dst_mem: 0,
-    });
+    func.instruction(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
     Ok(())
 }
 
@@ -4877,18 +4559,14 @@ mod tests {
             )
             .unwrap();
         linker
-            .func_wrap(
-                "env",
-                "read_int",
-                |_caller: Caller<'_, ()>, _sub: i32, _path: i32| -> i64 { 0 },
-            )
+            .func_wrap("env", "read_int", |_caller: Caller<'_, ()>, _sub: i32, _path: i32| -> i64 {
+                0
+            })
             .unwrap();
         linker
-            .func_wrap(
-                "env",
-                "read_bool",
-                |_caller: Caller<'_, ()>, _sub: i32, _path: i32| -> i32 { 0 },
-            )
+            .func_wrap("env", "read_bool", |_caller: Caller<'_, ()>, _sub: i32, _path: i32| -> i32 {
+                0
+            })
             .unwrap();
         linker
             .func_wrap(
@@ -4960,11 +4638,7 @@ action Touch(delta: Int)
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let validate = instance
             .get_typed_func::<(), i32>(&store, "validate")
             .unwrap();
@@ -4973,7 +4647,9 @@ action Touch(delta: Int)
             .unwrap();
         let memory = instance.get_memory(&store, "memory").unwrap();
         // setup state
-        memory.write(&mut store, 0, &1i64.to_le_bytes()).unwrap();
+        memory
+            .write(&mut store, 0, &1i64.to_le_bytes())
+            .unwrap();
         // setup args (action id 0, delta 3)
         memory
             .write(&mut store, ARGS_BASE as usize, &0u32.to_le_bytes())
@@ -5010,16 +4686,14 @@ action Bump(delta: Int)
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let reduce = instance
             .get_typed_func::<(), i32>(&store, "reduce")
             .unwrap();
         let memory = instance.get_memory(&store, "memory").unwrap();
-        memory.write(&mut store, 0, &0i64.to_le_bytes()).unwrap();
+        memory
+            .write(&mut store, 0, &0i64.to_le_bytes())
+            .unwrap();
         memory
             .write(&mut store, ARGS_BASE as usize, &0u32.to_le_bytes())
             .unwrap();
@@ -5049,20 +4723,24 @@ action Check(val: Int)
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let validate = instance
             .get_typed_func::<(), i32>(&store, "validate")
             .unwrap();
         let memory = instance.get_memory(&store, "memory").unwrap();
 
-        memory.write(&mut store, 0, &3u32.to_le_bytes()).unwrap();
-        memory.write(&mut store, 4, &2i64.to_le_bytes()).unwrap();
-        memory.write(&mut store, 12, &4i64.to_le_bytes()).unwrap();
-        memory.write(&mut store, 20, &6i64.to_le_bytes()).unwrap();
+        memory
+            .write(&mut store, 0, &3u32.to_le_bytes())
+            .unwrap();
+        memory
+            .write(&mut store, 4, &2i64.to_le_bytes())
+            .unwrap();
+        memory
+            .write(&mut store, 12, &4i64.to_le_bytes())
+            .unwrap();
+        memory
+            .write(&mut store, 20, &6i64.to_le_bytes())
+            .unwrap();
 
         memory
             .write(&mut store, ARGS_BASE as usize, &0u32.to_le_bytes())
@@ -5098,21 +4776,27 @@ action Check(key: Int)
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let validate = instance
             .get_typed_func::<(), i32>(&store, "validate")
             .unwrap();
         let memory = instance.get_memory(&store, "memory").unwrap();
 
-        memory.write(&mut store, 0, &2u32.to_le_bytes()).unwrap();
-        memory.write(&mut store, 4, &2i64.to_le_bytes()).unwrap();
-        memory.write(&mut store, 12, &7i64.to_le_bytes()).unwrap();
-        memory.write(&mut store, 20, &5i64.to_le_bytes()).unwrap();
-        memory.write(&mut store, 28, &9i64.to_le_bytes()).unwrap();
+        memory
+            .write(&mut store, 0, &2u32.to_le_bytes())
+            .unwrap();
+        memory
+            .write(&mut store, 4, &2i64.to_le_bytes())
+            .unwrap();
+        memory
+            .write(&mut store, 12, &7i64.to_le_bytes())
+            .unwrap();
+        memory
+            .write(&mut store, 20, &5i64.to_le_bytes())
+            .unwrap();
+        memory
+            .write(&mut store, 28, &9i64.to_le_bytes())
+            .unwrap();
 
         memory
             .write(&mut store, ARGS_BASE as usize, &0u32.to_le_bytes())
@@ -5147,11 +4831,7 @@ action Add(val: Int)
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let reduce = instance
             .get_typed_func::<(), i32>(&store, "reduce")
             .unwrap();
@@ -5189,21 +4869,27 @@ action Remove(val: Int)
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let reduce = instance
             .get_typed_func::<(), i32>(&store, "reduce")
             .unwrap();
         let memory = instance.get_memory(&store, "memory").unwrap();
 
-        memory.write(&mut store, 0, &4u32.to_le_bytes()).unwrap();
-        memory.write(&mut store, 4, &1i64.to_le_bytes()).unwrap();
-        memory.write(&mut store, 12, &2i64.to_le_bytes()).unwrap();
-        memory.write(&mut store, 20, &3i64.to_le_bytes()).unwrap();
-        memory.write(&mut store, 28, &4i64.to_le_bytes()).unwrap();
+        memory
+            .write(&mut store, 0, &4u32.to_le_bytes())
+            .unwrap();
+        memory
+            .write(&mut store, 4, &1i64.to_le_bytes())
+            .unwrap();
+        memory
+            .write(&mut store, 12, &2i64.to_le_bytes())
+            .unwrap();
+        memory
+            .write(&mut store, 20, &3i64.to_le_bytes())
+            .unwrap();
+        memory
+            .write(&mut store, 28, &4i64.to_le_bytes())
+            .unwrap();
 
         memory
             .write(&mut store, ARGS_BASE as usize, &0u32.to_le_bytes())
@@ -5244,11 +4930,7 @@ action Remove(word: Text)
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let reduce = instance
             .get_typed_func::<(), i32>(&store, "reduce")
             .unwrap();
@@ -5261,8 +4943,7 @@ action Remove(word: Text)
                           text: &str| {
             let bytes = text.as_bytes();
             let len = bytes.len().min(max_len);
-            mem.write(&mut *store, offset, &(len as u32).to_le_bytes())
-                .unwrap();
+            mem.write(&mut *store, offset, &(len as u32).to_le_bytes()).unwrap();
             mem.write(&mut *store, offset + 4, &bytes[..len]).unwrap();
             if len < max_len {
                 let zeros = vec![0u8; max_len - len];
@@ -5270,7 +4951,9 @@ action Remove(word: Text)
             }
         };
 
-        memory.write(&mut store, 0, &2u32.to_le_bytes()).unwrap();
+        memory
+            .write(&mut store, 0, &2u32.to_le_bytes())
+            .unwrap();
         write_text(&memory, &mut store, 4, 4, "abcd");
         write_text(&memory, &mut store, 4 + 4 + 4, 4, "wxyz");
 
@@ -5310,11 +4993,7 @@ action Remove(who: Identity)
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let reduce = instance
             .get_typed_func::<(), i32>(&store, "reduce")
             .unwrap();
@@ -5322,7 +5001,9 @@ action Remove(who: Identity)
 
         let id_a = [1u8; 32];
         let id_b = [2u8; 32];
-        memory.write(&mut store, 0, &2u32.to_le_bytes()).unwrap();
+        memory
+            .write(&mut store, 0, &2u32.to_le_bytes())
+            .unwrap();
         memory.write(&mut store, 4, &id_a).unwrap();
         memory.write(&mut store, 36, &id_b).unwrap();
 
@@ -5360,18 +5041,18 @@ action Check(id: Identity)
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let validate = instance
             .get_typed_func::<(), i32>(&store, "validate")
             .unwrap();
         let memory = instance.get_memory(&store, "memory").unwrap();
 
-        memory.write(&mut store, 0, &1u32.to_le_bytes()).unwrap();
-        memory.write(&mut store, 4, &1i64.to_le_bytes()).unwrap();
+        memory
+            .write(&mut store, 0, &1u32.to_le_bytes())
+            .unwrap();
+        memory
+            .write(&mut store, 4, &1i64.to_le_bytes())
+            .unwrap();
         let id = [9u8; 32];
         memory.write(&mut store, 12, &id).unwrap();
 
@@ -5402,18 +5083,18 @@ action Check()
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let validate = instance
             .get_typed_func::<(), i32>(&store, "validate")
             .unwrap();
         let memory = instance.get_memory(&store, "memory").unwrap();
 
-        memory.write(&mut store, 0, &4u32.to_le_bytes()).unwrap();
-        memory.write(&mut store, 4, b"wxyz").unwrap();
+        memory
+            .write(&mut store, 0, &4u32.to_le_bytes())
+            .unwrap();
+        memory
+            .write(&mut store, 4, b"wxyz")
+            .unwrap();
 
         memory
             .write(&mut store, ARGS_BASE as usize, &0u32.to_le_bytes())
@@ -5439,11 +5120,7 @@ action Set()
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let reduce = instance
             .get_typed_func::<(), i32>(&store, "reduce")
             .unwrap();
@@ -5480,11 +5157,7 @@ action Set()
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let reduce = instance
             .get_typed_func::<(), i32>(&store, "reduce")
             .unwrap();
@@ -5521,11 +5194,7 @@ action Add
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let reduce = instance
             .get_typed_func::<(), i32>(&store, "reduce")
             .unwrap();
@@ -5565,11 +5234,7 @@ action Add(who: Identity)
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let reduce = instance
             .get_typed_func::<(), i32>(&store, "reduce")
             .unwrap();
@@ -5610,11 +5275,7 @@ action Put
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let reduce = instance
             .get_typed_func::<(), i32>(&store, "reduce")
             .unwrap();
@@ -5657,11 +5318,7 @@ action Put(key: Int, who: Identity)
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let reduce = instance
             .get_typed_func::<(), i32>(&store, "reduce")
             .unwrap();
@@ -5708,11 +5365,7 @@ action Put(key: Int, val: Int)
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let reduce = instance
             .get_typed_func::<(), i32>(&store, "reduce")
             .unwrap();
@@ -5758,11 +5411,7 @@ action Set(frac: Ratio)
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let reduce = instance
             .get_typed_func::<(), i32>(&store, "reduce")
             .unwrap();
@@ -5807,11 +5456,7 @@ action Calc()
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let reduce = instance
             .get_typed_func::<(), i32>(&store, "reduce")
             .unwrap();
@@ -5819,16 +5464,26 @@ action Calc()
 
         let list_type = TypeSpec::List(Box::new(TypeSpec::Int));
         let list_size = type_size(&list_type, &BTreeMap::new());
-        memory.write(&mut store, 0, &3u32.to_le_bytes()).unwrap();
-        memory.write(&mut store, 4, &2i64.to_le_bytes()).unwrap();
-        memory.write(&mut store, 12, &5i64.to_le_bytes()).unwrap();
-        memory.write(&mut store, 20, &7i64.to_le_bytes()).unwrap();
+        memory
+            .write(&mut store, 0, &3u32.to_le_bytes())
+            .unwrap();
+        memory
+            .write(&mut store, 4, &2i64.to_le_bytes())
+            .unwrap();
+        memory
+            .write(&mut store, 12, &5i64.to_le_bytes())
+            .unwrap();
+        memory
+            .write(&mut store, 20, &7i64.to_le_bytes())
+            .unwrap();
 
         let result = reduce.call(&mut store, ()).unwrap();
         assert_eq!(result, 0);
 
         let mut total_buf = [0u8; 8];
-        memory.read(&mut store, list_size, &mut total_buf).unwrap();
+        memory
+            .read(&mut store, list_size, &mut total_buf)
+            .unwrap();
         assert_eq!(i64::from_le_bytes(total_buf), 14);
     }
 
@@ -5851,24 +5506,26 @@ action Calc()
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let reduce = instance
             .get_typed_func::<(), i32>(&store, "reduce")
             .unwrap();
         let memory = instance.get_memory(&store, "memory").unwrap();
 
         // a.lat = 0, a.lon = 0
-        memory.write(&mut store, 0, &0i32.to_le_bytes()).unwrap();
-        memory.write(&mut store, 4, &0i32.to_le_bytes()).unwrap();
+        memory
+            .write(&mut store, 0, &0i32.to_le_bytes())
+            .unwrap();
+        memory
+            .write(&mut store, 4, &0i32.to_le_bytes())
+            .unwrap();
         // b.lat = 1_000_000, b.lon = 0 (e7 degrees)
         memory
             .write(&mut store, 8, &1_000_000i32.to_le_bytes())
             .unwrap();
-        memory.write(&mut store, 12, &0i32.to_le_bytes()).unwrap();
+        memory
+            .write(&mut store, 12, &0i32.to_le_bytes())
+            .unwrap();
 
         let result = reduce.call(&mut store, ()).unwrap();
         assert_eq!(result, 0);
@@ -5896,11 +5553,7 @@ action Set(spot: GeoPoint)
         let module = Module::new(&engine, &bytes).unwrap();
         let mut store = Store::new(&engine, ());
         let linker = linker_with_has_role(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap()
-            .start(&mut store)
-            .unwrap();
+        let instance = linker.instantiate(&mut store, &module).unwrap().start(&mut store).unwrap();
         let reduce = instance
             .get_typed_func::<(), i32>(&store, "reduce")
             .unwrap();

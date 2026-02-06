@@ -112,10 +112,7 @@ impl QueryPlan {
             ops.push(op.to_value());
         }
         Value::Map(vec![
-            (
-                Value::Text("v".to_string()),
-                Value::Integer((self.version as u64).into()),
-            ),
+            (Value::Text("v".to_string()), Value::Integer((self.version as u64).into())),
             (Value::Text("source".to_string()), self.source.to_value()),
             (Value::Text("ops".to_string()), Value::Array(ops)),
         ])
@@ -133,11 +130,7 @@ impl QueryPlan {
         for item in expect_array(ops_val)? {
             ops.push(QueryOp::from_value(item)?);
         }
-        Ok(Self {
-            version,
-            source,
-            ops,
-        })
+        Ok(Self { version, source, ops })
     }
 }
 
@@ -148,9 +141,10 @@ impl QuerySource {
                 Value::Text("table".to_string()),
                 Value::Text(name.clone()),
             )]),
-            QuerySource::Search(spec) => {
-                Value::Map(vec![(Value::Text("search".to_string()), spec.to_value())])
-            }
+            QuerySource::Search(spec) => Value::Map(vec![(
+                Value::Text("search".to_string()),
+                spec.to_value(),
+            )]),
         }
     }
 
@@ -174,10 +168,7 @@ impl SearchSpec {
                 Value::Text("fields".to_string()),
                 Value::Array(self.fields.iter().map(|f| Value::Text(f.clone())).collect()),
             ),
-            (
-                Value::Text("fuzz".to_string()),
-                Value::Integer((self.fuzz as u64).into()),
-            ),
+            (Value::Text("fuzz".to_string()), Value::Integer((self.fuzz as u64).into())),
         ])
     }
 
@@ -191,10 +182,7 @@ impl SearchSpec {
         for item in expect_array(fields_val)? {
             fields.push(expect_text(item)?);
         }
-        let fuzz = map_get(map, "fuzz")
-            .map(expect_int)
-            .transpose()?
-            .unwrap_or(0) as u8;
+        let fuzz = map_get(map, "fuzz").map(expect_int).transpose()?.unwrap_or(0) as u8;
         Ok(Self {
             query: expr_from_value(query_val)?,
             fields,
@@ -214,18 +202,17 @@ impl QueryOp {
                 let items = keys.iter().map(|k| k.to_value()).collect();
                 Value::Map(vec![(Value::Text("sort".to_string()), Value::Array(items))])
             }
-            QueryOp::Drop(expr) => {
-                Value::Map(vec![(Value::Text("drop".to_string()), expr_to_value(expr))])
-            }
-            QueryOp::Take(expr) => {
-                Value::Map(vec![(Value::Text("take".to_string()), expr_to_value(expr))])
-            }
+            QueryOp::Drop(expr) => Value::Map(vec![(
+                Value::Text("drop".to_string()),
+                expr_to_value(expr),
+            )]),
+            QueryOp::Take(expr) => Value::Map(vec![(
+                Value::Text("take".to_string()),
+                expr_to_value(expr),
+            )]),
             QueryOp::Select(items) => {
                 let list = items.iter().map(|i| i.to_value()).collect();
-                Value::Map(vec![(
-                    Value::Text("select".to_string()),
-                    Value::Array(list),
-                )])
+                Value::Map(vec![(Value::Text("select".to_string()), Value::Array(list))])
             }
             QueryOp::Join(join) => {
                 Value::Map(vec![(Value::Text("join".to_string()), join.to_value())])
@@ -233,9 +220,10 @@ impl QueryOp {
             QueryOp::Explode(spec) => {
                 Value::Map(vec![(Value::Text("explode".to_string()), spec.to_value())])
             }
-            QueryOp::Bucket(bucket) => {
-                Value::Map(vec![(Value::Text("bucket".to_string()), bucket.to_value())])
-            }
+            QueryOp::Bucket(bucket) => Value::Map(vec![(
+                Value::Text("bucket".to_string()),
+                bucket.to_value(),
+            )]),
             QueryOp::GroupBy(keys) => Value::Map(vec![(
                 Value::Text("group_by".to_string()),
                 Value::Array(keys.iter().map(|k| Value::Text(k.clone())).collect()),
@@ -302,10 +290,7 @@ impl QueryOp {
 impl SortKey {
     fn to_value(&self) -> Value {
         Value::Map(vec![
-            (
-                Value::Text("path".to_string()),
-                Value::Text(self.path.clone()),
-            ),
+            (Value::Text("path".to_string()), Value::Text(self.path.clone())),
             (Value::Text("desc".to_string()), Value::Bool(self.desc)),
         ])
     }
@@ -329,10 +314,7 @@ impl SortKey {
 
 impl SelectItem {
     fn to_value(&self) -> Value {
-        let mut entries = vec![(
-            Value::Text("path".to_string()),
-            Value::Text(self.path.clone()),
-        )];
+        let mut entries = vec![(Value::Text("path".to_string()), Value::Text(self.path.clone()))];
         if let Some(alias) = &self.alias {
             entries.push((Value::Text("as".to_string()), Value::Text(alias.clone())));
         }
@@ -353,18 +335,9 @@ impl SelectItem {
 impl JoinSpec {
     fn to_value(&self) -> Value {
         Value::Map(vec![
-            (
-                Value::Text("table".to_string()),
-                Value::Text(self.table.clone()),
-            ),
-            (
-                Value::Text("left".to_string()),
-                Value::Text(self.left.clone()),
-            ),
-            (
-                Value::Text("right".to_string()),
-                Value::Text(self.right.clone()),
-            ),
+            (Value::Text("table".to_string()), Value::Text(self.table.clone())),
+            (Value::Text("left".to_string()), Value::Text(self.left.clone())),
+            (Value::Text("right".to_string()), Value::Text(self.right.clone())),
         ])
     }
 
@@ -389,18 +362,12 @@ impl JoinSpec {
 impl BucketSpec {
     fn to_value(&self) -> Value {
         Value::Map(vec![
-            (
-                Value::Text("path".to_string()),
-                Value::Text(self.path.clone()),
-            ),
+            (Value::Text("path".to_string()), Value::Text(self.path.clone())),
             (
                 Value::Text("size".to_string()),
                 Value::Integer((self.size_secs as u64).into()),
             ),
-            (
-                Value::Text("label".to_string()),
-                Value::Text(self.label.clone()),
-            ),
+            (Value::Text("label".to_string()), Value::Text(self.label.clone())),
         ])
     }
 
@@ -418,25 +385,15 @@ impl BucketSpec {
             .map(expect_text)
             .transpose()?
             .unwrap_or_else(|| "bucket".to_string());
-        Ok(Self {
-            path,
-            size_secs,
-            label,
-        })
+        Ok(Self { path, size_secs, label })
     }
 }
 
 impl ExplodeSpec {
     fn to_value(&self) -> Value {
         let mut entries = vec![
-            (
-                Value::Text("path".to_string()),
-                Value::Text(self.path.clone()),
-            ),
-            (
-                Value::Text("value".to_string()),
-                Value::Text(self.value.clone()),
-            ),
+            (Value::Text("path".to_string()), Value::Text(self.path.clone())),
+            (Value::Text("value".to_string()), Value::Text(self.value.clone())),
         ];
         if let Some(key) = &self.key {
             entries.push((Value::Text("key".to_string()), Value::Text(key.clone())));
@@ -465,10 +422,9 @@ impl ExplodeSpec {
 
 impl AggSpec {
     fn to_value(&self) -> Value {
-        let mut entries = vec![(
-            Value::Text("func".to_string()),
-            Value::Text(self.func.as_str().to_string()),
-        )];
+        let mut entries = vec![
+            (Value::Text("func".to_string()), Value::Text(self.func.as_str().to_string())),
+        ];
         if let Some(path) = &self.path {
             entries.push((Value::Text("path".to_string()), Value::Text(path.clone())));
         }
@@ -626,11 +582,7 @@ impl RuntimeCache {
         Ok(schema)
     }
 
-    fn contract(
-        &mut self,
-        store: &Store,
-        contract_id: &ContractId,
-    ) -> Result<Vec<u8>, DharmaError> {
+    fn contract(&mut self, store: &Store, contract_id: &ContractId) -> Result<Vec<u8>, DharmaError> {
         if let Some(bytes) = self.contracts.get(contract_id) {
             return Ok(bytes.clone());
         }
@@ -675,26 +627,14 @@ impl QueryRow {
         let base = self.sources.get(&self.base_table);
         let mut entries = Vec::new();
         if let Some(base) = base {
-            entries.push((
-                Value::Text("subject".to_string()),
-                Value::Bytes(base.subject.as_bytes().to_vec()),
-            ));
+            entries.push((Value::Text("subject".to_string()), Value::Bytes(base.subject.as_bytes().to_vec())));
             if let Some(oid) = base.oid {
-                entries.push((
-                    Value::Text("oid".to_string()),
-                    Value::Bytes(oid.as_bytes().to_vec()),
-                ));
+                entries.push((Value::Text("oid".to_string()), Value::Bytes(oid.as_bytes().to_vec())));
             }
-            entries.push((
-                Value::Text("seq".to_string()),
-                Value::Integer((base.seq as u64).into()),
-            ));
+            entries.push((Value::Text("seq".to_string()), Value::Integer((base.seq as u64).into())));
         }
         if self.score > 0 {
-            entries.push((
-                Value::Text("score".to_string()),
-                Value::Integer((self.score as u64).into()),
-            ));
+            entries.push((Value::Text("score".to_string()), Value::Integer((self.score as u64).into())));
         }
         Value::Map(entries)
     }
@@ -771,10 +711,7 @@ fn load_rows_for_search(
     Ok(filtered)
 }
 
-fn latest_subject_head(
-    store: &Store,
-    subject: &SubjectId,
-) -> Result<Option<SubjectHead>, DharmaError> {
+fn latest_subject_head(store: &Store, subject: &SubjectId) -> Result<Option<SubjectHead>, DharmaError> {
     let mut best: Option<SubjectHead> = None;
     let records = list_assertions(store.env(), subject)?;
     for record in records {
@@ -858,11 +795,7 @@ fn eval_expr(row: &QueryRow, params: &Value, expr: &Expr) -> Result<Value, Dharm
                 Ok(Value::Null)
             }
             "len" => {
-                let val = args
-                    .get(0)
-                    .map(|expr| eval_expr(row, params, expr))
-                    .transpose()?
-                    .unwrap_or(Value::Null);
+                let val = args.get(0).map(|expr| eval_expr(row, params, expr)).transpose()?.unwrap_or(Value::Null);
                 Ok(Value::Integer((value_len(&val) as u64).into()))
             }
             "between" => {
@@ -901,20 +834,10 @@ fn eval_binary(op: &Op, left: &Value, right: &Value) -> Result<Value, DharmaErro
         Op::Or => Ok(Value::Bool(is_truthy(left) || is_truthy(right))),
         Op::Eq => Ok(Value::Bool(left == right)),
         Op::Neq => Ok(Value::Bool(left != right)),
-        Op::Gt => Ok(Value::Bool(
-            compare_values(left, right) == Some(std::cmp::Ordering::Greater),
-        )),
-        Op::Gte => Ok(Value::Bool(matches!(
-            compare_values(left, right),
-            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-        ))),
-        Op::Lt => Ok(Value::Bool(
-            compare_values(left, right) == Some(std::cmp::Ordering::Less),
-        )),
-        Op::Lte => Ok(Value::Bool(matches!(
-            compare_values(left, right),
-            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-        ))),
+        Op::Gt => Ok(Value::Bool(compare_values(left, right) == Some(std::cmp::Ordering::Greater))),
+        Op::Gte => Ok(Value::Bool(matches!(compare_values(left, right), Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)))),
+        Op::Lt => Ok(Value::Bool(compare_values(left, right) == Some(std::cmp::Ordering::Less))),
+        Op::Lte => Ok(Value::Bool(matches!(compare_values(left, right), Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)))),
         Op::In => Ok(Value::Bool(value_in_list(left, right))),
         Op::Add | Op::Sub | Op::Mul | Op::Div | Op::Mod => {
             let l = value_as_i64(left);
@@ -923,20 +846,8 @@ fn eval_binary(op: &Op, left: &Value, right: &Value) -> Result<Value, DharmaErro
                 Op::Add => l.saturating_add(r),
                 Op::Sub => l.saturating_sub(r),
                 Op::Mul => l.saturating_mul(r),
-                Op::Div => {
-                    if r == 0 {
-                        0
-                    } else {
-                        l / r
-                    }
-                }
-                Op::Mod => {
-                    if r == 0 {
-                        0
-                    } else {
-                        l % r
-                    }
-                }
+                Op::Div => if r == 0 { 0 } else { l / r },
+                Op::Mod => if r == 0 { 0 } else { l % r },
                 _ => 0,
             };
             Ok(Value::Integer(out.into()))
@@ -1008,10 +919,7 @@ fn resolve_source(row: &QueryRow, parts: &[&str]) -> (String, Vec<String>) {
         }
     }
     best.unwrap_or_else(|| {
-        (
-            row.base_table.clone(),
-            parts.iter().map(|s| s.to_string()).collect(),
-        )
+        (row.base_table.clone(), parts.iter().map(|s| s.to_string()).collect())
     })
 }
 
@@ -1025,11 +933,7 @@ fn value_as_i64(value: &Value) -> i64 {
 
 fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
     match (left, right) {
-        (Value::Integer(l), Value::Integer(r)) => Some(
-            i64::try_from(*l)
-                .unwrap_or(0)
-                .cmp(&i64::try_from(*r).unwrap_or(0)),
-        ),
+        (Value::Integer(l), Value::Integer(r)) => Some(i64::try_from(*l).unwrap_or(0).cmp(&i64::try_from(*r).unwrap_or(0))),
         (Value::Text(l), Value::Text(r)) => Some(l.cmp(r)),
         (Value::Bool(l), Value::Bool(r)) => Some(l.cmp(r)),
         _ => None,
@@ -1037,19 +941,10 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
 }
 
 fn compare_between(value: &Value, low: &Value, high: &Value) -> bool {
-    let Some(ord_low) = compare_values(value, low) else {
-        return false;
-    };
-    let Some(ord_high) = compare_values(value, high) else {
-        return false;
-    };
-    matches!(
-        ord_low,
-        std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
-    ) && matches!(
-        ord_high,
-        std::cmp::Ordering::Less | std::cmp::Ordering::Equal
-    )
+    let Some(ord_low) = compare_values(value, low) else { return false; };
+    let Some(ord_high) = compare_values(value, high) else { return false; };
+    matches!(ord_low, std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+        && matches!(ord_high, std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
 }
 
 fn is_truthy(value: &Value) -> bool {
@@ -1089,10 +984,7 @@ fn value_len(value: &Value) -> usize {
 
 fn param_value(params: &Value, idx: usize) -> Value {
     match params {
-        Value::Array(items) => items
-            .get(idx.saturating_sub(1))
-            .cloned()
-            .unwrap_or(Value::Null),
+        Value::Array(items) => items.get(idx.saturating_sub(1)).cloned().unwrap_or(Value::Null),
         Value::Map(items) => {
             let key = Value::Text(idx.to_string());
             for (k, v) in items {
@@ -1127,8 +1019,7 @@ fn apply_bucket(row: &mut QueryRow, params: &Value, spec: &BucketSpec) -> Result
     if spec.size_secs > 0 {
         let size = spec.size_secs as i64;
         let bucket = (ts / size) * size;
-        row.derived
-            .insert(spec.label.clone(), Value::Integer(bucket.into()));
+        row.derived.insert(spec.label.clone(), Value::Integer(bucket.into()));
     }
     Ok(())
 }
@@ -1146,8 +1037,7 @@ fn explode_rows(
                 for (idx, item) in items.into_iter().enumerate() {
                     let mut next = row.clone();
                     if let Some(key_name) = &spec.key {
-                        next.derived
-                            .insert(key_name.clone(), Value::Integer((idx as u64).into()));
+                        next.derived.insert(key_name.clone(), Value::Integer((idx as u64).into()));
                     }
                     next.derived.insert(spec.value.clone(), item);
                     out.push(next);
@@ -1169,11 +1059,7 @@ fn explode_rows(
     Ok(out)
 }
 
-fn group_rows(
-    rows: &[QueryRow],
-    params: &Value,
-    keys: &[String],
-) -> Result<Vec<Value>, DharmaError> {
+fn group_rows(rows: &[QueryRow], params: &Value, keys: &[String]) -> Result<Vec<Value>, DharmaError> {
     let mut out = Vec::new();
     for row in rows {
         let mut entry = Vec::new();
@@ -1192,8 +1078,9 @@ fn aggregate_rows(
     params: &Value,
     specs: &[AggSpec],
 ) -> Result<Vec<Value>, DharmaError> {
-    let base: Vec<Value> =
-        values.unwrap_or_else(|| rows.iter().map(|row| row.to_value()).collect());
+    let base: Vec<Value> = values.unwrap_or_else(|| {
+        rows.iter().map(|row| row.to_value()).collect()
+    });
     if base.is_empty() {
         return Ok(Vec::new());
     }
@@ -1213,10 +1100,7 @@ fn aggregate_rows(
                 aggregate_values(&spec.func, &vals)
             }
         };
-        let alias = spec
-            .alias
-            .clone()
-            .unwrap_or_else(|| spec.func.as_str().to_string());
+        let alias = spec.alias.clone().unwrap_or_else(|| spec.func.as_str().to_string());
         totals.push((Value::Text(alias), value));
     }
     Ok(vec![Value::Map(totals)])
@@ -1271,21 +1155,12 @@ fn aggregate_values(func: &AggFunc, values: &[Value]) -> Value {
     }
 }
 
-fn sort_rows(
-    rows: &mut Vec<QueryRow>,
-    keys: &[SortKey],
-    params: &Value,
-) -> Result<(), DharmaError> {
+fn sort_rows(rows: &mut Vec<QueryRow>, keys: &[SortKey], params: &Value) -> Result<(), DharmaError> {
     rows.sort_by(|a, b| compare_row_keys(a, b, keys, params).unwrap_or(std::cmp::Ordering::Equal));
     Ok(())
 }
 
-fn compare_row_keys(
-    a: &QueryRow,
-    b: &QueryRow,
-    keys: &[SortKey],
-    params: &Value,
-) -> Result<std::cmp::Ordering, DharmaError> {
+fn compare_row_keys(a: &QueryRow, b: &QueryRow, keys: &[SortKey], params: &Value) -> Result<std::cmp::Ordering, DharmaError> {
     for key in keys {
         let av = row_value(a, params, &key.path)?;
         let bv = row_value(b, params, &key.path)?;
@@ -1302,11 +1177,7 @@ fn sort_values(values: &mut Vec<Value>, keys: &[SortKey]) -> Result<(), DharmaEr
     Ok(())
 }
 
-fn compare_value_rows(
-    a: &Value,
-    b: &Value,
-    keys: &[SortKey],
-) -> Result<std::cmp::Ordering, DharmaError> {
+fn compare_value_rows(a: &Value, b: &Value, keys: &[SortKey]) -> Result<std::cmp::Ordering, DharmaError> {
     let amap = expect_map(a)?;
     let bmap = expect_map(b)?;
     for key in keys {
@@ -1326,11 +1197,7 @@ fn select_row(row: &QueryRow, params: &Value, items: &[SelectItem]) -> Result<Va
     for item in items {
         let val = row_value(row, params, &item.path)?;
         let key = item.alias.clone().unwrap_or_else(|| {
-            item.path
-                .split('.')
-                .last()
-                .unwrap_or(&item.path)
-                .to_string()
+            item.path.split('.').last().unwrap_or(&item.path).to_string()
         });
         out.push((Value::Text(key), val));
     }
@@ -1399,17 +1266,11 @@ pub(crate) fn expr_to_value(expr: &Expr) -> Value {
             Value::Array(parts.iter().map(|p| Value::Text(p.clone())).collect()),
         )]),
         Expr::Unary(op, inner) => Value::Map(vec![
-            (
-                Value::Text("unary".to_string()),
-                Value::Text(op_to_str(*op).to_string()),
-            ),
+            (Value::Text("unary".to_string()), Value::Text(op_to_str(*op).to_string())),
             (Value::Text("expr".to_string()), expr_to_value(inner)),
         ]),
         Expr::Binary(op, left, right) => Value::Map(vec![
-            (
-                Value::Text("binary".to_string()),
-                Value::Text(op_to_str(*op).to_string()),
-            ),
+            (Value::Text("binary".to_string()), Value::Text(op_to_str(*op).to_string())),
             (Value::Text("left".to_string()), expr_to_value(left)),
             (Value::Text("right".to_string()), expr_to_value(right)),
         ]),
@@ -1457,11 +1318,7 @@ pub(crate) fn expr_from_value(value: &Value) -> Result<Expr, DharmaError> {
             .ok_or_else(|| DharmaError::Validation("invalid binary expr".to_string()))?;
         let right = map_get(map, "right")
             .ok_or_else(|| DharmaError::Validation("invalid binary expr".to_string()))?;
-        return Ok(Expr::Binary(
-            op,
-            Box::new(expr_from_value(left)?),
-            Box::new(expr_from_value(right)?),
-        ));
+        return Ok(Expr::Binary(op, Box::new(expr_from_value(left)?), Box::new(expr_from_value(right)?)));
     }
     Err(DharmaError::Validation("invalid expr".to_string()))
 }

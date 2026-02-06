@@ -1,36 +1,36 @@
 extern crate dharma_core as dharma;
 
 pub use dharma_core::{
-    assertion, builtins, cbor, contract, crypto, dharmaq as dharmaq_core, envelope, error,
-    identity, identity_store, keystore, lock, net, runtime, schema, store, sync, types, validation,
-    value, DharmaError, FrontierIndex, IdentityState, Store,
+    assertion, builtins, cbor, contract, crypto, envelope, error, identity, identity_store,
+    keystore, lock, net, dharmaq as dharmaq_core, runtime, schema, store, sync, types, validation,
+    value, FrontierIndex, IdentityState, DharmaError, Store,
 };
 
 pub mod cmd;
-pub mod dharmaq;
-pub mod dhlp;
 pub mod dhlq;
+pub mod dhlp;
 pub mod pdl;
 pub mod pkg;
-pub mod reactor;
+pub mod dharmaq;
 pub mod repl;
+pub mod reactor;
 pub mod vault;
 
 use dharma::assertion::AssertionPlaintext;
 #[cfg(feature = "compiler")]
 use dharma::assertion::DEFAULT_DATA_VERSION;
-use dharma::keys::Keyring;
 use dharma::lock::LockHandle;
+use dharma::keys::Keyring;
 use dharma::store::state::list_assertions;
 use dharma::types::SubjectId;
 #[cfg(feature = "compiler")]
 use dharma::types::{ContractId, EnvelopeId, SchemaId};
-use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 
 #[cfg(feature = "compiler")]
 const CONFIG_TOML: &str = "dharma.toml";
@@ -91,25 +91,25 @@ pub fn run() -> Result<(), DharmaError> {
         [_, "reserve", "expire", args @ ..] => cmd::ops::reserve_expire(args),
         [_, "backup", "export", path] => cmd::ops::backup_export(path),
         [_, "backup", "import", path] => cmd::ops::backup_import(path, false),
-        [_, "backup", "import", "--force", path] | [_, "backup", "import", path, "--force"] => {
-            cmd::ops::backup_import(path, true)
-        }
+        [_, "backup", "import", "--force", path]
+        | [_, "backup", "import", path, "--force"] => cmd::ops::backup_import(path, true),
         [_, "project", args @ ..] => cmd::project::project(args),
         [_, "action", subject, action] => cmd::action::action_cmd(subject, action, &[]),
-        [_, "action", subject, action, args @ ..] => cmd::action::action_cmd(
-            subject,
-            action,
-            &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-        ),
+        [_, "action", subject, action, args @ ..] => {
+            cmd::action::action_cmd(
+                subject,
+                action,
+                &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            )
+        }
         [_, "write", body] => cmd::write::write_cmd(None, body),
         [_, "write", subject, body] => cmd::write::write_cmd(Some(subject), body),
         [_, "repl"] => crate::repl::run(),
         [_, "serve"] => boot_and_listen(false, false),
         [_, "serve", "--verbose"] => boot_and_listen(false, true),
         [_, "serve", "--relay"] => boot_and_listen(true, false),
-        [_, "serve", "--relay", "--verbose"] | [_, "serve", "--verbose", "--relay"] => {
-            boot_and_listen(true, true)
-        }
+        [_, "serve", "--relay", "--verbose"]
+        | [_, "serve", "--verbose", "--relay"] => boot_and_listen(true, true),
         [_] => crate::repl::run(),
         _ => {
             print_usage();
@@ -256,9 +256,16 @@ pub(crate) fn compile_dhl(source: &str) -> Result<(), DharmaError> {
     let source_path = Path::new(source);
     let contents = fs::read_to_string(source_path)?;
     let mut ast = pdl::parser::parse(&contents)?;
-    if let Some(parent_ref) = ast.aggregates.first().and_then(|agg| agg.extends.clone()) {
+    if let Some(parent_ref) = ast
+        .aggregates
+        .first()
+        .and_then(|agg| agg.extends.clone())
+    {
         let parent_ast = resolve_parent_ast(source_path, &ast.header.imports, &parent_ref)?;
-        let parent_name = parent_ref.rsplit('.').next().unwrap_or(parent_ref.as_str());
+        let parent_name = parent_ref
+            .rsplit('.')
+            .next()
+            .unwrap_or(parent_ref.as_str());
         ast = pdl::merge::merge_parent(ast, &parent_ast, parent_name)?;
     }
     let schema_bytes = pdl::codegen::schema::compile_schema(&ast)?;
@@ -392,7 +399,11 @@ fn resolve_parent_ast(
         if path.exists() {
             let contents = fs::read_to_string(&path)?;
             let mut ast = pdl::parser::parse(&contents)?;
-            if let Some(next_parent) = ast.aggregates.first().and_then(|agg| agg.extends.clone()) {
+            if let Some(next_parent) = ast
+                .aggregates
+                .first()
+                .and_then(|agg| agg.extends.clone())
+            {
                 let parent_ast = resolve_parent_ast(&path, &ast.header.imports, &next_parent)?;
                 let parent_name = next_parent
                     .rsplit('.')
@@ -546,9 +557,7 @@ where
 
     let head = head.ok_or_else(|| DharmaError::Validation("No identity assertions".to_string()))?;
     if !head.verify_signature()? {
-        return Err(DharmaError::Validation(
-            "Invalid identity head signature".to_string(),
-        ));
+        return Err(DharmaError::Validation("Invalid identity head signature".to_string()));
     }
     Ok(head_seq)
 }
@@ -593,6 +602,7 @@ fn prompt(label: &str) -> Result<String, DharmaError> {
     io::stdin().read_line(&mut input)?;
     Ok(input.trim_end().to_string())
 }
+
 
 #[cfg(feature = "compiler")]
 fn update_config(

@@ -2,11 +2,11 @@ use crate::assertion::{signer_from_meta, AssertionPlaintext};
 use crate::env::Env;
 use crate::error::DharmaError;
 use crate::identity::root_key_for_identity;
-use crate::store::state::list_assertions;
-use crate::store::Store;
 use crate::types::{IdentityKey, SubjectId};
 use crate::value::{expect_bytes, expect_map, expect_text, map_get};
 use ciborium::value::Value;
+use crate::store::state::list_assertions;
+use crate::store::Store;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransferPolicy {
@@ -58,10 +58,7 @@ impl OwnershipRecord {
                 Value::Text("owner_kind".to_string()),
                 Value::Text(self.owner.kind().to_string()),
             ),
-            (
-                Value::Text("owner".to_string()),
-                Value::Bytes(self.owner.bytes()),
-            ),
+            (Value::Text("owner".to_string()), Value::Bytes(self.owner.bytes())),
             (
                 Value::Text("creator".to_string()),
                 Value::Bytes(self.creator.as_bytes().to_vec()),
@@ -96,7 +93,11 @@ impl OwnershipRecord {
         let owner = match owner_kind.as_str() {
             "identity" => Owner::Identity(IdentityKey::from_slice(&owner_bytes)?),
             "domain" => Owner::Domain(SubjectId::from_slice(&owner_bytes)?),
-            _ => return Err(DharmaError::Validation("invalid owner_kind".to_string())),
+            _ => {
+                return Err(DharmaError::Validation(
+                    "invalid owner_kind".to_string(),
+                ))
+            }
         };
         let creator = IdentityKey::from_slice(&creator_bytes)?;
         let acting_domain = match map_get(map, "acting_domain") {
@@ -184,7 +185,11 @@ pub fn derive_ownership_record(
         let owner = match kind.as_str() {
             "identity" => Owner::Identity(IdentityKey::from_slice(&bytes)?),
             "domain" => Owner::Domain(SubjectId::from_slice(&bytes)?),
-            _ => return Err(DharmaError::Validation("invalid owner_kind".to_string())),
+            _ => {
+                return Err(DharmaError::Validation(
+                    "invalid owner_kind".to_string(),
+                ))
+            }
         };
         candidates.push(owner);
     }
@@ -256,9 +261,7 @@ impl OwnershipState {
         match assertion.header.typ.as_str() {
             "subject.transfer" => {
                 if policy != TransferPolicy::Immediate {
-                    return Err(DharmaError::Validation(
-                        "transfer requires immediate policy".to_string(),
-                    ));
+                    return Err(DharmaError::Validation("transfer requires immediate policy".to_string()));
                 }
                 if assertion.header.auth.as_bytes() != owner_key.as_bytes() {
                     return Err(DharmaError::Validation("unauthorized transfer".to_string()));
@@ -268,9 +271,7 @@ impl OwnershipState {
             }
             "subject.transfer.propose" => {
                 if policy != TransferPolicy::ProposeAccept {
-                    return Err(DharmaError::Validation(
-                        "transfer requires propose/accept".to_string(),
-                    ));
+                    return Err(DharmaError::Validation("transfer requires propose/accept".to_string()));
                 }
                 if assertion.header.auth.as_bytes() != owner_key.as_bytes() {
                     return Err(DharmaError::Validation("unauthorized transfer".to_string()));
@@ -279,23 +280,18 @@ impl OwnershipState {
             }
             "subject.transfer.accept" => {
                 if policy != TransferPolicy::ProposeAccept {
-                    return Err(DharmaError::Validation(
-                        "transfer requires propose/accept".to_string(),
-                    ));
+                    return Err(DharmaError::Validation("transfer requires propose/accept".to_string()));
                 }
                 let target = parse_owner_from_body(&assertion.body)?;
-                let pending = self.pending.as_ref().ok_or_else(|| {
-                    DharmaError::Validation("missing transfer proposal".to_string())
-                })?;
+                let pending = self
+                    .pending
+                    .as_ref()
+                    .ok_or_else(|| DharmaError::Validation("missing transfer proposal".to_string()))?;
                 if pending != &target {
-                    return Err(DharmaError::Validation(
-                        "transfer target mismatch".to_string(),
-                    ));
+                    return Err(DharmaError::Validation("transfer target mismatch".to_string()));
                 }
                 let Some(target_key) = owner_signer_key(store, &target)? else {
-                    return Err(DharmaError::Validation(
-                        "missing transfer target".to_string(),
-                    ));
+                    return Err(DharmaError::Validation("missing transfer target".to_string()));
                 };
                 if assertion.header.auth.as_bytes() != target_key.as_bytes() {
                     return Err(DharmaError::Validation("unauthorized transfer".to_string()));
@@ -377,8 +373,7 @@ fn parse_owner_from_body(body: &Value) -> Result<Owner, DharmaError> {
             .ok_or_else(|| DharmaError::Validation("missing owner_kind".to_string()))?,
     )?;
     let bytes = expect_bytes(
-        map_get(map, "owner")
-            .ok_or_else(|| DharmaError::Validation("missing owner".to_string()))?,
+        map_get(map, "owner").ok_or_else(|| DharmaError::Validation("missing owner".to_string()))?,
     )?;
     match kind.as_str() {
         "identity" => Ok(Owner::Identity(IdentityKey::from_slice(&bytes)?)),
@@ -397,7 +392,10 @@ fn owner_signer_key(store: &Store, owner: &Owner) -> Result<Option<IdentityKey>,
     }
 }
 
-fn transfer_policy_for_owner(store: &Store, owner: &Owner) -> Result<TransferPolicy, DharmaError> {
+fn transfer_policy_for_owner(
+    store: &Store,
+    owner: &Owner,
+) -> Result<TransferPolicy, DharmaError> {
     match owner {
         Owner::Identity(_) => Ok(TransferPolicy::Forbidden),
         Owner::Domain(domain_subject) => {
@@ -416,9 +414,7 @@ fn transfer_policy_for_owner(store: &Store, owner: &Owner) -> Result<TransferPol
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assertion::{
-        add_signer_meta, AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION,
-    };
+    use crate::assertion::{add_signer_meta, AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION};
     use crate::crypto;
     use crate::store::state::{append_assertion, save_ownership};
     use crate::store::Store;
@@ -426,11 +422,7 @@ mod tests {
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
-    fn make_assertion(
-        meta: Option<Value>,
-        auth: IdentityKey,
-        signing_key: &ed25519_dalek::SigningKey,
-    ) -> AssertionPlaintext {
+    fn make_assertion(meta: Option<Value>, auth: IdentityKey, signing_key: &ed25519_dalek::SigningKey) -> AssertionPlaintext {
         let header = AssertionHeader {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
@@ -458,10 +450,12 @@ mod tests {
         let auth = IdentityKey::from_bytes(signing_key.verifying_key().to_bytes());
         let signer = SubjectId::from_bytes([4u8; 32]);
         let acting_domain = SubjectId::from_bytes([5u8; 32]);
-        let meta = Value::Map(vec![(
-            Value::Text("acting_domain".to_string()),
-            Value::Bytes(acting_domain.as_bytes().to_vec()),
-        )]);
+        let meta = Value::Map(vec![
+            (
+                Value::Text("acting_domain".to_string()),
+                Value::Bytes(acting_domain.as_bytes().to_vec()),
+            ),
+        ]);
         let meta = add_signer_meta(Some(meta), &signer);
         let assertion = make_assertion(meta, auth, &signing_key);
         let record = derive_ownership_record(&env, &assertion).unwrap();
@@ -551,14 +545,8 @@ mod tests {
         transfer_policy: &str,
     ) {
         let body = Value::Map(vec![
-            (
-                Value::Text("domain".to_string()),
-                Value::Text(domain.to_string()),
-            ),
-            (
-                Value::Text("owner".to_string()),
-                Value::Bytes(owner.as_bytes().to_vec()),
-            ),
+            (Value::Text("domain".to_string()), Value::Text(domain.to_string())),
+            (Value::Text("owner".to_string()), Value::Bytes(owner.as_bytes().to_vec())),
             (
                 Value::Text("transfer_policy".to_string()),
                 Value::Text(transfer_policy.to_string()),
@@ -581,10 +569,7 @@ mod tests {
             Owner::Domain(subject) => ("domain", subject.as_bytes().to_vec()),
         };
         Value::Map(vec![
-            (
-                Value::Text("owner_kind".to_string()),
-                Value::Text(kind.to_string()),
-            ),
+            (Value::Text("owner_kind".to_string()), Value::Text(kind.to_string())),
             (Value::Text("owner".to_string()), Value::Bytes(bytes)),
         ])
     }

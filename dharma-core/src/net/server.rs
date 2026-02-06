@@ -1,15 +1,15 @@
 use crate::config;
 use crate::error::DharmaError;
-use crate::fabric::types::AdStore;
 use crate::identity::IdentityState;
-use crate::metrics;
 use crate::net::handshake;
 use crate::net::peer::verify_peer_identity;
+use crate::fabric::types::AdStore;
 use crate::net::policy::{OverlayAccess, OverlayPolicy};
-use crate::net::sync::{sync_loop_with, SyncOptions};
 use crate::net::trust::PeerPolicy;
+use crate::net::sync::{sync_loop_with, SyncOptions};
 use crate::store::index::FrontierIndex;
 use crate::store::Store;
+use crate::metrics;
 use std::collections::HashMap;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -150,7 +150,12 @@ fn handle_connection(
     let mut index = FrontierIndex::build(&store, &keys)?;
     let policy = OverlayPolicy::load(store.root());
     let claims = claims.unwrap_or_default();
-    let access = OverlayAccess::new(&policy, Some(peer.subject), peer.verified, &claims);
+    let access = OverlayAccess::new(
+        &policy,
+        Some(peer.subject),
+        peer.verified,
+        &claims,
+    );
     if options.relay {
         let mut relay_keys = crate::keys::Keyring::new();
         sync_loop_with(
@@ -214,9 +219,7 @@ mod tests {
 
     #[test]
     fn disconnect_errors_are_suppressed() {
-        assert!(is_disconnect(&DharmaError::Network(
-            "unexpected eof".to_string()
-        )));
+        assert!(is_disconnect(&DharmaError::Network("unexpected eof".to_string())));
         assert!(is_disconnect(&DharmaError::Io(std::io::Error::new(
             std::io::ErrorKind::ConnectionReset,
             "reset"
@@ -224,6 +227,8 @@ mod tests {
         assert!(is_disconnect(&DharmaError::Cbor(
             "failed to fill whole buffer".to_string()
         )));
-        assert!(!is_disconnect(&DharmaError::Validation("bad".to_string())));
+        assert!(!is_disconnect(&DharmaError::Validation(
+            "bad".to_string()
+        )));
     }
 }

@@ -1,18 +1,14 @@
+use dharma::runtime::vm::RuntimeVm;
+use dharma::runtime::cqrs::{action_index, encode_args_buffer, load_state};
+use dharma::store::state::{append_assertion, append_overlay, save_snapshot, Snapshot, SnapshotHeader};
+use dharma::DharmaError;
 use ciborium::value::Value;
-use dharma::assertion::{
-    add_signer_meta, AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION,
-};
+use dharma::assertion::{add_signer_meta, AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION};
 use dharma::crypto;
 use dharma::keys::Keyring;
 use dharma::pdl::schema::{validate_args, ConcurrencyMode, CqrsSchema, TypeSpec, Visibility};
-use dharma::runtime::cqrs::{action_index, encode_args_buffer, load_state};
-use dharma::runtime::vm::RuntimeVm;
 use dharma::store::index::FrontierIndex;
-use dharma::store::state::{
-    append_assertion, append_overlay, save_snapshot, Snapshot, SnapshotHeader,
-};
 use dharma::types::{AssertionId, ContractId, SchemaId, SubjectId};
-use dharma::DharmaError;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
@@ -79,13 +75,8 @@ pub(crate) fn apply_action_prepared(
         .ok_or_else(|| DharmaError::Schema("unknown action".to_string()))?;
     validate_args(action_schema, &args_value)?;
     let action_index = action_index(schema, action)?;
-    let args_buffer = encode_args_buffer(
-        action_schema,
-        &schema.structs,
-        action_index,
-        &args_value,
-        false,
-    )?;
+    let args_buffer =
+        encode_args_buffer(action_schema, &schema.structs, action_index, &args_value, false)?;
     let (base_args, overlay_args) = split_args(action_schema, &args_value)?;
 
     let env = dharma::env::StdEnv::new(data_dir);
@@ -185,8 +176,13 @@ pub(crate) fn apply_action_prepared(
     }
 
     if subject == identity.subject_id {
-        let _ =
-            crate::vault::maybe_archive_after_write(&store, subject, ver, schema_id, contract_id);
+        let _ = crate::vault::maybe_archive_after_write(
+            &store,
+            subject,
+            ver,
+            schema_id,
+            contract_id,
+        );
     }
 
     Ok((assertion_id, last_seq + 1))
@@ -201,10 +197,7 @@ fn overlay_meta(meta: Option<Value>) -> Option<Value> {
     Some(Value::Map(entries))
 }
 
-fn parse_args(
-    action: &crate::pdl::schema::ActionSchema,
-    args: &[String],
-) -> Result<Value, DharmaError> {
+fn parse_args(action: &crate::pdl::schema::ActionSchema, args: &[String]) -> Result<Value, DharmaError> {
     let mut supplied = BTreeMap::new();
     for arg in args {
         let (key, value) = arg
@@ -318,14 +311,10 @@ fn parse_value(raw: &str, typ: &TypeSpec) -> Result<Value, DharmaError> {
             let (id_raw, seq_raw) = raw
                 .split_once('@')
                 .or_else(|| raw.split_once(':'))
-                .ok_or_else(|| {
-                    DharmaError::Validation("subject_ref expects hex@seq".to_string())
-                })?;
+                .ok_or_else(|| DharmaError::Validation("subject_ref expects hex@seq".to_string()))?;
             let bytes = dharma::types::hex_decode(id_raw)?;
             if bytes.len() != 32 {
-                return Err(DharmaError::Validation(
-                    "invalid subject_ref id".to_string(),
-                ));
+                return Err(DharmaError::Validation("invalid subject_ref id".to_string()));
             }
             let seq = seq_raw
                 .trim()
@@ -341,14 +330,12 @@ fn parse_value(raw: &str, typ: &TypeSpec) -> Result<Value, DharmaError> {
             if parts.len() != 2 {
                 return Err(DharmaError::Validation("invalid geopoint".to_string()));
             }
-            let lat = parts[0]
-                .trim()
-                .parse::<i64>()
-                .map_err(|_| DharmaError::Validation("invalid geopoint".to_string()))?;
-            let lon = parts[1]
-                .trim()
-                .parse::<i64>()
-                .map_err(|_| DharmaError::Validation("invalid geopoint".to_string()))?;
+            let lat = parts[0].trim().parse::<i64>().map_err(|_| {
+                DharmaError::Validation("invalid geopoint".to_string())
+            })?;
+            let lon = parts[1].trim().parse::<i64>().map_err(|_| {
+                DharmaError::Validation("invalid geopoint".to_string())
+            })?;
             Ok(Value::Array(vec![
                 Value::Integer(lat.into()),
                 Value::Integer(lon.into()),
@@ -364,9 +351,9 @@ fn parse_value(raw: &str, typ: &TypeSpec) -> Result<Value, DharmaError> {
         TypeSpec::Struct(_) => Err(DharmaError::Validation(
             "struct args unsupported".to_string(),
         )),
-        TypeSpec::List(_) | TypeSpec::Map(_, _) => Err(DharmaError::Validation(
-            "collection args unsupported".to_string(),
-        )),
+        TypeSpec::List(_) | TypeSpec::Map(_, _) => {
+            Err(DharmaError::Validation("collection args unsupported".to_string()))
+        }
     }
 }
 
@@ -383,9 +370,7 @@ fn parse_decimal_arg(raw: &str, scale: Option<u32>) -> Result<i64, DharmaError> 
     };
     let scale = scale.unwrap_or(0);
     if frac_part.is_some() && scale == 0 {
-        return Err(DharmaError::Validation(
-            "decimal scale required".to_string(),
-        ));
+        return Err(DharmaError::Validation("decimal scale required".to_string()));
     }
     let int_str = if int_part.is_empty() { "0" } else { int_part };
     let int_val = int_str
@@ -397,9 +382,7 @@ fn parse_decimal_arg(raw: &str, scale: Option<u32>) -> Result<i64, DharmaError> 
         .ok_or_else(|| DharmaError::Validation("decimal overflow".to_string()))?;
     if let Some(frac) = frac_part {
         if frac.len() > scale as usize {
-            return Err(DharmaError::Validation(
-                "decimal scale overflow".to_string(),
-            ));
+            return Err(DharmaError::Validation("decimal scale overflow".to_string()));
         }
         let mut frac_buf = String::from(frac);
         while frac_buf.len() < scale as usize {
@@ -470,6 +453,7 @@ mod parse_tests {
     }
 }
 
+
 pub(crate) fn build_context(identity: &dharma::IdentityState) -> Vec<u8> {
     let mut buf = vec![0u8; 40];
     buf[..32].copy_from_slice(identity.subject_id.as_bytes());
@@ -507,14 +491,9 @@ pub(crate) fn load_contract_ids_for_ver(
             }
         }
     }
-    let schema_hex = schema_hex
-        .ok_or_else(|| DharmaError::Config("missing schema in dharma.toml".to_string()))?;
-    let contract_hex = contract_hex
-        .ok_or_else(|| DharmaError::Config("missing contract in dharma.toml".to_string()))?;
-    Ok((
-        SchemaId::from_hex(&schema_hex)?,
-        ContractId::from_hex(&contract_hex)?,
-    ))
+    let schema_hex = schema_hex.ok_or_else(|| DharmaError::Config("missing schema in dharma.toml".to_string()))?;
+    let contract_hex = contract_hex.ok_or_else(|| DharmaError::Config("missing contract in dharma.toml".to_string()))?;
+    Ok((SchemaId::from_hex(&schema_hex)?, ContractId::from_hex(&contract_hex)?))
 }
 
 pub(crate) fn load_schema_bytes(root: &PathBuf, id: &SchemaId) -> Result<Vec<u8>, DharmaError> {

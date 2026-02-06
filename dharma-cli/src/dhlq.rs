@@ -1,12 +1,12 @@
 use crate::error::DharmaError;
 use crate::pdl::ast::{Expr as PdlExpr, Literal as PdlLiteral, Op as PdlOp};
 use crate::pdl::expr::parse_expr;
-use ciborium::value::Value;
 use dharma::dhlq::{
     AggFunc, AggSpec, BucketSpec, ExplodeSpec, JoinSpec, QueryOp, QueryPlan, QuerySource,
     SearchSpec, SelectItem, SortKey,
 };
 use dharma::reactor::{Expr, Op};
+use ciborium::value::Value;
 
 pub fn parse_plan(query: &str, start_line: usize) -> Result<QueryPlan, DharmaError> {
     let segments = split_segments(query, start_line)?;
@@ -244,9 +244,9 @@ fn parse_join(rest: &str, line_no: usize) -> Result<JoinSpec, DharmaError> {
             "line {line_no} col 1: invalid join"
         )));
     }
-    let (left, right) = clause
-        .split_once('=')
-        .ok_or_else(|| DharmaError::Validation(format!("line {line_no} col 1: invalid join")))?;
+    let (left, right) = clause.split_once('=').ok_or_else(|| {
+        DharmaError::Validation(format!("line {line_no} col 1: invalid join"))
+    })?;
     Ok(JoinSpec {
         table: table.to_string(),
         left: left.trim().to_string(),
@@ -289,7 +289,9 @@ fn parse_group_by(rest: &str, line_no: usize) -> Result<Vec<String>, DharmaError
             "line {line_no} col 1: invalid group by"
         )));
     }
-    let inner = trimmed.trim_start_matches('(').trim_end_matches(')');
+    let inner = trimmed
+        .trim_start_matches('(')
+        .trim_end_matches(')');
     let keys = inner
         .split(',')
         .map(|s| s.trim())
@@ -324,17 +326,13 @@ fn parse_agg(rest: &str, line_no: usize) -> Result<Vec<AggSpec>, DharmaError> {
         } else {
             (item, None)
         };
-        let (func_name, inner) = item
-            .split_once('(')
-            .ok_or_else(|| DharmaError::Validation(format!("line {line_no} col 1: invalid agg")))?;
+        let (func_name, inner) = item.split_once('(').ok_or_else(|| {
+            DharmaError::Validation(format!("line {line_no} col 1: invalid agg"))
+        })?;
         let func = AggFunc::from_str(func_name.trim())
             .map_err(|_| DharmaError::Validation(format!("line {line_no} col 1: invalid agg")))?;
         let inner = inner.trim_end_matches(')').trim();
-        let path = if inner.is_empty() {
-            None
-        } else {
-            Some(inner.to_string())
-        };
+        let path = if inner.is_empty() { None } else { Some(inner.to_string()) };
         let alias = alias_out.filter(|s| !s.is_empty());
         specs.push(AggSpec { func, path, alias });
     }
@@ -361,11 +359,7 @@ fn parse_explode(rest: &str, line_no: usize) -> Result<ExplodeSpec, DharmaError>
     let value;
     if alias.starts_with('(') {
         let inner = alias.trim_start_matches('(').trim_end_matches(')');
-        let parts: Vec<&str> = inner
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
         if parts.len() == 2 {
             key = Some(parts[0].to_string());
             value = parts[1].to_string();
@@ -388,20 +382,17 @@ fn parse_explode(rest: &str, line_no: usize) -> Result<ExplodeSpec, DharmaError>
 
 fn parse_duration(value: &str) -> Option<u64> {
     if value.ends_with('d') {
-        value
-            .trim_end_matches('d')
+        value.trim_end_matches('d')
             .parse::<u64>()
             .ok()
             .map(|v| v * 86_400)
     } else if value.ends_with('h') {
-        value
-            .trim_end_matches('h')
+        value.trim_end_matches('h')
             .parse::<u64>()
             .ok()
             .map(|v| v * 3_600)
     } else if value.ends_with('m') {
-        value
-            .trim_end_matches('m')
+        value.trim_end_matches('m')
             .parse::<u64>()
             .ok()
             .map(|v| v * 60)
@@ -606,10 +597,7 @@ fn convert_expr(expr: &PdlExpr) -> Result<Expr, DharmaError> {
     match expr {
         PdlExpr::Literal(lit) => Ok(Expr::Literal(convert_literal(lit)?)),
         PdlExpr::Path(parts) => Ok(Expr::Path(parts.clone())),
-        PdlExpr::UnaryOp(op, inner) => Ok(Expr::Unary(
-            convert_op(*op)?,
-            Box::new(convert_expr(inner)?),
-        )),
+        PdlExpr::UnaryOp(op, inner) => Ok(Expr::Unary(convert_op(*op)?, Box::new(convert_expr(inner)?))),
         PdlExpr::BinaryOp(op, left, right) => Ok(Expr::Binary(
             convert_op(*op)?,
             Box::new(convert_expr(left)?),

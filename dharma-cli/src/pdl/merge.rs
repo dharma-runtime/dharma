@@ -1,5 +1,5 @@
 use crate::error::DharmaError;
-use crate::pdl::ast::{ActionDef, AggregateDef, ArgDef, AstFile, ProjectionDef, QueryDef};
+use crate::pdl::ast::{ActionDef, ArgDef, AstFile, AggregateDef, ProjectionDef, QueryDef};
 use std::collections::{HashMap, HashSet};
 
 pub fn merge_parent(
@@ -47,10 +47,7 @@ fn merge_fields(child: &mut AggregateDef, parent: &AggregateDef) -> Result<(), D
     Ok(())
 }
 
-fn merge_actions(
-    child_actions: &[ActionDef],
-    parent_actions: &[ActionDef],
-) -> Result<Vec<ActionDef>, DharmaError> {
+fn merge_actions(child_actions: &[ActionDef], parent_actions: &[ActionDef]) -> Result<Vec<ActionDef>, DharmaError> {
     let mut map: HashMap<String, ActionDef> = HashMap::new();
     for action in child_actions {
         map.insert(action.name.clone(), action.clone());
@@ -67,10 +64,7 @@ fn merge_actions(
     Ok(actions)
 }
 
-fn merge_queries(
-    child_queries: &[QueryDef],
-    parent_queries: &[QueryDef],
-) -> Result<Vec<QueryDef>, DharmaError> {
+fn merge_queries(child_queries: &[QueryDef], parent_queries: &[QueryDef]) -> Result<Vec<QueryDef>, DharmaError> {
     let mut map: HashMap<String, QueryDef> = HashMap::new();
     for query in child_queries {
         map.insert(query.name.clone(), query.clone());
@@ -85,10 +79,7 @@ fn merge_queries(
     Ok(queries)
 }
 
-fn merge_projections(
-    child_proj: &[ProjectionDef],
-    parent_proj: &[ProjectionDef],
-) -> Result<Vec<ProjectionDef>, DharmaError> {
+fn merge_projections(child_proj: &[ProjectionDef], parent_proj: &[ProjectionDef]) -> Result<Vec<ProjectionDef>, DharmaError> {
     let mut map: HashMap<String, ProjectionDef> = HashMap::new();
     for proj in child_proj {
         map.insert(proj.name.clone(), proj.clone());

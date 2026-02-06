@@ -3,21 +3,21 @@ use crate::types::SubjectId;
 use crate::vault::{DhboxChunk, VaultDriver, VaultLocation, VaultMeta};
 
 #[cfg(feature = "vault-arweave")]
-use rand_core::{OsRng, RngCore};
-#[cfg(feature = "vault-arweave")]
 use reqwest::blocking::Client;
 #[cfg(feature = "vault-arweave")]
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 #[cfg(feature = "vault-arweave")]
 use serde_json::Value as JsonValue;
 #[cfg(feature = "vault-arweave")]
-use std::path::{Path, PathBuf};
-#[cfg(feature = "vault-arweave")]
 use std::process::{Command, Stdio};
+#[cfg(feature = "vault-arweave")]
+use std::path::{Path, PathBuf};
 #[cfg(feature = "vault-arweave")]
 use std::sync::Mutex;
 #[cfg(feature = "vault-arweave")]
 use std::{env, fs};
+#[cfg(feature = "vault-arweave")]
+use rand_core::{OsRng, RngCore};
 
 #[cfg(feature = "vault-arweave")]
 #[derive(Clone, Debug)]
@@ -95,12 +95,7 @@ impl ArweaveDriver {
     }
 
     fn extract_location(&self, headers: &HeaderMap, body: &str) -> Result<String, DharmaError> {
-        for key in [
-            "x-irys-id",
-            "x-bundlr-id",
-            "x-transaction-id",
-            "x-arweave-tx",
-        ] {
+        for key in ["x-irys-id", "x-bundlr-id", "x-transaction-id", "x-arweave-tx"] {
             if let Some(value) = headers.get(key) {
                 if let Ok(text) = value.to_str() {
                     if !text.trim().is_empty() {
@@ -145,17 +140,21 @@ impl ArweaveDriver {
                 return Ok(path);
             }
         }
-        let mut guard = self
-            .wallet_path
-            .lock()
-            .map_err(|_| DharmaError::Config("wallet lock poisoned".to_string()))?;
+        let mut guard = self.wallet_path.lock().map_err(|_| {
+            DharmaError::Config("wallet lock poisoned".to_string())
+        })?;
         if let Some(path) = guard.as_ref() {
             if path.exists() {
                 return Ok(path.clone());
             }
         }
         let path = temp_path("dharma-arlocal-wallet", "json")?;
-        run_arweave_script(self.arlocal_endpoint(), &path, None, ARLOCAL_WALLET_SCRIPT)?;
+        run_arweave_script(
+            self.arlocal_endpoint(),
+            &path,
+            None,
+            ARLOCAL_WALLET_SCRIPT,
+        )?;
         *guard = Some(path.clone());
         Ok(path)
     }
@@ -185,10 +184,7 @@ impl VaultDriver for ArweaveDriver {
             ArweaveMode::Bundlr => {
                 let bytes = chunk.to_bytes();
                 let mut headers = HeaderMap::new();
-                headers.insert(
-                    CONTENT_TYPE,
-                    HeaderValue::from_static("application/octet-stream"),
-                );
+                headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
                 self.with_auth(&mut headers)?;
                 let resp = self
                     .client
@@ -199,9 +195,9 @@ impl VaultDriver for ArweaveDriver {
                     .map_err(|e| DharmaError::Network(format!("arweave upload failed: {e}")))?;
                 let status = resp.status();
                 let headers = resp.headers().clone();
-                let body = resp.text().map_err(|e| {
-                    DharmaError::Network(format!("arweave response read failed: {e}"))
-                })?;
+                let body = resp
+                    .text()
+                    .map_err(|e| DharmaError::Network(format!("arweave response read failed: {e}")))?;
                 if !status.is_success() {
                     return Err(DharmaError::Network(format!(
                         "arweave upload failed: {status} {body}"
@@ -219,9 +215,7 @@ impl VaultDriver for ArweaveDriver {
 
     fn get_chunk(&self, location: &VaultLocation) -> Result<Vec<u8>, DharmaError> {
         if location.driver != "arweave" {
-            return Err(DharmaError::Validation(
-                "invalid driver for arweave".to_string(),
-            ));
+            return Err(DharmaError::Validation("invalid driver for arweave".to_string()));
         }
         let url = self.download_url(&location.path);
         let resp = self
@@ -528,9 +522,9 @@ fn run_arweave_script(
     if let Some(chunk) = chunk_path {
         command.env("ARWEAVE_CHUNK", chunk);
     }
-    let output = command
-        .output()
-        .map_err(|e| DharmaError::Config(format!("arweave helper failed: {e}")))?;
+    let output = command.output().map_err(|e| {
+        DharmaError::Config(format!("arweave helper failed: {e}"))
+    })?;
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);

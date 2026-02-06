@@ -188,7 +188,11 @@ impl<'a> OverlayAccess<'a> {
         }
     }
 
-    pub fn allows(&self, subject: &SubjectId, namespace: Option<&str>) -> bool {
+    pub fn allows(
+        &self,
+        subject: &SubjectId,
+        namespace: Option<&str>,
+    ) -> bool {
         self.policy
             .allows(self.peer, self.verified, subject, namespace, self.claims)
     }
@@ -234,8 +238,7 @@ fn parse_rule(parts: &[&str]) -> Option<OverlayRule> {
             _ => break,
         }
     }
-    if peer.is_none() && subject.is_none() && namespace.is_none() && org.is_none() && role.is_none()
-    {
+    if peer.is_none() && subject.is_none() && namespace.is_none() && org.is_none() && role.is_none() {
         return None;
     }
     Some(OverlayRule {
@@ -324,13 +327,7 @@ mod tests {
         let policy = OverlayPolicy::from_allowlist(&format!("{}\n", peer.to_hex()));
         assert!(policy.allows(Some(peer), false, &subject, None, &PeerClaims::default()));
         let other_peer = SubjectId::from_bytes([13u8; 32]);
-        assert!(!policy.allows(
-            Some(other_peer),
-            false,
-            &subject,
-            None,
-            &PeerClaims::default()
-        ));
+        assert!(!policy.allows(Some(other_peer), false, &subject, None, &PeerClaims::default()));
     }
 
     #[test]

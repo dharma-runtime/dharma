@@ -7,17 +7,17 @@ use crate::store::state::{list_assertions, list_overlays, read_manifest};
 use crate::store::Store;
 use crate::types::{AssertionId, ContractId, EnvelopeId, SchemaId, SubjectId};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use ciborium::value::Value;
 use crc32fast::Hasher;
+use ciborium::value::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 mod bitset;
 use bitset::{
-    filter_eq_bytes32, filter_eq_i64_bytes, filter_eq_u32, filter_eq_u64, filter_eq_u8,
-    filter_gt_i64_bytes, filter_gt_u64, filter_gte_i64_bytes, filter_gte_u64, filter_lt_i64_bytes,
-    filter_lt_u64, filter_lte_i64_bytes, filter_lte_u64, BitSet,
+    BitSet, filter_eq_bytes32, filter_eq_i64_bytes, filter_eq_u32, filter_eq_u64, filter_eq_u8,
+    filter_gte_i64_bytes, filter_gte_u64, filter_gt_i64_bytes, filter_gt_u64, filter_lte_i64_bytes,
+    filter_lte_u64, filter_lt_i64_bytes, filter_lt_u64,
 };
 
 const ROOT_DIR: &str = "dharmaq";
@@ -123,10 +123,23 @@ pub enum Predicate {
     TypEq(String),
     SubjectEq(SubjectId),
     TextSearch(String),
-    DynI64 { col: String, op: CmpOp, value: i64 },
-    DynBool { col: String, value: bool },
-    DynSymbol { col: String, value: String },
-    DynBytes32 { col: String, value: [u8; 32] },
+    DynI64 {
+        col: String,
+        op: CmpOp,
+        value: i64,
+    },
+    DynBool {
+        col: String,
+        value: bool,
+    },
+    DynSymbol {
+        col: String,
+        value: String,
+    },
+    DynBytes32 {
+        col: String,
+        value: [u8; 32],
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -292,10 +305,7 @@ pub fn ensure_contract_table(root: &Path, spec: &ContractTableSpec) -> Result<St
     ensure_contract_table_env(&env, spec)
 }
 
-pub fn ensure_contract_table_env<E>(
-    env: &E,
-    spec: &ContractTableSpec,
-) -> Result<String, DharmaError>
+pub fn ensure_contract_table_env<E>(env: &E, spec: &ContractTableSpec) -> Result<String, DharmaError>
 where
     E: Env + Clone + Send + Sync + 'static,
 {
@@ -485,7 +495,10 @@ fn subjects_for_schema(
 }
 
 fn lookup_assertion_ts(store: &Store, assertion_id: &AssertionId) -> Option<u64> {
-    let env = store.lookup_envelope(assertion_id).ok().flatten()?;
+    let env = store
+        .lookup_envelope(assertion_id)
+        .ok()
+        .flatten()?;
     let bytes = store.get_object(&env).ok()?;
     let assertion = AssertionPlaintext::from_cbor(&bytes).ok()?;
     assertion.header.ts.map(|ts| ts.max(0) as u64)
@@ -708,18 +721,8 @@ fn apply_row(
         return Err(DharmaError::Validation("wal row_id gap".to_string()));
     }
 
-    append_fixed(
-        env,
-        &partition_dir,
-        "object_id.bin",
-        entry.assertion_id.as_bytes(),
-    )?;
-    append_fixed(
-        env,
-        &partition_dir,
-        "subject_id.bin",
-        entry.subject.as_bytes(),
-    )?;
+    append_fixed(env, &partition_dir, "object_id.bin", entry.assertion_id.as_bytes())?;
+    append_fixed(env, &partition_dir, "subject_id.bin", entry.subject.as_bytes())?;
     append_u64(env, &partition_dir, "seq.bin", entry.seq)?;
 
     let typ_id = dict.intern(&entry.typ)?;
@@ -763,12 +766,7 @@ fn append_state_row(
         "object_id.bin",
         row.assertion_id.as_bytes(),
     )?;
-    append_fixed(
-        env,
-        &partition_dir,
-        "subject_id.bin",
-        row.subject.as_bytes(),
-    )?;
+    append_fixed(env, &partition_dir, "subject_id.bin", row.subject.as_bytes())?;
     append_u64(env, &partition_dir, "seq.bin", row.seq)?;
     let typ_id = dict.intern(&row.typ)? as u32;
     append_u32(env, &partition_dir, "typ.bin", typ_id)?;
@@ -779,15 +777,7 @@ fn append_state_row(
     let trigs = trigrams(&normalized);
     append_trigram_count(env, &partition_dir, trigs.len() as u16)?;
     append_trigram_index(env, &partition_dir, row_id, &trigs)?;
-    apply_state_columns(
-        env,
-        &partition_dir,
-        row_id,
-        dict,
-        columns,
-        schema,
-        &row.value,
-    )?;
+    apply_state_columns(env, &partition_dir, row_id, dict, columns, schema, &row.value)?;
     Ok(())
 }
 
@@ -1143,19 +1133,13 @@ fn append_field_writes(
             });
         }
         CqrsTypeSpec::Ratio => {
-            return Err(DharmaError::Validation(
-                "ratio unsupported in dharma-q".to_string(),
-            ));
+            return Err(DharmaError::Validation("ratio unsupported in dharma-q".to_string()));
         }
         CqrsTypeSpec::Struct(_) => {
-            return Err(DharmaError::Validation(
-                "struct unsupported in dharma-q".to_string(),
-            ));
+            return Err(DharmaError::Validation("struct unsupported in dharma-q".to_string()));
         }
         CqrsTypeSpec::List(_) | CqrsTypeSpec::Map(_, _) => {
-            return Err(DharmaError::Validation(
-                "collection unsupported in dharma-q".to_string(),
-            ));
+            return Err(DharmaError::Validation("collection unsupported in dharma-q".to_string()));
         }
     }
     Ok(())
@@ -1235,9 +1219,7 @@ fn scan_dynamic_columns(
         if !env.is_file(&path) {
             continue;
         }
-        let Some(name) = path.file_name() else {
-            continue;
-        };
+        let Some(name) = path.file_name() else { continue };
         let name = name.to_string_lossy().to_string();
         if base_set.contains(name.as_str()) || !name.ends_with(".bin") {
             continue;
@@ -1248,16 +1230,12 @@ fn scan_dynamic_columns(
             if len == 0 {
                 0
             } else {
-                return Err(DharmaError::Validation(
-                    "column length mismatch".to_string(),
-                ));
+                return Err(DharmaError::Validation("column length mismatch".to_string()));
             }
         } else {
-            let row_id = row_id as u64;
+        let row_id = row_id as u64;
             if len % row_id != 0 {
-                return Err(DharmaError::Validation(
-                    "column length mismatch".to_string(),
-                ));
+                return Err(DharmaError::Validation("column length mismatch".to_string()));
             }
             (len / row_id) as usize
         };
@@ -1282,9 +1260,7 @@ fn ensure_bin_padding(
         return Ok(());
     }
     if current > target {
-        return Err(DharmaError::Validation(
-            "column length mismatch".to_string(),
-        ));
+        return Err(DharmaError::Validation("column length mismatch".to_string()));
     }
     let pad = (target - current) as usize;
     if pad > 0 {
@@ -1293,12 +1269,7 @@ fn ensure_bin_padding(
     Ok(())
 }
 
-fn append_bin_value(
-    env: &dyn Env,
-    partition_dir: &Path,
-    name: &str,
-    bytes: &[u8],
-) -> Result<(), DharmaError> {
+fn append_bin_value(env: &dyn Env, partition_dir: &Path, name: &str, bytes: &[u8]) -> Result<(), DharmaError> {
     let path = partition_dir.join("cols").join(format!("{name}.bin"));
     env.append(&path, bytes)?;
     Ok(())
@@ -1426,21 +1397,11 @@ fn read_table_meta(env: &dyn Env, table_root: &Path) -> Result<Option<TableMeta>
             _ => {}
         }
     }
-    let Some(kind) = kind else {
-        return Ok(None);
-    };
-    let Some(contract) = contract else {
-        return Ok(None);
-    };
-    let Some(lens) = lens else {
-        return Ok(None);
-    };
-    let Some(schema_id) = schema_id else {
-        return Ok(None);
-    };
-    let Some(contract_id) = contract_id else {
-        return Ok(None);
-    };
+    let Some(kind) = kind else { return Ok(None); };
+    let Some(contract) = contract else { return Ok(None); };
+    let Some(lens) = lens else { return Ok(None); };
+    let Some(schema_id) = schema_id else { return Ok(None); };
+    let Some(contract_id) = contract_id else { return Ok(None); };
     let manifest_len = manifest_len.unwrap_or(0);
     let include_private = include_private.unwrap_or(true);
     Ok(Some(TableMeta {
@@ -1476,11 +1437,7 @@ fn partition_for(ts: u64) -> String {
 
 fn civil_from_days(days: i64) -> (i32, u8, u8) {
     let z = days + 719468;
-    let era = if z >= 0 {
-        z / 146097
-    } else {
-        (z - 146096) / 146097
-    };
+    let era = if z >= 0 { z / 146097 } else { (z - 146096) / 146097 };
     let doe = z - era * 146097;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let y = yoe + era * 400;
@@ -1501,23 +1458,13 @@ fn row_count(env: &dyn Env, partition_dir: &Path) -> Result<u64, DharmaError> {
     Ok(len / 8)
 }
 
-fn append_fixed(
-    env: &dyn Env,
-    partition_dir: &Path,
-    name: &str,
-    bytes: &[u8],
-) -> Result<(), DharmaError> {
+fn append_fixed(env: &dyn Env, partition_dir: &Path, name: &str, bytes: &[u8]) -> Result<(), DharmaError> {
     let path = partition_dir.join("cols").join(name);
     env.append(&path, bytes)?;
     Ok(())
 }
 
-fn append_u64(
-    env: &dyn Env,
-    partition_dir: &Path,
-    name: &str,
-    value: u64,
-) -> Result<(), DharmaError> {
+fn append_u64(env: &dyn Env, partition_dir: &Path, name: &str, value: u64) -> Result<(), DharmaError> {
     let path = partition_dir.join("cols").join(name);
     let mut buf = Vec::with_capacity(8);
     buf.write_u64::<LittleEndian>(value)?;
@@ -1525,12 +1472,7 @@ fn append_u64(
     Ok(())
 }
 
-fn append_u32(
-    env: &dyn Env,
-    partition_dir: &Path,
-    name: &str,
-    value: u32,
-) -> Result<(), DharmaError> {
+fn append_u32(env: &dyn Env, partition_dir: &Path, name: &str, value: u32) -> Result<(), DharmaError> {
     let path = partition_dir.join("cols").join(name);
     let mut buf = Vec::with_capacity(4);
     buf.write_u32::<LittleEndian>(value)?;
@@ -1550,11 +1492,7 @@ fn append_text(env: &dyn Env, partition_dir: &Path, text: &str) -> Result<(), Dh
     Ok(())
 }
 
-fn append_trigram_count(
-    env: &dyn Env,
-    partition_dir: &Path,
-    count: u16,
-) -> Result<(), DharmaError> {
+fn append_trigram_count(env: &dyn Env, partition_dir: &Path, count: u16) -> Result<(), DharmaError> {
     let path = partition_dir.join("text").join("tcnt.bin");
     let mut buf = Vec::with_capacity(2);
     buf.write_u16::<LittleEndian>(count)?;
@@ -1809,10 +1747,9 @@ fn mask_for_predicate(
         }
         Predicate::DynI64 { col, op, value } => {
             let Some(col_map) =
-                read_mapped(env, &partition_dir.join("cols").join(format!("{col}.bin")))?
-            else {
-                return Ok((BitSet::new(row_count), None));
-            };
+                read_mapped(env, &partition_dir.join("cols").join(format!("{col}.bin")))? else {
+                    return Ok((BitSet::new(row_count), None));
+                };
             let valid = load_valid_mask(env, partition_dir, col, row_count)?;
             let mut temp = BitSet::new(row_count);
             let col_bytes = col_map.as_ref();
@@ -1828,10 +1765,9 @@ fn mask_for_predicate(
         }
         Predicate::DynBool { col, value } => {
             let Some(col_map) =
-                read_mapped(env, &partition_dir.join("cols").join(format!("{col}.bin")))?
-            else {
-                return Ok((BitSet::new(row_count), None));
-            };
+                read_mapped(env, &partition_dir.join("cols").join(format!("{col}.bin")))? else {
+                    return Ok((BitSet::new(row_count), None));
+                };
             let valid = load_valid_mask(env, partition_dir, col, row_count)?;
             let mut temp = BitSet::new(row_count);
             filter_eq_u8(col_map.as_ref(), if *value { 1 } else { 0 }, &mut temp);
@@ -1848,10 +1784,9 @@ fn mask_for_predicate(
                 return Ok((BitSet::new(row_count), None));
             };
             let Some(col_map) =
-                read_mapped(env, &partition_dir.join("cols").join(format!("{col}.bin")))?
-            else {
-                return Ok((BitSet::new(row_count), None));
-            };
+                read_mapped(env, &partition_dir.join("cols").join(format!("{col}.bin")))? else {
+                    return Ok((BitSet::new(row_count), None));
+                };
             let valid = load_valid_mask(env, partition_dir, col, row_count)?;
             let mut temp = BitSet::new(row_count);
             filter_eq_u32(col_map.as_ref(), typ_id, &mut temp);
@@ -1860,10 +1795,9 @@ fn mask_for_predicate(
         }
         Predicate::DynBytes32 { col, value } => {
             let Some(col_map) =
-                read_mapped(env, &partition_dir.join("cols").join(format!("{col}.bin")))?
-            else {
-                return Ok((BitSet::new(row_count), None));
-            };
+                read_mapped(env, &partition_dir.join("cols").join(format!("{col}.bin")))? else {
+                    return Ok((BitSet::new(row_count), None));
+                };
             let valid = load_valid_mask(env, partition_dir, col, row_count)?;
             let mut temp = BitSet::new(row_count);
             filter_eq_bytes32(col_map.as_ref(), value, &mut temp);
@@ -1985,11 +1919,7 @@ fn read_row(maps: &PartitionMaps, row_id: u64, query: &str, score: u32) -> Optio
         typ_bytes[typ_offset + 2],
         typ_bytes[typ_offset + 3],
     ]);
-    let typ = maps
-        .symbols
-        .get(typ_id as usize)
-        .cloned()
-        .unwrap_or_else(|| "unknown".to_string());
+    let typ = maps.symbols.get(typ_id as usize).cloned().unwrap_or_else(|| "unknown".to_string());
     let text = read_text_from_maps(maps, idx)?;
     let snippet = snippet_for(&text, query);
     Some(QueryRow {
@@ -2136,7 +2066,9 @@ fn first_text_query(filter: &Filter) -> Option<String> {
 fn filter_has_text_query(filter: &Filter) -> bool {
     match filter {
         Filter::Leaf(Predicate::TextSearch(_)) => true,
-        Filter::And(items) | Filter::Or(items) => items.iter().any(filter_has_text_query),
+        Filter::And(items) | Filter::Or(items) => {
+            items.iter().any(filter_has_text_query)
+        }
         Filter::Not(inner) => filter_has_text_query(inner),
         _ => false,
     }
@@ -2272,11 +2204,7 @@ fn truncate_wal(env: &dyn Env, path: &Path, size: u64) -> Result<(), DharmaError
     }
     let buf = env.read(path)?;
     let size = size as usize;
-    let truncated = if buf.len() >= size {
-        &buf[..size]
-    } else {
-        &buf[..]
-    };
+    let truncated = if buf.len() >= size { &buf[..size] } else { &buf[..] };
     env.write(path, truncated)?;
     Ok(())
 }
@@ -2530,7 +2458,7 @@ mod tests {
             fields,
             actions,
             queries: BTreeMap::new(),
-            projections: BTreeMap::new(),
+        projections: BTreeMap::new(),
             concurrency: crate::pdl::schema::ConcurrencyMode::Strict,
         };
         let schema_bytes = schema.to_cbor().unwrap();
@@ -2555,14 +2483,8 @@ mod tests {
         };
         let assignee = Value::Bytes(vec![9u8; 32]);
         let body = Value::Map(vec![
-            (
-                Value::Text("amount".to_string()),
-                Value::Integer(120.into()),
-            ),
-            (
-                Value::Text("status".to_string()),
-                Value::Text("Open".to_string()),
-            ),
+            (Value::Text("amount".to_string()), Value::Integer(120.into())),
+            (Value::Text("status".to_string()), Value::Text("Open".to_string())),
             (Value::Text("assignee".to_string()), assignee),
             (Value::Text("active".to_string()), Value::Bool(true)),
         ]);
@@ -2571,16 +2493,7 @@ mod tests {
         let assertion_id = assertion.assertion_id().unwrap();
         let envelope_id = crypto::envelope_id(&bytes);
         let env = crate::env::StdEnv::new(temp.path());
-        append_assertion(
-            &env,
-            &subject,
-            1,
-            assertion_id,
-            envelope_id,
-            "Create",
-            &bytes,
-        )
-        .unwrap();
+        append_assertion(&env, &subject, 1, assertion_id, envelope_id, "Create", &bytes).unwrap();
 
         rebuild(temp.path()).unwrap();
 

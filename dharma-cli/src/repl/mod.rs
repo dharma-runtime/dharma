@@ -1,38 +1,36 @@
-pub mod aliases;
 pub mod context;
 pub mod core;
-pub mod diff;
-pub mod history;
-pub mod render;
+pub mod aliases;
 pub mod subjects;
+pub mod render;
+pub mod history;
+pub mod diff;
 
+use crate::{APP_NAME, APP_VERSION, DharmaError};
 use crate::identity_store;
 use crate::reactor;
-use crate::{DharmaError, APP_NAME, APP_VERSION};
-use inquire::Password;
-use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
-use rustyline::highlight::Highlighter;
-use rustyline::hint::{Hinter, HistoryHinter};
 use rustyline::history::DefaultHistory;
-use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline::Editor;
+use rustyline::completion::{Completer, Pair};
+use rustyline::hint::{Hinter, HistoryHinter};
+use rustyline::highlight::Highlighter;
+use rustyline::validate::{Validator, ValidationContext, ValidationResult};
 use rustyline::{Context, Helper, Result as RustyResult};
+use inquire::Password;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::repl::aliases::AliasMap;
-use crate::repl::core::{
-    format_type, list_contract_names, load_schema_for_lens, split_command_line,
-};
 use crate::repl::subjects::recent_subjects;
+use crate::repl::core::{format_type, list_contract_names, load_schema_for_lens, split_command_line};
 use crate::types::SubjectId;
 
 pub fn run() -> Result<(), DharmaError> {
-    let mut rl = Editor::<DharmaHelper, DefaultHistory>::new()
-        .map_err(|e| DharmaError::Validation(e.to_string()))?;
-
+    let mut rl =
+        Editor::<DharmaHelper, DefaultHistory>::new().map_err(|e| DharmaError::Validation(e.to_string()))?;
+    
     // Load history if available
     let history_path = get_history_path();
     if let Some(path) = &history_path {
@@ -55,11 +53,7 @@ pub fn run() -> Result<(), DharmaError> {
 
     loop {
         if let Some(helper) = rl.helper_mut() {
-            helper
-                .state
-                .lock()
-                .ok()
-                .map(|mut state| state.update_from_ctx(&ctx));
+            helper.state.lock().ok().map(|mut state| state.update_from_ctx(&ctx));
         }
         ctx.maybe_warn_backup_policy();
         let prompt = ctx.prompt();
@@ -94,11 +88,11 @@ pub fn run() -> Result<(), DharmaError> {
             }
         }
     }
-
+    
     if let Some(path) = &history_path {
         let _ = rl.save_history(path);
     }
-
+    
     Ok(())
 }
 
@@ -252,45 +246,11 @@ impl Completer for DharmaHelper {
 
         if tokens.is_empty() {
             let cmds = vec![
-                "id",
-                "identity",
-                "alias",
-                "conf",
-                "config",
-                "ct",
-                "contracts",
-                "pkg",
-                "ls",
-                "subjects",
-                "net",
-                "new",
-                "use",
-                "do",
-                "try",
-                "can",
-                "state",
-                "info",
-                "why",
-                "status",
-                "tail",
-                "log",
-                "show",
-                "prove",
-                "diff",
-                "overlay",
-                "pwd",
-                "version",
-                "help",
-                "exit",
-                "peers",
-                "connect",
-                "sync",
-                "tables",
-                "table",
-                "q",
-                "find",
-                "index",
-                "open",
+                "id", "identity", "alias", "conf", "config", "ct", "contracts", "pkg", "ls",
+                "subjects", "net", "new", "use", "do", "try", "can", "state", "info", "why",
+                "status", "tail", "log", "show", "prove", "diff", "overlay", "pwd", "version",
+                "help", "exit", "peers", "connect", "sync", "tables", "table", "q", "find",
+                "index", "open",
             ]
             .into_iter()
             .map(|s| s.to_string())
@@ -313,10 +273,7 @@ impl Completer for DharmaHelper {
                         .map(|s| s.to_string())
                         .collect()
                 } else if tokens.len() >= 2
-                    && matches!(
-                        tokens[1].as_str(),
-                        "schema" | "actions" | "info" | "reactors"
-                    )
+                    && matches!(tokens[1].as_str(), "schema" | "actions" | "info" | "reactors")
                 {
                     self.contract_names(&state)
                 } else {
@@ -352,10 +309,12 @@ impl Completer for DharmaHelper {
                     args
                 }
             }
-            "net" => vec!["peers", "connect", "sync"]
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect(),
+            "net" => {
+                vec!["peers", "connect", "sync"]
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect()
+            }
             "table" => {
                 if tokens.len() == 1 {
                     self.table_names(&state)
@@ -447,10 +406,7 @@ fn auto_unlock(ctx: &mut context::ReplContext) -> Result<(), DharmaError> {
             if let Ok(root) = std::env::current_dir() {
                 if let Ok(cfg) = dharma::config::Config::load(&root) {
                     let key_path = cfg.keystore_path_for(&root, &ctx.data_dir);
-                    eprintln!(
-                        "Identity unlock failed: {err} (key: {})",
-                        key_path.display()
-                    );
+                    eprintln!("Identity unlock failed: {err} (key: {})", key_path.display());
                     return Ok(());
                 }
             }

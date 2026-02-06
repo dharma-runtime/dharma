@@ -18,10 +18,7 @@ pub struct KeyEnvelope {
 impl KeyEnvelope {
     pub fn to_value(&self) -> Value {
         Value::Map(vec![
-            (
-                Value::Text("epk".to_string()),
-                Value::Bytes(self.epk.as_bytes().to_vec()),
-            ),
+            (Value::Text("epk".to_string()), Value::Bytes(self.epk.as_bytes().to_vec())),
             (
                 Value::Text("nonce".to_string()),
                 Value::Bytes(self.nonce.as_bytes().to_vec()),
@@ -37,17 +34,15 @@ impl KeyEnvelope {
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, DharmaError> {
         let value = cbor::ensure_canonical(bytes)?;
         let map = expect_map(&value)?;
-        let epk_bytes = expect_bytes(
-            map_get(map, "epk")
-                .ok_or_else(|| DharmaError::Validation("missing epk".to_string()))?,
-        )?;
-        let nonce_bytes = expect_bytes(
-            map_get(map, "nonce")
-                .ok_or_else(|| DharmaError::Validation("missing nonce".to_string()))?,
-        )?;
-        let ct = expect_bytes(
-            map_get(map, "ct").ok_or_else(|| DharmaError::Validation("missing ct".to_string()))?,
-        )?;
+        let epk_bytes = expect_bytes(map_get(map, "epk").ok_or_else(|| {
+            DharmaError::Validation("missing epk".to_string())
+        })?)?;
+        let nonce_bytes = expect_bytes(map_get(map, "nonce").ok_or_else(|| {
+            DharmaError::Validation("missing nonce".to_string())
+        })?)?;
+        let ct = expect_bytes(map_get(map, "ct").ok_or_else(|| {
+            DharmaError::Validation("missing ct".to_string())
+        })?)?;
         Ok(KeyEnvelope {
             epk: HpkePublicKey::from_slice(&epk_bytes)?,
             nonce: Nonce12::from_slice(&nonce_bytes)?,

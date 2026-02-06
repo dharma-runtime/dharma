@@ -106,8 +106,7 @@ impl RelayState {
     fn apply_plan_define(&mut self, assertion: &AssertionPlaintext) -> Result<(), DharmaError> {
         let map = expect_map(&assertion.body)?;
         let name = expect_text(
-            map_get(map, "name")
-                .ok_or_else(|| DharmaError::Validation("missing name".to_string()))?,
+            map_get(map, "name").ok_or_else(|| DharmaError::Validation("missing name".to_string()))?,
         )?;
         let max_bytes = expect_int(
             map_get(map, "max_bytes")
@@ -135,8 +134,7 @@ impl RelayState {
     fn apply_plan_revoke(&mut self, assertion: &AssertionPlaintext) -> Result<(), DharmaError> {
         let map = expect_map(&assertion.body)?;
         let name = expect_text(
-            map_get(map, "name")
-                .ok_or_else(|| DharmaError::Validation("missing name".to_string()))?,
+            map_get(map, "name").ok_or_else(|| DharmaError::Validation("missing name".to_string()))?,
         )?;
         self.plans.remove(&name);
         Ok(())
@@ -149,8 +147,7 @@ impl RelayState {
                 .ok_or_else(|| DharmaError::Validation("missing domain".to_string()))?,
         )?;
         let plan = expect_text(
-            map_get(map, "plan")
-                .ok_or_else(|| DharmaError::Validation("missing plan".to_string()))?,
+            map_get(map, "plan").ok_or_else(|| DharmaError::Validation("missing plan".to_string()))?,
         )?;
         let expires = parse_optional_int(map_get(map, "expires"))?;
         if domain.is_empty() || plan.is_empty() {
@@ -253,9 +250,7 @@ impl DomainUsage {
     }
 }
 
-fn parse_optional_text(
-    value: Option<&ciborium::value::Value>,
-) -> Result<Option<String>, DharmaError> {
+fn parse_optional_text(value: Option<&ciborium::value::Value>) -> Result<Option<String>, DharmaError> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -377,10 +372,7 @@ fn compute_relay_usage(store: &Store) -> Result<RelayUsage, DharmaError> {
     Ok(usage)
 }
 
-fn domain_name_for_subject(
-    store: &Store,
-    subject: &SubjectId,
-) -> Result<Option<String>, DharmaError> {
+fn domain_name_for_subject(store: &Store, subject: &SubjectId) -> Result<Option<String>, DharmaError> {
     if let Ok(state) = DomainState::load(store, subject) {
         if let Some(domain) = state.domain {
             return Ok(Some(domain));
@@ -431,25 +423,17 @@ pub fn resolve_relay_policy(
     now: i64,
 ) -> Result<RelayPolicy, DharmaError> {
     let Some((domain_subject, domain_name)) = domain_subject_for_subject(store, subject)? else {
-        return Err(DharmaError::Validation(
-            "missing domain ownership".to_string(),
-        ));
+        return Err(DharmaError::Validation("missing domain ownership".to_string()));
     };
     let domain_state = DomainState::load(store, &domain_subject)?;
     let Some(relay_domain) = domain_state.backup_relay_domain else {
-        return Err(DharmaError::Validation(
-            "missing relay domain policy".to_string(),
-        ));
+        return Err(DharmaError::Validation("missing relay domain policy".to_string()));
     };
     let Some(plan_name) = domain_state.backup_relay_plan else {
-        return Err(DharmaError::Validation(
-            "missing relay plan policy".to_string(),
-        ));
+        return Err(DharmaError::Validation("missing relay plan policy".to_string()));
     };
     let Some(relay_state) = RelayState::load(store, &relay_domain)? else {
-        return Err(DharmaError::Validation(
-            "relay domain not found".to_string(),
-        ));
+        return Err(DharmaError::Validation("relay domain not found".to_string()));
     };
     let Some(plan) = relay_state.plans.get(&plan_name).cloned() else {
         return Err(DharmaError::Validation("relay plan missing".to_string()));
@@ -458,9 +442,7 @@ pub fn resolve_relay_policy(
         return Err(DharmaError::Validation("relay grant missing".to_string()));
     };
     if grant.plan != plan.name {
-        return Err(DharmaError::Validation(
-            "relay plan not granted".to_string(),
-        ));
+        return Err(DharmaError::Validation("relay plan not granted".to_string()));
     }
     Ok(RelayPolicy {
         domain: domain_name,

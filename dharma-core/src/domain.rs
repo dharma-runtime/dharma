@@ -93,10 +93,10 @@ impl DomainState {
         self.domain = Some(domain);
         self.owner = Some(owner);
         self.parent = parent;
-        self.ownership_default =
-            ownership_default.or_else(|| Some(atlas_proto::DEFAULT_OWNERSHIP.to_string()));
-        self.transfer_policy =
-            transfer_policy.or_else(|| Some(atlas_proto::DEFAULT_TRANSFER_POLICY.to_string()));
+        self.ownership_default = ownership_default
+            .or_else(|| Some(atlas_proto::DEFAULT_OWNERSHIP.to_string()));
+        self.transfer_policy = transfer_policy
+            .or_else(|| Some(atlas_proto::DEFAULT_TRANSFER_POLICY.to_string()));
         self.members.insert(
             owner,
             DomainMember {
@@ -109,9 +109,7 @@ impl DomainState {
     }
 
     fn apply_invite(&mut self, assertion: &AssertionPlaintext) -> Result<(), DharmaError> {
-        let Some(owner) = self.owner else {
-            return Ok(());
-        };
+        let Some(owner) = self.owner else { return Ok(()); };
         if assertion.header.auth.as_bytes() != owner.as_bytes() {
             return Ok(());
         }
@@ -157,9 +155,7 @@ impl DomainState {
     }
 
     fn apply_approve(&mut self, assertion: &AssertionPlaintext) -> Result<(), DharmaError> {
-        let Some(owner) = self.owner else {
-            return Ok(());
-        };
+        let Some(owner) = self.owner else { return Ok(()); };
         if assertion.header.auth.as_bytes() != owner.as_bytes() {
             return Ok(());
         }
@@ -185,9 +181,7 @@ impl DomainState {
     }
 
     fn apply_revoke(&mut self, assertion: &AssertionPlaintext) -> Result<(), DharmaError> {
-        let Some(owner) = self.owner else {
-            return Ok(());
-        };
+        let Some(owner) = self.owner else { return Ok(()); };
         if assertion.header.auth.as_bytes() != owner.as_bytes() {
             return Ok(());
         }
@@ -218,9 +212,7 @@ impl DomainState {
     }
 
     fn apply_policy(&mut self, assertion: &AssertionPlaintext) -> Result<(), DharmaError> {
-        let Some(owner) = self.owner else {
-            return Ok(());
-        };
+        let Some(owner) = self.owner else { return Ok(()); };
         if assertion.header.auth.as_bytes() != owner.as_bytes() {
             return Ok(());
         }
@@ -242,9 +234,7 @@ impl DomainState {
     }
 
     fn apply_freeze(&mut self, assertion: &AssertionPlaintext) -> Result<(), DharmaError> {
-        let Some(owner) = self.owner else {
-            return Ok(());
-        };
+        let Some(owner) = self.owner else { return Ok(()); };
         if assertion.header.auth.as_bytes() != owner.as_bytes() {
             return Ok(());
         }
@@ -253,9 +243,7 @@ impl DomainState {
     }
 
     fn apply_unfreeze(&mut self, assertion: &AssertionPlaintext) -> Result<(), DharmaError> {
-        let Some(owner) = self.owner else {
-            return Ok(());
-        };
+        let Some(owner) = self.owner else { return Ok(()); };
         if assertion.header.auth.as_bytes() != owner.as_bytes() {
             return Ok(());
         }
@@ -266,9 +254,7 @@ impl DomainState {
     }
 
     fn apply_compromised(&mut self, assertion: &AssertionPlaintext) -> Result<(), DharmaError> {
-        let Some(owner) = self.owner else {
-            return Ok(());
-        };
+        let Some(owner) = self.owner else { return Ok(()); };
         if assertion.header.auth.as_bytes() != owner.as_bytes() {
             return Ok(());
         }
@@ -328,9 +314,7 @@ fn parse_text_list(
     Ok(set.into_iter().collect())
 }
 
-fn parse_optional_text(
-    value: Option<&ciborium::value::Value>,
-) -> Result<Option<String>, DharmaError> {
+fn parse_optional_text(value: Option<&ciborium::value::Value>) -> Result<Option<String>, DharmaError> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -413,14 +397,8 @@ mod tests {
         let subject = SubjectId::from_bytes([10u8; 32]);
 
         let genesis_body = Value::Map(vec![
-            (
-                Value::Text("domain".to_string()),
-                Value::Text("corp.acme".to_string()),
-            ),
-            (
-                Value::Text("owner".to_string()),
-                Value::Bytes(owner_id.as_bytes().to_vec()),
-            ),
+            (Value::Text("domain".to_string()), Value::Text("corp.acme".to_string())),
+            (Value::Text("owner".to_string()), Value::Bytes(owner_id.as_bytes().to_vec())),
         ]);
         let genesis_id = append_domain_assertion(
             env,
@@ -434,10 +412,7 @@ mod tests {
         );
 
         let invite_body = Value::Map(vec![
-            (
-                Value::Text("target".to_string()),
-                Value::Bytes(member_id.as_bytes().to_vec()),
-            ),
+            (Value::Text("target".to_string()), Value::Bytes(member_id.as_bytes().to_vec())),
             (
                 Value::Text("roles".to_string()),
                 Value::Array(vec![Value::Text("member".to_string())]),
@@ -460,10 +435,7 @@ mod tests {
         );
 
         let approve_body = Value::Map(vec![
-            (
-                Value::Text("target".to_string()),
-                Value::Bytes(member_id.as_bytes().to_vec()),
-            ),
+            (Value::Text("target".to_string()), Value::Bytes(member_id.as_bytes().to_vec())),
             (
                 Value::Text("roles".to_string()),
                 Value::Array(vec![Value::Text("member".to_string())]),
@@ -505,14 +477,8 @@ mod tests {
         let subject = SubjectId::from_bytes([11u8; 32]);
 
         let genesis_body = Value::Map(vec![
-            (
-                Value::Text("domain".to_string()),
-                Value::Text("corp.acme".to_string()),
-            ),
-            (
-                Value::Text("owner".to_string()),
-                Value::Bytes(owner_id.as_bytes().to_vec()),
-            ),
+            (Value::Text("domain".to_string()), Value::Text("corp.acme".to_string())),
+            (Value::Text("owner".to_string()), Value::Bytes(owner_id.as_bytes().to_vec())),
         ]);
         let genesis_id = append_domain_assertion(
             env,
@@ -526,10 +492,7 @@ mod tests {
         );
 
         let approve_body = Value::Map(vec![
-            (
-                Value::Text("target".to_string()),
-                Value::Bytes(member_id.as_bytes().to_vec()),
-            ),
+            (Value::Text("target".to_string()), Value::Bytes(member_id.as_bytes().to_vec())),
             (
                 Value::Text("roles".to_string()),
                 Value::Array(vec![Value::Text("member".to_string())]),
@@ -551,10 +514,9 @@ mod tests {
             approve_body,
         );
 
-        let revoke_body = Value::Map(vec![(
-            Value::Text("target".to_string()),
-            Value::Bytes(member_id.as_bytes().to_vec()),
-        )]);
+        let revoke_body = Value::Map(vec![
+            (Value::Text("target".to_string()), Value::Bytes(member_id.as_bytes().to_vec())),
+        ]);
         let _revoke_id = append_domain_assertion(
             env,
             subject,
@@ -582,14 +544,8 @@ mod tests {
         let subject = SubjectId::from_bytes([12u8; 32]);
 
         let genesis_body = Value::Map(vec![
-            (
-                Value::Text("domain".to_string()),
-                Value::Text("corp.acme".to_string()),
-            ),
-            (
-                Value::Text("owner".to_string()),
-                Value::Bytes(owner_id.as_bytes().to_vec()),
-            ),
+            (Value::Text("domain".to_string()), Value::Text("corp.acme".to_string())),
+            (Value::Text("owner".to_string()), Value::Bytes(owner_id.as_bytes().to_vec())),
         ]);
         let genesis_id = append_domain_assertion(
             env,
@@ -603,10 +559,7 @@ mod tests {
         );
 
         let approve_body = Value::Map(vec![
-            (
-                Value::Text("target".to_string()),
-                Value::Bytes(member_id.as_bytes().to_vec()),
-            ),
+            (Value::Text("target".to_string()), Value::Bytes(member_id.as_bytes().to_vec())),
             (
                 Value::Text("roles".to_string()),
                 Value::Array(vec![Value::Text("member".to_string())]),
@@ -615,10 +568,7 @@ mod tests {
                 Value::Text("scopes".to_string()),
                 Value::Array(vec![Value::Text("read".to_string())]),
             ),
-            (
-                Value::Text("expires".to_string()),
-                Value::Integer(10.into()),
-            ),
+            (Value::Text("expires".to_string()), Value::Integer(10.into())),
         ]);
         let _approve_id = append_domain_assertion(
             env,
