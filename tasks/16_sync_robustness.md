@@ -4,6 +4,11 @@
 Improve the synchronization protocol to handle large frontiers efficiently.
 Avoid sending the entire list of tips in the `Inv` message.
 
+## ADR Dependency (DHA-55)
+- Reference: `dev_docs/adr/ADR-0071-runtime-storage-migration.md`
+- Risk register: `dev_docs/adr/ADR-0071-risk-register.md`
+- Any sync path changes must preserve deterministic replay semantics and follow ADR retryability/error classification.
+
 ## Why
 - **Bandwidth:** Sending 1000 tips for a hot subject is wasteful.
 - **Latency:** Large messages block the connection.

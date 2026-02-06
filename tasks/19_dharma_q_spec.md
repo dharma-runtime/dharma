@@ -3,6 +3,11 @@
 ## Architecture
 DHARMA-Q is an **embedded module** split into two layers to maintain the <1MB Kernel constraint.
 
+## ADR Dependency (DHA-55)
+- Reference: `dev_docs/adr/ADR-0071-runtime-storage-migration.md`
+- Risk register: `dev_docs/adr/ADR-0071-risk-register.md`
+- Query/storage design must honor ADR consistency boundaries (strong OLTP path vs eventual analytics path).
+
 1.  **Engine (`dharma-core`):** Storage, Indexing, Execution. (Binary safe).
 2.  **Language (`dharma-cli`):** Text Parsing, Planning. (String heavy).
 

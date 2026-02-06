@@ -4,6 +4,11 @@
 Provide one DHARMA-Q table per contract (per lens) containing the **current state** for each subject,
 auto-created and auto-updated, and queryable as the default “NOW” view.
 
+## ADR Dependency (DHA-55)
+- Reference: `dev_docs/adr/ADR-0071-runtime-storage-migration.md`
+- Risk register: `dev_docs/adr/ADR-0071-risk-register.md`
+- Contract table freshness and update behavior must align with ADR OLTP/analytics consistency guarantees.
+
 ## Requirements
 - **One table per contract per lens** (e.g. `std.wrk.task@v1`, `std.wrk.task@v2`).
 - **One row per subject** representing the latest derived state for that contract.

@@ -3,6 +3,11 @@
 ## Objective
 Adopt the README storage model: a global append-only object store plus derived subject views.
 
+## ADR Dependency (DHA-55)
+- Reference: `dev_docs/adr/ADR-0071-runtime-storage-migration.md`
+- Risk register: `dev_docs/adr/ADR-0071-risk-register.md`
+- This task must align with the ADR Storage SPI contract and keep canonical object/log artifacts as the source of truth.
+
 ## Requirements
 - Directory layout:
   - data/objects/<object_id>.obj (raw envelope bytes for assertions and artifacts)

@@ -3,6 +3,11 @@
 ## Goal
 Optimize DHARMA-Q to reach the target performance on the benchmark dataset.
 
+## ADR Dependency (DHA-55)
+- Reference: `dev_docs/adr/ADR-0071-runtime-storage-migration.md`
+- Risk register: `dev_docs/adr/ADR-0071-risk-register.md`
+- Optimization work must preserve ADR guarantees for determinism and strong-vs-eventual read behavior.
+
 ## Targets (TBD)
 - Agree on “satisfactory performance” thresholds:
   - max query latency for 100M rows

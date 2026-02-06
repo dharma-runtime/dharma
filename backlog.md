@@ -36,6 +36,7 @@
 - Reproducible build + size budget checks (<1MB) (tasks/12_testing_conformance.md)
 
 ## DHARMA-Q (Roadmap)
+- Architecture baseline: `dev_docs/adr/ADR-0071-runtime-storage-migration.md`
 - Task 49: DHARMA-Q Contract Tables (Live State Index) (tasks/49_dharmaq_contract_tables.md)
 - Task 51: DHARMA-Q Group-By + Aggregations (tasks/51_dharmaq_groupby_aggregates.md)
 - Task 52: DHARMA-Q Benchmark Tool (tasks/52_dharmaq_benchmark_tool.md)

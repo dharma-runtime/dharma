@@ -3,6 +3,11 @@
 ## Goal
 Add GROUP BY and aggregate functions to DHARMA-Q query execution.
 
+## ADR Dependency (DHA-55)
+- Reference: `dev_docs/adr/ADR-0071-runtime-storage-migration.md`
+- Risk register: `dev_docs/adr/ADR-0071-risk-register.md`
+- Aggregation routing and consistency expectations must align with ADR analytics-store eventual consistency model.
+
 ## Scope
 - Aggregates: count, sum, min, max, avg
 - Group-by on a single column initially (extendable to multiple columns)

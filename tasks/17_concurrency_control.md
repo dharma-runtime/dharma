@@ -3,6 +3,11 @@
 ## Goal
 Prevent data corruption when multiple DHARMA processes (e.g., REPL + Sync Daemon) access the same data directory.
 
+## ADR Dependency (DHA-55)
+- Reference: `dev_docs/adr/ADR-0071-runtime-storage-migration.md`
+- Risk register: `dev_docs/adr/ADR-0071-risk-register.md`
+- Locking/serialization behavior must remain compatible with ADR snapshot isolation and rollback objectives.
+
 ## Why
 - **Safety:** `fs::write` is not atomic across processes for complex updates (index + object).
 - **UX:** Users might run `dh repl` while `dhd` is running.
