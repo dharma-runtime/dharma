@@ -469,12 +469,25 @@ fn handle_sync_object_ingest_result(
         }
         Err(IngestError::Validation(reason)) => {
             let envelope_id = crate::crypto::envelope_id(&obj.bytes);
+            pending_get.remove(&obj.id);
+            pending_get.remove(&ObjectRef::Envelope(envelope_id));
+            pending_subjects.remove(&obj.id);
             warn!(
                 object_id = %object_ref_hex(&obj.id),
                 envelope_id = %envelope_id.to_hex(),
                 reason = %reason,
                 "peer sent invalid object"
             );
+            if is_relay_mode && is_relay_admission_rejection(&reason) {
+                log_sync(
+                    options,
+                    format!(
+                        "sync: relay rejected obj {} ({reason})",
+                        object_ref_hex(&obj.id)
+                    ),
+                );
+                return Ok(());
+            }
             return Err(DharmaError::Validation(
                 "peer sent invalid object".to_string(),
             ));
@@ -524,14 +537,19 @@ fn is_graceful_close(msg: &str) -> bool {
         || msg.contains("connection aborted")
 }
 
+fn is_relay_admission_rejection(reason: &str) -> bool {
+    reason.starts_with("relay policy:")
+        || reason.starts_with("relay auth:")
+        || reason.starts_with("relay usage:")
+        || reason == "relay identity not authorized for relay domain"
+        || reason == "relay quota exceeded"
+        || reason == "relay object quota exceeded"
+}
+
 fn log_sync(options: &SyncOptions, msg: impl Into<String>) {
     let msg = msg.into();
     if options.verbose {
-        let info_enabled = tracing::enabled!(tracing::Level::INFO);
         info!(message = %msg, "sync event");
-        if !info_enabled {
-            eprintln!("{msg}");
-        }
     }
     if let Some(trace) = &options.trace {
         if let Ok(mut guard) = trace.lock() {
@@ -1227,6 +1245,26 @@ mod tests {
             &Subscriptions::all(),
         );
         assert_eq!(missing, vec![ObjectRef::Assertion(overlay)]);
+    }
+
+    #[test]
+    fn relay_admission_rejection_classifies_expected_errors() {
+        assert!(is_relay_admission_rejection(
+            "relay policy: validation error: missing domain ownership"
+        ));
+        assert!(is_relay_admission_rejection("relay auth: unavailable"));
+        assert!(is_relay_admission_rejection("relay usage: io error"));
+        assert!(is_relay_admission_rejection(
+            "relay identity not authorized for relay domain"
+        ));
+        assert!(is_relay_admission_rejection("relay quota exceeded"));
+        assert!(is_relay_admission_rejection("relay object quota exceeded"));
+    }
+
+    #[test]
+    fn relay_admission_rejection_ignores_non_policy_errors() {
+        assert!(!is_relay_admission_rejection("invalid signature"));
+        assert!(!is_relay_admission_rejection("envelope hash mismatch"));
     }
 
     #[test]

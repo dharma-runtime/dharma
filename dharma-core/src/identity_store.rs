@@ -13,6 +13,7 @@ use crate::types::SubjectId;
 use ciborium::value::Value;
 use rand_core::{OsRng, RngCore};
 use std::path::PathBuf;
+use tracing::warn;
 
 pub const IDENTITY_DHARMA: &str = "identity.dharma";
 pub const IDENTITY_KEY: &str = "identity.key";
@@ -277,7 +278,7 @@ pub fn load_identity<E: Env>(env: &E, passphrase: &str) -> Result<IdentityState,
         let blob = env.read(&path)?;
         if let Ok(keystore) = decrypt_key(&blob, passphrase) {
             if keystore.identity.as_bytes() != subject_id.as_bytes() {
-                eprintln!("Warning: identity mismatch between identity.dharma and identity.key");
+                warn!("identity mismatch between identity.dharma and identity.key");
             }
             return Ok(IdentityState::from_keystore(keystore));
         }

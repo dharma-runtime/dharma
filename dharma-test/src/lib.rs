@@ -1743,7 +1743,7 @@ fn sync_pair_real(
             ad_store: None,
             local_subs: None,
             verbose: false,
-            exit_on_idle: true,
+            exit_on_idle: false,
             trace: None,
         };
         ready_a.fetch_add(1, Ordering::SeqCst);
@@ -1776,7 +1776,7 @@ fn sync_pair_real(
             ad_store: None,
             local_subs: None,
             verbose: false,
-            exit_on_idle: true,
+            exit_on_idle: false,
             trace: None,
         };
         ready_b.fetch_add(1, Ordering::SeqCst);
@@ -1795,10 +1795,10 @@ fn sync_pair_real(
     });
 
     let deadline = Instant::now() + timeout;
-    let mut timed_out = false;
+    let mut sync_result: Result<(), String> = Ok(());
     while ready.load(Ordering::SeqCst) < 2 {
         if Instant::now() >= deadline {
-            timed_out = true;
+            sync_result = Err("sync timeout".to_string());
             break;
         }
         if hub.has_pending_between(a.id, b.id) || hub.has_pending_between(b.id, a.id) {
@@ -1810,17 +1810,18 @@ fn sync_pair_real(
 
     let quiet = Duration::from_millis(50);
     let mut quiet_since: Option<Instant> = None;
-    if !timed_out {
+    if sync_result.is_ok() {
         loop {
             if Instant::now() >= deadline {
-                timed_out = true;
+                sync_result = Err("sync timeout".to_string());
                 break;
             }
-                if log_stale(Duration::from_secs(10)) {
-                control.close();
-                return Err("no activity for 5s".to_string());
+            if log_stale(Duration::from_secs(10)) {
+                sync_result = Err("no activity for 10s".to_string());
+                break;
             }
-            let pending = hub.has_pending_between(a.id, b.id) || hub.has_pending_between(b.id, a.id);
+            let pending =
+                hub.has_pending_between(a.id, b.id) || hub.has_pending_between(b.id, a.id);
             if pending {
                 touch_log();
                 quiet_since = None;
@@ -1835,31 +1836,20 @@ fn sync_pair_real(
         }
     }
     control.close();
-    let join_grace = std::cmp::max(Duration::from_millis(200), timeout / 4);
-    let join_deadline = Instant::now() + join_grace;
+    let join_deadline = Instant::now() + timeout;
     while !thread_a.is_finished() || !thread_b.is_finished() {
         if Instant::now() >= join_deadline {
-            timed_out = true;
-            break;
-        }
-            if log_stale(Duration::from_secs(10)) {
-            return Err("no activity for 5s".to_string());
-        }
-        if hub.has_pending_between(a.id, b.id) || hub.has_pending_between(b.id, a.id) {
-            touch_log();
+            return Err(sync_result
+                .err()
+                .unwrap_or_else(|| "sync timeout".to_string()));
         }
         thread::yield_now();
     }
-    if !thread_a.is_finished() || !thread_b.is_finished() {
-        return Err("sync timeout".to_string());
-    }
     let res_a = thread_a.join().map_err(|_| "sync thread A failed".to_string())?;
-    res_a?;
     let res_b = thread_b.join().map_err(|_| "sync thread B failed".to_string())?;
+    sync_result?;
+    res_a?;
     res_b?;
-    if timed_out {
-        return Err("sync timeout".to_string());
-    }
     Ok(())
 }
 
