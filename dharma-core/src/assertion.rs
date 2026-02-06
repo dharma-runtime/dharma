@@ -1,6 +1,7 @@
 use crate::cbor;
 use crate::crypto;
 use crate::error::DharmaError;
+use crate::assertion_types::{META_OVERLAY, META_SIGNER};
 use crate::types::{AssertionId, ContractId, IdentityKey, SchemaId, SubjectId};
 use crate::value::{expect_array, expect_bytes, expect_int, expect_map, expect_text, expect_uint, map_get};
 use ciborium::value::Value;
@@ -144,7 +145,7 @@ pub fn is_overlay(header: &AssertionHeader) -> bool {
     };
     for (key, value) in entries {
         if let Value::Text(name) = key {
-            if name == "overlay" {
+            if name == META_OVERLAY {
                 return matches!(value, Value::Bool(true));
             }
         }
@@ -157,9 +158,9 @@ pub fn add_signer_meta(meta: Option<Value>, signer: &SubjectId) -> Option<Value>
         Some(Value::Map(entries)) => entries,
         _ => Vec::new(),
     };
-    entries.retain(|(key, _)| !matches!(key, Value::Text(name) if name == "signer"));
+    entries.retain(|(key, _)| !matches!(key, Value::Text(name) if name == META_SIGNER));
     entries.push((
-        Value::Text("signer".to_string()),
+        Value::Text(META_SIGNER.to_string()),
         Value::Bytes(signer.as_bytes().to_vec()),
     ));
     Some(Value::Map(entries))
@@ -171,7 +172,7 @@ pub fn signer_from_meta(meta: &Option<Value>) -> Option<SubjectId> {
     };
     for (key, value) in entries {
         if let Value::Text(name) = key {
-            if name == "signer" {
+            if name == META_SIGNER {
                 if let Value::Bytes(bytes) = value {
                     if let Ok(subject) = SubjectId::from_slice(bytes) {
                         return Some(subject);

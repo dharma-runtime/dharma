@@ -10,15 +10,13 @@ use crate::types::{ContractId, HpkePublicKey, IdentityKey, SchemaId, SubjectId};
 use crate::value::{expect_array, expect_bytes, expect_int, expect_map, expect_text, map_get};
 use ed25519_dalek::SigningKey;
 
-pub const CORE_GENESIS: &str = "core.genesis";
+pub use crate::assertion_types::{
+    CORE_GENESIS, IAM_DELEGATE, IAM_DELEGATE_REVOKE, IAM_REVOKE, IDENTITY_PROFILE,
+};
 pub const ATLAS_IDENTITY_GENESIS: &str = atlas_proto::ASSERTION_GENESIS;
 pub const ATLAS_IDENTITY_ACTIVATE: &str = atlas_proto::ASSERTION_ACTIVATE;
 pub const ATLAS_IDENTITY_SUSPEND: &str = atlas_proto::ASSERTION_SUSPEND;
 pub const ATLAS_IDENTITY_REVOKE: &str = atlas_proto::ASSERTION_REVOKE;
-pub const IDENTITY_PROFILE: &str = "identity.profile";
-pub const IAM_DELEGATE: &str = "iam.delegate";
-pub const IAM_REVOKE: &str = "iam.revoke";
-pub const IAM_DELEGATE_REVOKE: &str = "iam.delegate.revoke";
 
 #[derive(Clone)]
 pub struct IdentityState {
@@ -548,7 +546,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: subject,
-            typ: "core.genesis".to_string(),
+            typ: CORE_GENESIS.to_string(),
             auth: root_id,
             seq: 1,
             prev: None,
@@ -569,7 +567,7 @@ mod tests {
             1,
             genesis_id,
             genesis_env,
-            "core.genesis",
+            CORE_GENESIS,
             &genesis_bytes,
         )
         .unwrap();
@@ -578,7 +576,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: subject,
-            typ: "iam.delegate".to_string(),
+            typ: IAM_DELEGATE.to_string(),
             auth: root_id,
             seq: 2,
             prev: Some(genesis_id),
@@ -607,7 +605,7 @@ mod tests {
             2,
             delegate_id,
             delegate_env,
-            "iam.delegate",
+            IAM_DELEGATE,
             &delegate_bytes,
         )
         .unwrap();
@@ -626,7 +624,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: subject,
-            typ: "iam.delegate.revoke".to_string(),
+            typ: IAM_DELEGATE_REVOKE.to_string(),
             auth: root_id,
             seq: 3,
             prev: Some(delegate_id),
@@ -651,7 +649,7 @@ mod tests {
             3,
             revoke_id,
             revoke_env,
-            "iam.delegate.revoke",
+            IAM_DELEGATE_REVOKE,
             &revoke_bytes,
         )
         .unwrap();
@@ -670,7 +668,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: subject,
-            typ: "iam.delegate".to_string(),
+            typ: IAM_DELEGATE.to_string(),
             auth: root_id,
             seq: 4,
             prev: Some(revoke_id),
@@ -699,7 +697,7 @@ mod tests {
             4,
             redelegate_id,
             redelegate_env,
-            "iam.delegate",
+            IAM_DELEGATE,
             &redelegate_bytes,
         )
         .unwrap();
@@ -728,7 +726,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: subject,
-            typ: "core.genesis".to_string(),
+            typ: CORE_GENESIS.to_string(),
             auth: root_id,
             seq: 1,
             prev: None,
@@ -749,7 +747,7 @@ mod tests {
             1,
             genesis_id,
             genesis_env,
-            "core.genesis",
+            CORE_GENESIS,
             &genesis_bytes,
         )
         .unwrap();
@@ -758,7 +756,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: subject,
-            typ: "identity.profile".to_string(),
+            typ: IDENTITY_PROFILE.to_string(),
             auth: root_id,
             seq: 2,
             prev: Some(genesis_id),
@@ -783,7 +781,7 @@ mod tests {
             2,
             profile_id,
             profile_env,
-            "identity.profile",
+            IDENTITY_PROFILE,
             &profile_bytes,
         )
         .unwrap();
@@ -795,7 +793,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: subject,
-            typ: "iam.delegate".to_string(),
+            typ: IAM_DELEGATE.to_string(),
             auth: root_id,
             seq: 3,
             prev: Some(profile_id),
@@ -827,7 +825,7 @@ mod tests {
             3,
             delegate_id,
             delegate_env,
-            "iam.delegate",
+            IAM_DELEGATE,
             &delegate_bytes,
         )
         .unwrap();
