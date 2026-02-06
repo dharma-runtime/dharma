@@ -410,7 +410,7 @@ fn handle_sync_object_ingest_result(
     pending_get: &mut HashSet<ObjectRef>,
     pending_subjects: &mut HashMap<ObjectRef, SubjectId>,
     subject_hint: Option<SubjectId>,
-    warn_with_assertion_id: bool,
+    is_relay_mode: bool,
     result: Result<SyncIngestOutcome, IngestError>,
 ) -> Result<(), DharmaError> {
     match result {
@@ -437,7 +437,7 @@ fn handle_sync_object_ingest_result(
                 options,
                 format!("sync: pending {} ({reason})", assertion_id.to_hex()),
             );
-            if warn_with_assertion_id {
+            if is_relay_mode {
                 warn!(
                     assertion_id = %assertion_id.to_hex(),
                     reason = %reason,
@@ -465,9 +465,16 @@ fn handle_sync_object_ingest_result(
             }
         }
         Err(IngestError::Validation(reason)) => {
-            return Err(DharmaError::Validation(format!(
-                "peer sent invalid object: {reason}"
-            )));
+            let envelope_id = crate::crypto::envelope_id(&obj.bytes);
+            warn!(
+                object_id = %object_ref_hex(&obj.id),
+                envelope_id = %envelope_id.to_hex(),
+                reason = %reason,
+                "peer sent invalid object"
+            );
+            return Err(DharmaError::Validation(
+                "peer sent invalid object".to_string(),
+            ));
         }
         Err(IngestError::Dharma(err)) => return Err(err),
         Err(IngestError::Pending(reason)) => {
