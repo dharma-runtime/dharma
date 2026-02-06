@@ -452,7 +452,11 @@ fn is_graceful_close(msg: &str) -> bool {
 fn log_sync(options: &SyncOptions, msg: impl Into<String>) {
     let msg = msg.into();
     if options.verbose {
+        let info_enabled = tracing::enabled!(tracing::Level::INFO);
         info!(message = %msg, "sync event");
+        if !info_enabled {
+            eprintln!("{msg}");
+        }
     }
     if let Some(trace) = &options.trace {
         if let Ok(mut guard) = trace.lock() {

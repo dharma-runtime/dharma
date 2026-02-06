@@ -41,11 +41,14 @@ fn init_tracing(default_directive: &str) {
     let filter = EnvFilter::try_from_env("DHARMA_LOG")
         .or_else(|_| EnvFilter::try_from_default_env())
         .unwrap_or_else(|_| EnvFilter::new(default_directive));
-    let _ = tracing_subscriber::fmt()
+    if let Err(err) = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(true)
         .compact()
-        .try_init();
+        .try_init()
+    {
+        eprintln!("warning: tracing initialization failed: {err}");
+    }
 }
 
 fn run() -> Result<(), DharmaError> {

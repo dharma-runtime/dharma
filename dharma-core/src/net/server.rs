@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use tracing::{info, info_span, warn};
+use tracing::{debug, info, info_span, warn};
 
 struct ConnectionGauge;
 
@@ -141,12 +141,15 @@ fn handle_connection(
     let (session, mut peer) = handshake::server_handshake(&mut stream, &identity)?;
     let claims = verify_peer_identity(store.env(), &peer.subject, &peer.public_key)?;
     peer.verified = claims.is_some();
-    info!(
-        peer_id = %peer.public_key.to_hex(),
-        subject_id = %peer.subject.to_hex(),
-        verified = peer.verified,
-        "handshake complete"
-    );
+    info!(verified = peer.verified, "handshake complete");
+    if options.verbose {
+        debug!(
+            peer_id = %peer.public_key.to_hex(),
+            subject_id = %peer.subject.to_hex(),
+            verified = peer.verified,
+            "handshake identity"
+        );
+    }
     let peer_policy = PeerPolicy::load(store.root());
     if !peer_policy.allows(peer.subject, peer.public_key) {
         warn!(
