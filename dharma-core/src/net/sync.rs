@@ -1145,6 +1145,52 @@ mod tests {
     }
 
     #[test]
+    fn handle_inv_deduplicates_replayed_and_reordered_tips() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::from_root(temp.path());
+        let index = FrontierIndex::default();
+        let subject = SubjectId::from_bytes([13u8; 32]);
+        let a = AssertionId::from_bytes([14u8; 32]);
+        let b = AssertionId::from_bytes([15u8; 32]);
+        let policy = OverlayPolicy::from_str("default deny\n");
+        let claims = crate::net::policy::PeerClaims::default();
+        let access = OverlayAccess::new(&policy, None, false, &claims);
+        let mut pending = HashSet::new();
+
+        let first = Inventory::Subjects(vec![SubjectInventory {
+            sub: subject,
+            frontier: vec![a, a],
+            overlay: Vec::new(),
+            since_seq: None,
+        }]);
+        let first_missing = handle_inv(
+            &first,
+            &store,
+            &index,
+            &mut pending,
+            &access,
+            &Subscriptions::all(),
+        );
+        assert_eq!(first_missing, vec![ObjectRef::Assertion(a)]);
+
+        let replay_and_reorder = Inventory::Subjects(vec![SubjectInventory {
+            sub: subject,
+            frontier: vec![b, a],
+            overlay: Vec::new(),
+            since_seq: None,
+        }]);
+        let second_missing = handle_inv(
+            &replay_and_reorder,
+            &store,
+            &index,
+            &mut pending,
+            &access,
+            &Subscriptions::all(),
+        );
+        assert_eq!(second_missing, vec![ObjectRef::Assertion(b)]);
+    }
+
+    #[test]
     fn classify_assertion_distinguishes_base_and_overlay() {
         let mut rng = StdRng::seed_from_u64(3);
         let (signing_key, _) = crypto::generate_identity_keypair(&mut rng);

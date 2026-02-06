@@ -234,7 +234,10 @@ fn next_nonce(counter: u64) -> [u8; 12] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cbor;
     use crate::types::{ContractId, SchemaId};
+    use ciborium::value::Value;
+    use std::io::{Cursor, Read, Write};
     use std::net::TcpListener;
     use std::thread;
 
@@ -258,12 +261,61 @@ mod tests {
         }
     }
 
+    struct ScriptedStream {
+        read: Cursor<Vec<u8>>,
+        written: Vec<u8>,
+    }
+
+    impl ScriptedStream {
+        fn new(read_bytes: Vec<u8>) -> Self {
+            Self {
+                read: Cursor::new(read_bytes),
+                written: Vec::new(),
+            }
+        }
+    }
+
+    impl Read for ScriptedStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.read.read(buf)
+        }
+    }
+
+    impl Write for ScriptedStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn framed(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        crate::net::codec::write_frame(&mut out, bytes).unwrap();
+        out
+    }
+
     #[test]
     fn plain_frame_roundtrip() {
         let bytes = encode_plain_frame(TYPE_HELLO, &[1, 2, 3]).unwrap();
         let frame = decode_plain_frame(&bytes).unwrap();
         assert_eq!(frame.t, TYPE_HELLO);
         assert_eq!(frame.payload, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn decode_plain_frame_rejects_malformed_cbor() {
+        let err = match decode_plain_frame(&[0xff]) {
+            Ok(_) => panic!("expected malformed cbor to be rejected"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            DharmaError::Cbor(_) | DharmaError::Validation(_) | DharmaError::NonCanonicalCbor
+        ));
     }
 
     #[test]
@@ -295,6 +347,59 @@ mod tests {
         assert_eq!(payload, b"pong");
 
         server.join().unwrap();
+    }
+
+    #[test]
+    fn server_handshake_rejects_invalid_message_order() {
+        let frame = encode_plain_frame(TYPE_AUTH, &[1, 2, 3]).unwrap();
+        let mut stream = ScriptedStream::new(framed(&frame));
+        let identity = make_identity(12);
+        let err = match server_handshake(&mut stream, &identity) {
+            Ok(_) => panic!("expected server handshake to reject auth-first message"),
+            Err(err) => err,
+        };
+        match err {
+            DharmaError::Validation(msg) => assert!(msg.contains("expected hello")),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn client_handshake_rejects_invalid_message_order() {
+        let frame = encode_plain_frame(TYPE_AUTH, &[9, 9, 9]).unwrap();
+        let mut stream = ScriptedStream::new(framed(&frame));
+        let identity = make_identity(13);
+        let err = match client_handshake(&mut stream, &identity) {
+            Ok(_) => panic!("expected client handshake to reject auth-as-welcome"),
+            Err(err) => err,
+        };
+        match err {
+            DharmaError::Validation(msg) => assert!(msg.contains("expected welcome")),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_identity_payload_rejects_crafted_lengths() {
+        let payload = Value::Map(vec![
+            (
+                Value::Text("identity_sub".to_string()),
+                Value::Bytes(vec![1u8; 31]),
+            ),
+            (
+                Value::Text("peer_pk".to_string()),
+                Value::Bytes(vec![2u8; 32]),
+            ),
+        ]);
+        let bytes = cbor::encode_canonical_value(&payload).unwrap();
+        let err = parse_identity_payload(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            DharmaError::InvalidLength {
+                expected: 32,
+                actual: 31
+            }
+        ));
     }
 
     #[test]
