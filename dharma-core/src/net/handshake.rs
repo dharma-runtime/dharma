@@ -153,7 +153,7 @@ pub fn server_handshake(
         PeerAuth {
             subject,
             public_key,
-            verified: true,
+            verified: false,
         },
     ))
 }
@@ -181,6 +181,12 @@ fn decode_plain_frame(bytes: &[u8]) -> Result<PlainFrame, DharmaError> {
     let t = expect_uint(map_get(map, "t").ok_or_else(|| DharmaError::Validation("missing t".to_string()))?)? as u8;
     let payload = expect_bytes(map_get(map, "p").ok_or_else(|| DharmaError::Validation("missing payload".to_string()))?)?;
     Ok(PlainFrame { t, payload })
+}
+
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_decode_plain_frame(bytes: &[u8]) -> Result<(), DharmaError> {
+    decode_plain_frame(bytes).map(|_| ())
 }
 
 struct PlainFrame {
@@ -227,7 +233,7 @@ fn build_aad(t: u8) -> Vec<u8> {
 
 fn next_nonce(counter: u64) -> [u8; 12] {
     let mut nonce = [0u8; 12];
-    nonce[4..].copy_from_slice(&counter.to_be_bytes());
+    nonce[4..].copy_from_slice(&counter.to_le_bytes());
     nonce
 }
 
@@ -278,6 +284,7 @@ mod tests {
             let (mut server_stream, _) = listener.accept().unwrap();
             let (mut session, peer) = server_handshake(&mut server_stream, &server_id).unwrap();
             assert_eq!(peer.subject, expected_client);
+            assert!(!peer.verified);
             let frame = crate::net::codec::read_frame(&mut server_stream).unwrap();
             let (_t, payload) = session.decrypt(&frame).unwrap();
             assert_eq!(payload, b"ping");
@@ -327,5 +334,13 @@ mod tests {
             DharmaError::Crypto(msg) => assert!(msg.contains("nonce counter overflow")),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn next_nonce_uses_little_endian_counter_encoding() {
+        let counter = 0x0102_0304_0506_0708u64;
+        let nonce = next_nonce(counter);
+        assert_eq!(nonce[..4], [0u8; 4]);
+        assert_eq!(nonce[4..], counter.to_le_bytes());
     }
 }

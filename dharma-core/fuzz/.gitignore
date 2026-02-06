@@ -1,0 +1,8 @@
+artifacts
+coverage
+target
+corpus/**
+!corpus/
+!corpus/**/
+!corpus/**/*.cbor
+!corpus/**/*.bin

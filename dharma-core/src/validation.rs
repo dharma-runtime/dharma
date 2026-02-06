@@ -1,4 +1,5 @@
 use crate::assertion::AssertionPlaintext;
+use crate::assertion_types::CORE_MERGE;
 use crate::contract::{ContractEngine, ContractStatus};
 use crate::crypto;
 use crate::error::DharmaError;
@@ -6,6 +7,7 @@ use crate::schema::SchemaManifest;
 use crate::types::{AssertionId, SubjectId};
 use ciborium::value::Value;
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StructuralStatus {
@@ -37,7 +39,7 @@ pub fn structural_validate(
     if !assertion.verify_signature()? {
         return Ok(StructuralStatus::Reject("invalid signature".to_string()));
     }
-    if assertion.header.typ == "core.merge" {
+    if assertion.header.typ == CORE_MERGE {
         if assertion.header.refs.len() < 2 {
             return Ok(StructuralStatus::Reject(
                 "merge requires at least two refs".to_string(),
@@ -147,8 +149,8 @@ pub fn validate_subject(
     let mut accepted = Vec::new();
     let mut pending = Vec::new();
     let mut rejected = Vec::new();
-    let mut accepted_assertions: Vec<AssertionPlaintext> = Vec::new();
-    let mut accepted_map: HashMap<AssertionId, AssertionPlaintext> = HashMap::new();
+    let mut accepted_assertions: Vec<Arc<AssertionPlaintext>> = Vec::new();
+    let mut accepted_map: HashMap<AssertionId, Arc<AssertionPlaintext>> = HashMap::new();
 
     for id in order {
         let assertion = assertions.get(&id).ok_or_else(|| DharmaError::Validation("missing assertion".to_string()))?;
@@ -178,8 +180,9 @@ pub fn validate_subject(
         match result.status {
             ContractStatus::Accept if result.ok => {
                 accepted.push(id);
-                accepted_assertions.push(assertion.clone());
-                accepted_map.insert(id, assertion.clone());
+                let shared_assertion = Arc::new(assertion.clone());
+                accepted_assertions.push(Arc::clone(&shared_assertion));
+                accepted_map.insert(id, shared_assertion);
             }
             ContractStatus::Pending => pending.push(id),
             _ => rejected.push(id),
@@ -191,8 +194,8 @@ pub fn validate_subject(
 
 fn build_context(
     subject: &SubjectId,
-    accepted: &[AssertionPlaintext],
-    accepted_map: &HashMap<AssertionId, AssertionPlaintext>,
+    accepted: &[Arc<AssertionPlaintext>],
+    accepted_map: &HashMap<AssertionId, Arc<AssertionPlaintext>>,
     current: &AssertionPlaintext,
 ) -> Value {
     let accepted_values = accepted
@@ -429,7 +432,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: SubjectId::from_bytes([6u8; 32]),
-            typ: "core.merge".to_string(),
+            typ: CORE_MERGE.to_string(),
             auth: id,
             seq: 2,
             prev: Some(prev_id),
@@ -471,7 +474,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: SubjectId::from_bytes([7u8; 32]),
-            typ: "core.merge".to_string(),
+            typ: CORE_MERGE.to_string(),
             auth: id,
             seq: 2,
             prev: Some(prev_id),

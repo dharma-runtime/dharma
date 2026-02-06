@@ -30,7 +30,7 @@ Delegation is expressed by `iam.delegate` assertions and checked in ingest.
 - Delegates are granted a scope string.
 - Revocations use `iam.revoke` or `iam.delegate.revoke`.
 
-> Note: scopes are currently simple string matching (`all`, `chat`).
+> Note: scopes support `all`, exact match, hierarchical prefixes (for example `finance` matches `finance.approve`), and glob wildcards (`*`, `?`). Legacy `chat` scope still matches actions containing `chat`.
 
 ---
 
@@ -45,4 +45,3 @@ There is no global registry yet. Identities are **local and unverified** by defa
 - Verified handle registry (Atlas)
 - Capability tokens
 - Device key rotation UX
-

@@ -10,15 +10,13 @@ use crate::types::{ContractId, HpkePublicKey, IdentityKey, SchemaId, SubjectId};
 use crate::value::{expect_array, expect_bytes, expect_int, expect_map, expect_text, map_get};
 use ed25519_dalek::SigningKey;
 
-pub const CORE_GENESIS: &str = "core.genesis";
+pub use crate::assertion_types::{
+    CORE_GENESIS, IAM_DELEGATE, IAM_DELEGATE_REVOKE, IAM_REVOKE, IDENTITY_PROFILE,
+};
 pub const ATLAS_IDENTITY_GENESIS: &str = atlas_proto::ASSERTION_GENESIS;
 pub const ATLAS_IDENTITY_ACTIVATE: &str = atlas_proto::ASSERTION_ACTIVATE;
 pub const ATLAS_IDENTITY_SUSPEND: &str = atlas_proto::ASSERTION_SUSPEND;
 pub const ATLAS_IDENTITY_REVOKE: &str = atlas_proto::ASSERTION_REVOKE;
-pub const IDENTITY_PROFILE: &str = "identity.profile";
-pub const IAM_DELEGATE: &str = "iam.delegate";
-pub const IAM_REVOKE: &str = "iam.revoke";
-pub const IAM_DELEGATE_REVOKE: &str = "iam.delegate.revoke";
 
 #[derive(Clone)]
 pub struct IdentityState {
@@ -451,11 +449,77 @@ fn delegate_scope_allows_role(scope: &str, role: &str) -> bool {
 }
 
 fn scope_allows(scope: &str, action: &str) -> bool {
-    match scope {
-        "all" => true,
-        "chat" => action.contains("chat"),
-        _ => false,
+    let scope = scope.trim();
+    let action = action.trim();
+    if scope == "chat" && action.contains("chat") {
+        return true;
     }
+    scope_matches_value(scope, action)
+}
+
+fn scope_matches_value(scope: &str, value: &str) -> bool {
+    if scope.is_empty() || value.is_empty() {
+        return false;
+    }
+    if scope == "all" || scope == "*" {
+        return true;
+    }
+    if scope == value {
+        return true;
+    }
+    if scope_prefix_matches(scope, value) {
+        return true;
+    }
+    has_glob_pattern(scope) && glob_matches(scope, value)
+}
+
+fn scope_prefix_matches(scope: &str, value: &str) -> bool {
+    if value == scope {
+        return true;
+    }
+    value
+        .strip_prefix(scope)
+        .map(|rest| rest.starts_with('.') || rest.starts_with(':') || rest.starts_with('/'))
+        .unwrap_or(false)
+}
+
+fn has_glob_pattern(scope: &str) -> bool {
+    scope.bytes().any(|byte| byte == b'*' || byte == b'?')
+}
+
+fn glob_matches(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
+    let mut p_idx = 0usize;
+    let mut v_idx = 0usize;
+    let mut star_idx: Option<usize> = None;
+    let mut backtrack_v_idx = 0usize;
+
+    while v_idx < value.len() {
+        if p_idx < pattern.len() && (pattern[p_idx] == b'?' || pattern[p_idx] == value[v_idx]) {
+            p_idx += 1;
+            v_idx += 1;
+            continue;
+        }
+        if p_idx < pattern.len() && pattern[p_idx] == b'*' {
+            star_idx = Some(p_idx);
+            p_idx += 1;
+            backtrack_v_idx = v_idx;
+            continue;
+        }
+        if let Some(star) = star_idx {
+            p_idx = star + 1;
+            backtrack_v_idx += 1;
+            v_idx = backtrack_v_idx;
+            continue;
+        }
+        return false;
+    }
+
+    while p_idx < pattern.len() && pattern[p_idx] == b'*' {
+        p_idx += 1;
+    }
+    p_idx == pattern.len()
 }
 
 #[cfg(test)]
@@ -482,7 +546,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: subject,
-            typ: "core.genesis".to_string(),
+            typ: CORE_GENESIS.to_string(),
             auth: root_id,
             seq: 1,
             prev: None,
@@ -503,7 +567,7 @@ mod tests {
             1,
             genesis_id,
             genesis_env,
-            "core.genesis",
+            CORE_GENESIS,
             &genesis_bytes,
         )
         .unwrap();
@@ -512,7 +576,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: subject,
-            typ: "iam.delegate".to_string(),
+            typ: IAM_DELEGATE.to_string(),
             auth: root_id,
             seq: 2,
             prev: Some(genesis_id),
@@ -541,7 +605,7 @@ mod tests {
             2,
             delegate_id,
             delegate_env,
-            "iam.delegate",
+            IAM_DELEGATE,
             &delegate_bytes,
         )
         .unwrap();
@@ -560,7 +624,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: subject,
-            typ: "iam.delegate.revoke".to_string(),
+            typ: IAM_DELEGATE_REVOKE.to_string(),
             auth: root_id,
             seq: 3,
             prev: Some(delegate_id),
@@ -585,7 +649,7 @@ mod tests {
             3,
             revoke_id,
             revoke_env,
-            "iam.delegate.revoke",
+            IAM_DELEGATE_REVOKE,
             &revoke_bytes,
         )
         .unwrap();
@@ -604,7 +668,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: subject,
-            typ: "iam.delegate".to_string(),
+            typ: IAM_DELEGATE.to_string(),
             auth: root_id,
             seq: 4,
             prev: Some(revoke_id),
@@ -633,7 +697,7 @@ mod tests {
             4,
             redelegate_id,
             redelegate_env,
-            "iam.delegate",
+            IAM_DELEGATE,
             &redelegate_bytes,
         )
         .unwrap();
@@ -662,7 +726,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: subject,
-            typ: "core.genesis".to_string(),
+            typ: CORE_GENESIS.to_string(),
             auth: root_id,
             seq: 1,
             prev: None,
@@ -683,7 +747,7 @@ mod tests {
             1,
             genesis_id,
             genesis_env,
-            "core.genesis",
+            CORE_GENESIS,
             &genesis_bytes,
         )
         .unwrap();
@@ -692,7 +756,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: subject,
-            typ: "identity.profile".to_string(),
+            typ: IDENTITY_PROFILE.to_string(),
             auth: root_id,
             seq: 2,
             prev: Some(genesis_id),
@@ -717,7 +781,7 @@ mod tests {
             2,
             profile_id,
             profile_env,
-            "identity.profile",
+            IDENTITY_PROFILE,
             &profile_bytes,
         )
         .unwrap();
@@ -729,7 +793,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: subject,
-            typ: "iam.delegate".to_string(),
+            typ: IAM_DELEGATE.to_string(),
             auth: root_id,
             seq: 3,
             prev: Some(profile_id),
@@ -761,12 +825,29 @@ mod tests {
             3,
             delegate_id,
             delegate_env,
-            "iam.delegate",
+            IAM_DELEGATE,
             &delegate_bytes,
         )
         .unwrap();
 
         assert!(has_role(&env, &subject, "finance.viewer").unwrap());
+    }
+
+    #[test]
+    fn scope_allows_supports_prefix_and_glob_matching() {
+        assert!(scope_allows("all", "action.Touch"));
+        assert!(scope_allows("*", "action.Touch"));
+        assert!(scope_allows("action.Touch", "action.Touch"));
+        assert!(scope_allows("action", "action.Touch"));
+        assert!(scope_allows("finance", "finance.approve"));
+        assert!(scope_allows("finance.*", "finance.approve"));
+        assert!(scope_allows("finance.?", "finance.a"));
+        assert!(scope_allows("chat", "channel.chat.send"));
+
+        assert!(!scope_allows("", "action.Touch"));
+        assert!(!scope_allows("fin", "finance.approve"));
+        assert!(!scope_allows("finance.approver", "finance.approve"));
+        assert!(!scope_allows("finance.?", "finance.approve"));
     }
 
     #[test]

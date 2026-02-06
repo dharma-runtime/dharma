@@ -1,0 +1,74 @@
+[package]
+name = "dharma-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dharma-core]
+path = ".."
+features = ["fuzzing"]
+
+[[bin]]
+name = "cbor_ensure_canonical"
+path = "fuzz_targets/cbor_ensure_canonical.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cbor_decode_value"
+path = "fuzz_targets/cbor_decode_value.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "assertion_plaintext_from_cbor"
+path = "fuzz_targets/assertion_plaintext_from_cbor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "assertion_envelope_from_cbor"
+path = "fuzz_targets/assertion_envelope_from_cbor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake_decode_plain_frame"
+path = "fuzz_targets/handshake_decode_plain_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake_session_decrypt"
+path = "fuzz_targets/handshake_session_decrypt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "contract_parse_contract_result"
+path = "fuzz_targets/contract_parse_contract_result.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sync_message_from_cbor"
+path = "fuzz_targets/sync_message_from_cbor.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
