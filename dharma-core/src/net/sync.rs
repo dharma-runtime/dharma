@@ -26,7 +26,6 @@ use crate::types::{AssertionId, EnvelopeId, SchemaId, SubjectId};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tracing::{info, warn};
 
 const TYPE_INV: u8 = 10;
 const TYPE_GET: u8 = 11;
@@ -101,22 +100,13 @@ pub fn sync_loop_with(
             .subject
             .map(|s| s.to_hex())
             .unwrap_or_else(|| "-".to_string());
-        let subs_all = peer_hello.subs.as_ref().map(|s| s.all).unwrap_or(true);
-        if options.verbose {
-            info!(
-                peer_id = %peer_hello.peer_id.to_hex(),
-                subject_id = %subject,
-                subs_all,
-                "sync hello"
-            );
-        }
         log_sync(
             &options,
             format!(
                 "sync: hello peer_id={} subject={} subs_all={}",
                 peer_hello.peer_id.to_hex(),
                 subject,
-                subs_all
+                peer_hello.subs.as_ref().map(|s| s.all).unwrap_or(true)
             ),
         );
     }
@@ -275,11 +265,7 @@ pub fn sync_loop_with(
                                 &options,
                                 format!("sync: pending {} ({reason})", assertion_id.to_hex()),
                             );
-                            warn!(
-                                assertion_id = %assertion_id.to_hex(),
-                                reason = %reason,
-                                "pending object"
-                            );
+                            eprintln!("Pending object {}: {reason}", assertion_id.to_hex());
                         }
                         Err(IngestError::MissingDependency {
                             assertion_id,
@@ -305,7 +291,7 @@ pub fn sync_loop_with(
                         }
                         Err(IngestError::Dharma(err)) => return Err(err),
                         Err(IngestError::Pending(reason)) => {
-                            warn!(reason = %reason, "pending object");
+                            eprintln!("Pending object: {reason}");
                         }
                     }
                 } else {
@@ -322,11 +308,7 @@ pub fn sync_loop_with(
                                 &options,
                                 format!("sync: pending {} ({reason})", assertion_id.to_hex()),
                             );
-                            warn!(
-                                object_id = %object_ref_hex(&obj.id),
-                                reason = %reason,
-                                "pending object"
-                            );
+                            eprintln!("Pending object {}: {reason}", object_ref_hex(&obj.id));
                         }
                         Err(IngestError::MissingDependency {
                             assertion_id,
@@ -343,7 +325,7 @@ pub fn sync_loop_with(
                             }
                         }
                         Err(IngestError::Pending(reason)) => {
-                            warn!(reason = %reason, "pending object");
+                            eprintln!("Pending object: {reason}");
                         }
                         Err(IngestError::Validation(_reason)) => {
                             // If it's not an assertion, it might be a schema or other object.
@@ -360,7 +342,7 @@ pub fn sync_loop_with(
             }
             SyncMessage::Err(err) => {
                 log_sync(&options, format!("sync: recv err {}", err.message));
-                warn!(message = %err.message, "peer error");
+                eprintln!("Peer error: {}", err.message);
             }
             SyncMessage::Ad(ad) => {
                 log_sync(
@@ -454,11 +436,7 @@ fn is_graceful_close(msg: &str) -> bool {
 fn log_sync(options: &SyncOptions, msg: impl Into<String>) {
     let msg = msg.into();
     if options.verbose {
-        let info_enabled = tracing::enabled!(tracing::Level::INFO);
-        info!(message = %msg, "sync event");
-        if !info_enabled {
-            eprintln!("{msg}");
-        }
+        eprintln!("{msg}");
     }
     if let Some(trace) = &options.trace {
         if let Ok(mut guard) = trace.lock() {
