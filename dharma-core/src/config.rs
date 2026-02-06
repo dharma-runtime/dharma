@@ -485,9 +485,25 @@ impl Config {
                 }
             }
             "network.max_connections" => {
-                if let ConfigValue::Int(val) = value {
-                    if val > 0 {
-                        self.network.max_connections = val as usize;
+                match value {
+                    ConfigValue::Int(val) => {
+                        if val <= 0 {
+                            return Err(DharmaError::Config(
+                                "network.max_connections must be a positive integer".to_string(),
+                            ));
+                        }
+                        let parsed = usize::try_from(val).map_err(|_| {
+                            DharmaError::Config(
+                                "network.max_connections is too large for this platform"
+                                    .to_string(),
+                            )
+                        })?;
+                        self.network.max_connections = parsed;
+                    }
+                    _ => {
+                        return Err(DharmaError::Config(
+                            "network.max_connections must be a positive integer".to_string(),
+                        ));
                     }
                 }
             }
@@ -1116,5 +1132,26 @@ peers = ["tcp://a:1", "tcp://b:2"]
         let contents = fs::read_to_string(path).unwrap();
         assert!(contents.contains("[storage]"));
         env::remove_var("DHARMA_CONFIG_PATH");
+    }
+
+    #[test]
+    fn max_connections_rejects_non_positive_value() {
+        let mut cfg = Config::default();
+        let err = cfg
+            .apply_pair("network.max_connections", ConfigValue::Int(0))
+            .unwrap_err();
+        assert!(matches!(err, DharmaError::Config(_)));
+    }
+
+    #[test]
+    fn max_connections_rejects_non_integer_value() {
+        let mut cfg = Config::default();
+        let err = cfg
+            .apply_pair(
+                "network.max_connections",
+                ConfigValue::Str("invalid".to_string()),
+            )
+            .unwrap_err();
+        assert!(matches!(err, DharmaError::Config(_)));
     }
 }

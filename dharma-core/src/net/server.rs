@@ -92,7 +92,7 @@ fn listen_loop(
     listener.set_nonblocking(true)?;
     let max_connections = effective_max_connections(options.max_connections);
     let worker_count = default_worker_count(max_connections);
-    let pool = ConnectionPool::new(worker_count, max_connections);
+    let pool = ConnectionPool::new(worker_count, max_connections)?;
     let limiter = Arc::new(ConnectionLimiter::new(max_connections));
 
     loop {
@@ -118,12 +118,20 @@ fn listen_loop(
                 if let Err(err) = pool.submit(task) {
                     match err {
                         TrySendError::Full(_) => {
-                            eprintln!(
-                                "Connection backlog full (max_connections={max_connections}); dropping connection"
+                            log_server_event(
+                                "warn",
+                                "connection_backlog_full",
+                                "dropping connection because worker backlog is full",
+                                &[("max_connections", max_connections.to_string())],
                             );
                         }
                         TrySendError::Disconnected(_) => {
-                            eprintln!("Connection worker pool is unavailable; dropping connection");
+                            log_server_event(
+                                "error",
+                                "worker_pool_unavailable",
+                                "dropping connection because worker pool is unavailable",
+                                &[("max_connections", max_connections.to_string())],
+                            );
                         }
                     }
                 }
@@ -171,15 +179,48 @@ struct ConnectionPool {
 }
 
 impl ConnectionPool {
-    fn new(worker_count: usize, queue_capacity: usize) -> Self {
+    fn new(worker_count: usize, queue_capacity: usize) -> Result<Self, DharmaError> {
         let (sender, receiver) = mpsc::sync_channel(queue_capacity.max(1));
         let receiver = Arc::new(Mutex::new(receiver));
-        for idx in 0..worker_count.max(1) {
+        let target_workers = worker_count.max(1);
+        let mut started_workers = 0usize;
+        for idx in 0..target_workers {
             let receiver = Arc::clone(&receiver);
             let builder = thread::Builder::new().name(format!("dharma-net-worker-{idx}"));
-            let _ = builder.spawn(move || worker_loop(receiver));
+            match builder.spawn(move || worker_loop(receiver)) {
+                Ok(_) => {
+                    started_workers += 1;
+                }
+                Err(err) => {
+                    log_server_event(
+                        "error",
+                        "worker_spawn_failed",
+                        "failed to spawn connection worker thread",
+                        &[
+                            ("worker_index", idx.to_string()),
+                            ("error", err.to_string()),
+                        ],
+                    );
+                }
+            }
         }
-        Self { sender }
+        if started_workers == 0 {
+            return Err(DharmaError::Network(
+                "failed to spawn connection worker threads".to_string(),
+            ));
+        }
+        if started_workers < target_workers {
+            log_server_event(
+                "warn",
+                "worker_pool_degraded",
+                "started fewer worker threads than requested",
+                &[
+                    ("requested_workers", target_workers.to_string()),
+                    ("started_workers", started_workers.to_string()),
+                ],
+            );
+        }
+        Ok(Self { sender })
     }
 
     fn submit(&self, task: ConnectionTask) -> Result<(), TrySendError<ConnectionTask>> {
@@ -205,13 +246,14 @@ fn worker_loop(receiver: Arc<Mutex<Receiver<ConnectionTask>>>) {
             identity,
             store,
             options,
-            _permit: _,
+            _permit,
         } = task;
         if let Err(err) = handle_connection(stream, identity, store, options) {
             if !is_disconnect(&err) {
                 eprintln!("Connection error: {err}");
             }
         }
+        drop(_permit);
     }
 }
 
@@ -365,6 +407,39 @@ fn is_disconnect(err: &DharmaError) -> bool {
         DharmaError::Cbor(msg) => msg.contains("failed to fill whole buffer"),
         _ => false,
     }
+}
+
+fn log_server_event(level: &str, event: &str, message: &str, fields: &[(&str, String)]) {
+    let mut payload = format!(
+        "{{\"level\":\"{}\",\"component\":\"net.server\",\"event\":\"{}\",\"message\":\"{}\"",
+        json_escape(level),
+        json_escape(event),
+        json_escape(message),
+    );
+    for (key, value) in fields {
+        payload.push_str(",\"");
+        payload.push_str(&json_escape(key));
+        payload.push_str("\":\"");
+        payload.push_str(&json_escape(value));
+        payload.push('"');
+    }
+    payload.push('}');
+    eprintln!("{payload}");
+}
+
+fn json_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 #[cfg(test)]
