@@ -454,6 +454,7 @@ fn boot_and_listen(relay: bool, verbose: bool) -> Result<(), DharmaError> {
     let options = net::server::ServerOptions {
         relay,
         verbose,
+        max_connections: config.network.max_connections,
         ..Default::default()
     };
     net::server::listen_with_options(&addr, identity, store, options)?;

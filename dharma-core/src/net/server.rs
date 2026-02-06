@@ -12,10 +12,14 @@ use crate::store::Store;
 use crate::metrics;
 use std::collections::HashMap;
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+const DEFAULT_MAX_CONNECTIONS: usize = 256;
+const ACCEPT_POLL_DELAY: Duration = Duration::from_millis(10);
 
 struct ConnectionGauge;
 
@@ -38,6 +42,7 @@ pub struct ServerOptions {
     pub ad_store: Arc<Mutex<AdStore>>,
     pub verbose: bool,
     pub trace: Option<Arc<Mutex<Vec<String>>>>,
+    pub max_connections: usize,
 }
 
 impl Default for ServerOptions {
@@ -47,6 +52,7 @@ impl Default for ServerOptions {
             ad_store: Arc::new(Mutex::new(AdStore::new())),
             verbose: false,
             trace: None,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
         }
     }
 }
@@ -63,17 +69,7 @@ pub fn listen_with_options(
 ) -> Result<(), DharmaError> {
     let listener = TcpListener::bind(addr)?;
     println!("Listening on {addr}");
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                spawn_connection(stream, identity.clone(), store.clone(), options.clone());
-            }
-            Err(err) => {
-                eprintln!("Accept error: {err}");
-            }
-        }
-    }
-    Ok(())
+    listen_loop(listener, identity, store, options, None)
 }
 
 pub fn listen_with_shutdown(
@@ -83,18 +79,58 @@ pub fn listen_with_shutdown(
     options: ServerOptions,
     shutdown: Arc<AtomicBool>,
 ) -> Result<(), DharmaError> {
+    listen_loop(listener, identity, store, options, Some(shutdown))
+}
+
+fn listen_loop(
+    listener: TcpListener,
+    identity: IdentityState,
+    store: Store,
+    options: ServerOptions,
+    shutdown: Option<Arc<AtomicBool>>,
+) -> Result<(), DharmaError> {
     listener.set_nonblocking(true)?;
+    let max_connections = effective_max_connections(options.max_connections);
+    let worker_count = default_worker_count(max_connections);
+    let pool = ConnectionPool::new(worker_count, max_connections);
+    let limiter = Arc::new(ConnectionLimiter::new(max_connections));
+
     loop {
-        if shutdown.load(Ordering::SeqCst) {
+        if shutdown_requested(&shutdown) {
             break;
+        }
+        if !limiter.has_capacity() {
+            thread::sleep(ACCEPT_POLL_DELAY);
+            continue;
         }
         match listener.accept() {
             Ok((stream, _)) => {
-                spawn_connection(stream, identity.clone(), store.clone(), options.clone());
+                let Some(permit) = limiter.try_acquire() else {
+                    continue;
+                };
+                let task = ConnectionTask {
+                    stream,
+                    identity: identity.clone(),
+                    store: store.clone(),
+                    options: options.clone(),
+                    _permit: permit,
+                };
+                if let Err(err) = pool.submit(task) {
+                    match err {
+                        TrySendError::Full(_) => {
+                            eprintln!(
+                                "Connection backlog full (max_connections={max_connections}); dropping connection"
+                            );
+                        }
+                        TrySendError::Disconnected(_) => {
+                            eprintln!("Connection worker pool is unavailable; dropping connection");
+                        }
+                    }
+                }
             }
             Err(err) => {
                 if err.kind() == std::io::ErrorKind::WouldBlock {
-                    thread::sleep(Duration::from_millis(10));
+                    thread::sleep(ACCEPT_POLL_DELAY);
                     continue;
                 }
                 eprintln!("Accept error: {err}");
@@ -104,19 +140,137 @@ pub fn listen_with_shutdown(
     Ok(())
 }
 
-fn spawn_connection(
+fn shutdown_requested(shutdown: &Option<Arc<AtomicBool>>) -> bool {
+    shutdown
+        .as_ref()
+        .map(|flag| flag.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+fn effective_max_connections(value: usize) -> usize {
+    value.max(1)
+}
+
+fn default_worker_count(max_connections: usize) -> usize {
+    let suggested = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    suggested.clamp(1, max_connections)
+}
+
+struct ConnectionTask {
     stream: TcpStream,
     identity: IdentityState,
     store: Store,
     options: ServerOptions,
-) {
-    thread::spawn(move || {
+    _permit: ConnectionPermit,
+}
+
+struct ConnectionPool {
+    sender: SyncSender<ConnectionTask>,
+}
+
+impl ConnectionPool {
+    fn new(worker_count: usize, queue_capacity: usize) -> Self {
+        let (sender, receiver) = mpsc::sync_channel(queue_capacity.max(1));
+        let receiver = Arc::new(Mutex::new(receiver));
+        for idx in 0..worker_count.max(1) {
+            let receiver = Arc::clone(&receiver);
+            let builder = thread::Builder::new().name(format!("dharma-net-worker-{idx}"));
+            let _ = builder.spawn(move || worker_loop(receiver));
+        }
+        Self { sender }
+    }
+
+    fn submit(&self, task: ConnectionTask) -> Result<(), TrySendError<ConnectionTask>> {
+        self.sender.try_send(task)
+    }
+}
+
+fn worker_loop(receiver: Arc<Mutex<Receiver<ConnectionTask>>>) {
+    loop {
+        let task = {
+            let guard = match receiver.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            guard.recv()
+        };
+        let task = match task {
+            Ok(task) => task,
+            Err(_) => return,
+        };
+        let ConnectionTask {
+            stream,
+            identity,
+            store,
+            options,
+            _permit: _,
+        } = task;
         if let Err(err) = handle_connection(stream, identity, store, options) {
             if !is_disconnect(&err) {
                 eprintln!("Connection error: {err}");
             }
         }
-    });
+    }
+}
+
+struct ConnectionLimiter {
+    in_flight: AtomicUsize,
+    max_connections: usize,
+}
+
+impl ConnectionLimiter {
+    fn new(max_connections: usize) -> Self {
+        Self {
+            in_flight: AtomicUsize::new(0),
+            max_connections: effective_max_connections(max_connections),
+        }
+    }
+
+    fn has_capacity(&self) -> bool {
+        self.in_flight.load(Ordering::Relaxed) < self.max_connections
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Option<ConnectionPermit> {
+        let mut current = self.in_flight.load(Ordering::Relaxed);
+        loop {
+            if current >= self.max_connections {
+                return None;
+            }
+            match self.in_flight.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Some(ConnectionPermit {
+                        limiter: Arc::clone(self),
+                    });
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn release(&self) {
+        let _ = self
+            .in_flight
+            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |value| {
+                value.checked_sub(1)
+            });
+    }
+}
+
+struct ConnectionPermit {
+    limiter: Arc<ConnectionLimiter>,
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.limiter.release();
+    }
 }
 
 fn handle_connection(
@@ -216,6 +370,7 @@ fn is_disconnect(err: &DharmaError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn disconnect_errors_are_suppressed() {
@@ -230,5 +385,27 @@ mod tests {
         assert!(!is_disconnect(&DharmaError::Validation(
             "bad".to_string()
         )));
+    }
+
+    #[test]
+    fn max_connections_is_clamped_to_at_least_one() {
+        assert_eq!(effective_max_connections(0), 1);
+        assert_eq!(effective_max_connections(64), 64);
+    }
+
+    #[test]
+    fn limiter_blocks_acquire_when_capacity_is_reached() {
+        let limiter = Arc::new(ConnectionLimiter::new(2));
+        let permit_a = limiter.try_acquire().expect("first permit");
+        let permit_b = limiter.try_acquire().expect("second permit");
+        assert!(limiter.try_acquire().is_none());
+        drop(permit_a);
+        assert!(limiter.try_acquire().is_some());
+        drop(permit_b);
+    }
+
+    #[test]
+    fn default_server_options_set_connection_cap() {
+        assert!(ServerOptions::default().max_connections >= 1);
     }
 }
