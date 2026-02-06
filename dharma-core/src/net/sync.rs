@@ -1,4 +1,5 @@
 use crate::assertion::{is_overlay, AssertionPlaintext};
+use crate::assertion_types::ACTION_PREFIX;
 use crate::error::DharmaError;
 use crate::fabric::types::AdStore;
 use crate::identity::IdentityState;
@@ -951,7 +952,7 @@ fn classify_assertion(bytes: &[u8]) -> CqrsKind {
         Ok(assertion) => assertion,
         Err(_) => return CqrsKind::Other,
     };
-    if !assertion.header.typ.starts_with("action.") {
+    if !assertion.header.typ.starts_with(ACTION_PREFIX) {
         return CqrsKind::Other;
     }
     if is_overlay(&assertion.header) {
@@ -1009,6 +1010,7 @@ fn schema_namespace(store: &Store, schema_id: &SchemaId) -> Option<String> {
 mod tests {
     use super::*;
     use crate::assertion::{AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION};
+    use crate::assertion_types::META_OVERLAY;
     use crate::crypto;
     use crate::net::policy::OverlayPolicy;
     use crate::store::state::{append_assertion, append_overlay};
@@ -1027,7 +1029,7 @@ mod tests {
     ) -> Vec<u8> {
         let meta = if overlay {
             Some(Value::Map(vec![(
-                Value::Text("overlay".to_string()),
+                Value::Text(META_OVERLAY.to_string()),
                 Value::Bool(true),
             )]))
         } else {

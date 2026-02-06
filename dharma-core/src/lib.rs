@@ -2,6 +2,7 @@
 #![deny(clippy::float_arithmetic)]
 
 pub mod assertion;
+pub mod assertion_types;
 pub mod builtins;
 pub mod cbor;
 pub mod contract;

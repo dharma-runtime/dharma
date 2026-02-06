@@ -1,4 +1,5 @@
 use crate::assertion::AssertionPlaintext;
+use crate::assertion_types::CORE_MERGE;
 use crate::contract::{ContractEngine, ContractStatus};
 use crate::crypto;
 use crate::error::DharmaError;
@@ -37,7 +38,7 @@ pub fn structural_validate(
     if !assertion.verify_signature()? {
         return Ok(StructuralStatus::Reject("invalid signature".to_string()));
     }
-    if assertion.header.typ == "core.merge" {
+    if assertion.header.typ == CORE_MERGE {
         if assertion.header.refs.len() < 2 {
             return Ok(StructuralStatus::Reject(
                 "merge requires at least two refs".to_string(),
@@ -429,7 +430,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: SubjectId::from_bytes([6u8; 32]),
-            typ: "core.merge".to_string(),
+            typ: CORE_MERGE.to_string(),
             auth: id,
             seq: 2,
             prev: Some(prev_id),
@@ -471,7 +472,7 @@ mod tests {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: SubjectId::from_bytes([7u8; 32]),
-            typ: "core.merge".to_string(),
+            typ: CORE_MERGE.to_string(),
             auth: id,
             seq: 2,
             prev: Some(prev_id),
