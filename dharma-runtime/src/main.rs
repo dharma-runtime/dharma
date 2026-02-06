@@ -1,4 +1,5 @@
 use dharma_core::assertion::AssertionPlaintext;
+use dharma_core::config::Config;
 use dharma_core::env::StdEnv;
 use dharma_core::envelope;
 use dharma_core::identity::IdentityState;
@@ -9,14 +10,15 @@ use dharma_core::net;
 use dharma_core::store::state::list_assertions;
 use dharma_core::store::Store;
 use dharma_core::DharmaError;
-use dharma_core::config::Config;
 use std::fs;
-use std::io::{self, Write};
 #[cfg(feature = "server")]
 use std::io::Read;
+use std::io::{self, Write};
 #[cfg(feature = "server")]
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
 
 const APP_BANNER: &str = r#"       ____                              
   ____╱ ╱ ╱_  ____ __________ ___  ____ _
@@ -27,11 +29,23 @@ const APP_BANNER: &str = r#"       ____
 "#;
 
 fn main() {
-    println!("{APP_BANNER}");
+    init_tracing("dharma_runtime=info,dharma_core=info,warn");
+    info!(banner = APP_BANNER.trim_end(), "runtime banner");
     if let Err(err) = run() {
-        eprintln!("{err}");
+        error!(error = %err, "runtime exited with error");
         std::process::exit(1);
     }
+}
+
+fn init_tracing(default_directive: &str) {
+    let filter = EnvFilter::try_from_env("DHARMA_LOG")
+        .or_else(|_| EnvFilter::try_from_default_env())
+        .unwrap_or_else(|_| EnvFilter::new(default_directive));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .compact()
+        .try_init();
 }
 
 fn run() -> Result<(), DharmaError> {
@@ -45,12 +59,12 @@ fn run() -> Result<(), DharmaError> {
     }
     let identity = load_identity(&env)?;
     let head = mount_self(&env, &identity)?;
-    println!("Identity Unlocked. Head seq: {head}");
+    info!(head_seq = head, "identity unlocked");
     let store = Store::new(&env);
     #[cfg(feature = "server")]
     {
         if let Err(err) = start_metrics_server(config.network.listen_port, store.clone()) {
-            eprintln!("metrics disabled: {err}");
+            tracing::warn!(error = %err, "metrics disabled");
         }
     }
     let addr = format!("0.0.0.0:{}", config.network.listen_port);
@@ -69,7 +83,7 @@ fn start_metrics_server(listen_port: u16, store: Store) -> Result<(), DharmaErro
     };
     let addr = format!("0.0.0.0:{metrics_port}");
     let listener = TcpListener::bind(&addr)?;
-    println!("Metrics listening on {addr}");
+    info!(listen_addr = %addr, "metrics listening");
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             if let Ok(stream) = stream {
@@ -185,7 +199,9 @@ where
 
     let head = head.ok_or_else(|| DharmaError::Validation("No identity assertions".to_string()))?;
     if !head.verify_signature()? {
-        return Err(DharmaError::Validation("Invalid identity head signature".to_string()));
+        return Err(DharmaError::Validation(
+            "Invalid identity head signature".to_string(),
+        ));
     }
     Ok(head_seq)
 }
