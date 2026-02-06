@@ -227,7 +227,7 @@ fn build_aad(t: u8) -> Vec<u8> {
 
 fn next_nonce(counter: u64) -> [u8; 12] {
     let mut nonce = [0u8; 12];
-    nonce[4..].copy_from_slice(&counter.to_be_bytes());
+    nonce[4..].copy_from_slice(&counter.to_le_bytes());
     nonce
 }
 
@@ -327,5 +327,13 @@ mod tests {
             DharmaError::Crypto(msg) => assert!(msg.contains("nonce counter overflow")),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn next_nonce_uses_little_endian_counter_encoding() {
+        let counter = 0x0102_0304_0506_0708u64;
+        let nonce = next_nonce(counter);
+        assert_eq!(nonce[..4], [0u8; 4]);
+        assert_eq!(nonce[4..], counter.to_le_bytes());
     }
 }
