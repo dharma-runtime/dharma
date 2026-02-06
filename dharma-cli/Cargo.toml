@@ -27,6 +27,8 @@ fs2 = "0.4"
 pulldown-cmark = { version = "0.10", optional = true }
 nom = { version = "7", optional = true }
 wasm-encoder = { version = "0.30", optional = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
 default = ["compiler"]

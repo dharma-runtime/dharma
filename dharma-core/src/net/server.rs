@@ -1,21 +1,22 @@
 use crate::config;
 use crate::error::DharmaError;
+use crate::fabric::types::AdStore;
 use crate::identity::IdentityState;
+use crate::metrics;
 use crate::net::handshake;
 use crate::net::peer::verify_peer_identity;
-use crate::fabric::types::AdStore;
 use crate::net::policy::{OverlayAccess, OverlayPolicy};
-use crate::net::trust::PeerPolicy;
 use crate::net::sync::{sync_loop_with, SyncOptions};
+use crate::net::trust::PeerPolicy;
 use crate::store::index::FrontierIndex;
 use crate::store::Store;
-use crate::metrics;
 use std::collections::HashMap;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use tracing::{debug, info, info_span, warn};
 
 struct ConnectionGauge;
 
@@ -62,14 +63,14 @@ pub fn listen_with_options(
     options: ServerOptions,
 ) -> Result<(), DharmaError> {
     let listener = TcpListener::bind(addr)?;
-    println!("Listening on {addr}");
+    info!(listen_addr = %addr, "server listening");
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 spawn_connection(stream, identity.clone(), store.clone(), options.clone());
             }
             Err(err) => {
-                eprintln!("Accept error: {err}");
+                warn!(error = ?err, "accept error");
             }
         }
     }
@@ -97,7 +98,7 @@ pub fn listen_with_shutdown(
                     thread::sleep(Duration::from_millis(10));
                     continue;
                 }
-                eprintln!("Accept error: {err}");
+                warn!(error = ?err, "accept error");
             }
         }
     }
@@ -110,10 +111,16 @@ fn spawn_connection(
     store: Store,
     options: ServerOptions,
 ) {
+    let peer_addr = stream.peer_addr().ok().map(|addr| addr.to_string());
     thread::spawn(move || {
+        let span = info_span!(
+            "server_connection",
+            peer_addr = %peer_addr.as_deref().unwrap_or("unknown")
+        );
+        let _entered = span.enter();
         if let Err(err) = handle_connection(stream, identity, store, options) {
             if !is_disconnect(&err) {
-                eprintln!("Connection error: {err}");
+                warn!(error = %err, "connection error");
             }
         }
     });
@@ -134,13 +141,22 @@ fn handle_connection(
     let (session, mut peer) = handshake::server_handshake(&mut stream, &identity)?;
     let claims = verify_peer_identity(store.env(), &peer.subject, &peer.public_key)?;
     peer.verified = claims.is_some();
-    if peer.verified {
-        println!("Handshake complete. Auth verified.");
-    } else {
-        println!("Handshake complete. Auth unverified.");
+    info!(verified = peer.verified, "handshake complete");
+    if options.verbose {
+        debug!(
+            peer_id = %peer.public_key.to_hex(),
+            subject_id = %peer.subject.to_hex(),
+            verified = peer.verified,
+            "handshake identity"
+        );
     }
     let peer_policy = PeerPolicy::load(store.root());
     if !peer_policy.allows(peer.subject, peer.public_key) {
+        warn!(
+            peer_id = %peer.public_key.to_hex(),
+            subject_id = %peer.subject.to_hex(),
+            "peer denied by policy"
+        );
         return Err(DharmaError::Validation("peer denied by policy".to_string()));
     }
     let mut legacy_keys = HashMap::new();
@@ -150,12 +166,7 @@ fn handle_connection(
     let mut index = FrontierIndex::build(&store, &keys)?;
     let policy = OverlayPolicy::load(store.root());
     let claims = claims.unwrap_or_default();
-    let access = OverlayAccess::new(
-        &policy,
-        Some(peer.subject),
-        peer.verified,
-        &claims,
-    );
+    let access = OverlayAccess::new(&policy, Some(peer.subject), peer.verified, &claims);
     if options.relay {
         let mut relay_keys = crate::keys::Keyring::new();
         sync_loop_with(
@@ -219,7 +230,9 @@ mod tests {
 
     #[test]
     fn disconnect_errors_are_suppressed() {
-        assert!(is_disconnect(&DharmaError::Network("unexpected eof".to_string())));
+        assert!(is_disconnect(&DharmaError::Network(
+            "unexpected eof".to_string()
+        )));
         assert!(is_disconnect(&DharmaError::Io(std::io::Error::new(
             std::io::ErrorKind::ConnectionReset,
             "reset"
@@ -227,8 +240,6 @@ mod tests {
         assert!(is_disconnect(&DharmaError::Cbor(
             "failed to fill whole buffer".to_string()
         )));
-        assert!(!is_disconnect(&DharmaError::Validation(
-            "bad".to_string()
-        )));
+        assert!(!is_disconnect(&DharmaError::Validation("bad".to_string())));
     }
 }
