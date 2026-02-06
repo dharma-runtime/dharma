@@ -5,12 +5,36 @@ use crate::identity;
 use crate::metrics;
 use crate::pdl::schema::DEFAULT_TEXT_LEN;
 use crate::runtime::remote;
+use crate::runtime::vm::VmLimits;
 use crate::types::{ContractId, SubjectId};
-use crate::value::{expect_array, expect_bool, expect_bytes, expect_int, expect_map, expect_text, expect_uint, map_get};
+use crate::value::{
+    expect_array,
+    expect_bool,
+    expect_bytes,
+    expect_int,
+    expect_map,
+    expect_text,
+    expect_uint,
+    map_get,
+};
 use ciborium::value::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use wasmi::{Caller, Engine, Extern, Instance, Linker, Memory, Module, Store, TypedFunc};
-use wasmi::core::Trap;
+use wasmi::{
+    Caller,
+    Config,
+    Engine,
+    Extern,
+    FuelConsumptionMode,
+    Instance,
+    Linker,
+    Memory,
+    Module,
+    Store,
+    StoreLimits,
+    StoreLimitsBuilder,
+    TypedFunc,
+};
+use wasmi::core::{Trap, TrapCode};
 
 const MAX_ROLE_LEN: usize = 128;
 const MAX_PATH_LEN: usize = 256;
@@ -307,11 +331,27 @@ fn role_matches(allowed: &BTreeSet<String>, roles: &[String]) -> bool {
 
 pub struct ContractEngine {
     wasm: Vec<u8>,
+    limits: VmLimits,
 }
 
 impl ContractEngine {
     pub fn new(wasm: Vec<u8>) -> Self {
-        Self { wasm }
+        Self {
+            wasm,
+            limits: VmLimits::default(),
+        }
+    }
+
+    pub fn new_with_limits(wasm: Vec<u8>, limits: VmLimits) -> Self {
+        let mut limits = limits;
+        let defaults = VmLimits::default();
+        if limits.fuel == 0 {
+            limits.fuel = defaults.fuel;
+        }
+        if limits.memory_bytes == 0 {
+            limits.memory_bytes = defaults.memory_bytes;
+        }
+        Self { wasm, limits }
     }
 
     pub fn validate(&self, assertion: &[u8], context: &[u8]) -> Result<ContractResult, DharmaError> {
@@ -350,44 +390,54 @@ impl ContractEngine {
         &self,
         env: Option<&'a dyn Env>,
     ) -> Result<(Store<ContractHost<'a>>, Instance), DharmaError> {
-        let engine = Engine::default();
+        let mut config = Config::default();
+        config.consume_fuel(true);
+        config.fuel_consumption_mode(FuelConsumptionMode::Eager);
+        let engine = Engine::new(&config);
         let cursor = std::io::Cursor::new(&self.wasm);
         let module = Module::new(&engine, cursor)
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
-        let mut store = Store::new(&engine, ContractHost { env });
+            .map_err(map_wasmi_error)?;
+        let limits = StoreLimitsBuilder::new()
+            .memory_size(self.limits.memory_bytes)
+            .build();
+        let mut store = Store::new(&engine, ContractHost::new(env, limits));
+        store.limiter(|host| &mut host.limits);
+        store
+            .add_fuel(self.limits.fuel)
+            .map_err(map_fuel_error)?;
         let mut linker = Linker::new(&engine);
         linker
             .func_wrap("env", "has_role", has_role_host)
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+            .map_err(|e| map_wasmi_error(e.into()))?;
         linker
             .func_wrap("env", "read_int", read_int_host)
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+            .map_err(|e| map_wasmi_error(e.into()))?;
         linker
             .func_wrap("env", "read_bool", read_bool_host)
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+            .map_err(|e| map_wasmi_error(e.into()))?;
         linker
             .func_wrap("env", "read_text", read_text_host)
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+            .map_err(|e| map_wasmi_error(e.into()))?;
         linker
             .func_wrap("env", "read_identity", read_identity_host)
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+            .map_err(|e| map_wasmi_error(e.into()))?;
         linker
             .func_wrap("env", "read_subject_ref", read_subject_ref_host)
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+            .map_err(|e| map_wasmi_error(e.into()))?;
         linker
             .func_wrap("env", "subject_id", subject_id_host)
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+            .map_err(|e| map_wasmi_error(e.into()))?;
         linker
             .func_wrap("env", "remote_intersects", remote_intersects_host)
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+            .map_err(|e| map_wasmi_error(e.into()))?;
         linker
             .func_wrap("env", "normalize_text_list", normalize_text_list_host)
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+            .map_err(|e| map_wasmi_error(e.into()))?;
         let instance = linker
             .instantiate(&mut store, &module)
-            .map_err(|e| DharmaError::Contract(e.to_string()))?
+            .map_err(map_wasmi_error)?
             .start(&mut store)
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+            .map_err(map_wasmi_error)?;
         Ok((store, instance))
     }
 
@@ -406,19 +456,19 @@ impl ContractEngine {
 
         let a_ptr = alloc
             .call(&mut store, assertion.len() as i32)
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+            .map_err(|e| map_wasmi_error(e.into()))?;
         write_memory(&memory, &mut store, a_ptr, assertion)?;
         let c_ptr = alloc
             .call(&mut store, context.len() as i32)
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+            .map_err(|e| map_wasmi_error(e.into()))?;
         write_memory(&memory, &mut store, c_ptr, context)?;
 
         let out_ptr = validate
             .call(&mut store, (a_ptr, assertion.len() as i32, c_ptr, context.len() as i32))
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+            .map_err(|e| map_wasmi_error(e.into()))?;
         let out_len = result_len
             .call(&mut store, ())
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+            .map_err(|e| map_wasmi_error(e.into()))?;
         read_memory(&memory, &mut store, out_ptr, out_len)
     }
 
@@ -432,21 +482,28 @@ impl ContractEngine {
 
         let a_ptr = alloc
             .call(&mut store, accepted.len() as i32)
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+            .map_err(|e| map_wasmi_error(e.into()))?;
         write_memory(&memory, &mut store, a_ptr, accepted)?;
 
         let out_ptr = reduce
             .call(&mut store, (a_ptr, accepted.len() as i32))
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+            .map_err(|e| map_wasmi_error(e.into()))?;
         let out_len = result_len
             .call(&mut store, ())
-            .map_err(|e| DharmaError::Contract(e.to_string()))?;
+            .map_err(|e| map_wasmi_error(e.into()))?;
         read_memory(&memory, &mut store, out_ptr, out_len)
     }
 }
 
 struct ContractHost<'a> {
     env: Option<&'a dyn Env>,
+    limits: StoreLimits,
+}
+
+impl<'a> ContractHost<'a> {
+    fn new(env: Option<&'a dyn Env>, limits: StoreLimits) -> Self {
+        Self { env, limits }
+    }
 }
 
 fn has_role_host(
@@ -918,6 +975,27 @@ fn get_memory<T>(instance: &Instance, store: &Store<T>) -> Result<Memory, Dharma
         .ok_or_else(|| DharmaError::Contract("missing memory export".to_string()))
 }
 
+fn map_wasmi_error(err: wasmi::Error) -> DharmaError {
+    match err {
+        wasmi::Error::Trap(trap) if matches!(trap.trap_code(), Some(TrapCode::OutOfFuel)) => {
+            DharmaError::OutOfFuel
+        }
+        wasmi::Error::Store(fuel_err)
+            if matches!(fuel_err, wasmi::errors::FuelError::OutOfFuel) =>
+        {
+            DharmaError::OutOfFuel
+        }
+        other => DharmaError::Contract(other.to_string()),
+    }
+}
+
+fn map_fuel_error(err: wasmi::errors::FuelError) -> DharmaError {
+    match err {
+        wasmi::errors::FuelError::OutOfFuel => DharmaError::OutOfFuel,
+        other => DharmaError::Contract(other.to_string()),
+    }
+}
+
 fn get_func<T, Params, Results>(
     instance: &Instance,
     store: &Store<T>,
@@ -929,7 +1007,7 @@ where
 {
     instance
         .get_typed_func::<Params, Results>(store, name)
-        .map_err(|e| DharmaError::Contract(e.to_string()))
+        .map_err(map_wasmi_error)
 }
 
 fn write_memory<T>(
@@ -1011,6 +1089,26 @@ mod tests {
     #[test]
     fn to_usize_rejects_negative() {
         assert!(super::to_usize(-1).is_err());
+    }
+
+    #[test]
+    fn wasm_contract_fuel_exhausts_on_loop() {
+        let mut limits = VmLimits::default();
+        limits.fuel = 1_000;
+        let engine = ContractEngine::new_with_limits(test_loop_wasm_bytes(), limits);
+        let err = engine.validate(&[1, 2], &[3, 4]).unwrap_err();
+        assert!(matches!(err, DharmaError::OutOfFuel), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn wasm_contract_zero_limits_use_defaults() {
+        let limits = VmLimits {
+            fuel: 0,
+            memory_bytes: 0,
+        };
+        let engine = ContractEngine::new_with_limits(test_wasm_bytes(), limits);
+        let result = engine.validate(&[1, 2], &[3, 4]).unwrap();
+        assert!(result.ok);
     }
 
     #[test]
@@ -1107,6 +1205,35 @@ pub(crate) fn test_wasm_bytes() -> Vec<u8> {
             (i32.store8 (i32.add (local.get $ptr) (i32.const 26)) (i32.const 0x74))
             (global.set $len (i32.const 27))
             (local.get $ptr)
+          )
+        )
+        "#;
+    wat::parse_str(wat).unwrap()
+}
+
+#[cfg(test)]
+fn test_loop_wasm_bytes() -> Vec<u8> {
+    let wat = r#"
+        (module
+          (memory (export "memory") 1)
+          (global $heap (mut i32) (i32.const 64))
+          (func $alloc (export "alloc") (param $size i32) (result i32)
+            (local $ptr i32)
+            (local.set $ptr (global.get $heap))
+            (global.set $heap (i32.add (global.get $heap) (local.get $size)))
+            (local.get $ptr)
+          )
+          (func (export "result_len") (result i32)
+            (i32.const 0)
+          )
+          (func (export "validate") (param i32 i32 i32 i32) (result i32)
+            (loop $spin
+              (br $spin)
+            )
+            (i32.const 0)
+          )
+          (func (export "reduce") (param i32 i32) (result i32)
+            (i32.const 0)
           )
         )
         "#;

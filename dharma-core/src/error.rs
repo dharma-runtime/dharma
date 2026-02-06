@@ -22,6 +22,8 @@ pub enum DharmaError {
     Schema(String),
     #[error("contract error: {0}")]
     Contract(String),
+    #[error("out of fuel")]
+    OutOfFuel,
     #[error("validation error: {0}")]
     Validation(String),
     #[error("network error: {0}")]
