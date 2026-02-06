@@ -451,11 +451,77 @@ fn delegate_scope_allows_role(scope: &str, role: &str) -> bool {
 }
 
 fn scope_allows(scope: &str, action: &str) -> bool {
-    match scope {
-        "all" => true,
-        "chat" => action.contains("chat"),
-        _ => false,
+    let scope = scope.trim();
+    let action = action.trim();
+    if scope == "chat" && action.contains("chat") {
+        return true;
     }
+    scope_matches_value(scope, action)
+}
+
+fn scope_matches_value(scope: &str, value: &str) -> bool {
+    if scope.is_empty() || value.is_empty() {
+        return false;
+    }
+    if scope == "all" || scope == "*" {
+        return true;
+    }
+    if scope == value {
+        return true;
+    }
+    if scope_prefix_matches(scope, value) {
+        return true;
+    }
+    has_glob_pattern(scope) && glob_matches(scope, value)
+}
+
+fn scope_prefix_matches(scope: &str, value: &str) -> bool {
+    if value == scope {
+        return true;
+    }
+    value
+        .strip_prefix(scope)
+        .map(|rest| rest.starts_with('.') || rest.starts_with(':') || rest.starts_with('/'))
+        .unwrap_or(false)
+}
+
+fn has_glob_pattern(scope: &str) -> bool {
+    scope.bytes().any(|byte| byte == b'*' || byte == b'?')
+}
+
+fn glob_matches(pattern: &str, value: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
+    let mut p_idx = 0usize;
+    let mut v_idx = 0usize;
+    let mut star_idx: Option<usize> = None;
+    let mut backtrack_v_idx = 0usize;
+
+    while v_idx < value.len() {
+        if p_idx < pattern.len() && (pattern[p_idx] == b'?' || pattern[p_idx] == value[v_idx]) {
+            p_idx += 1;
+            v_idx += 1;
+            continue;
+        }
+        if p_idx < pattern.len() && pattern[p_idx] == b'*' {
+            star_idx = Some(p_idx);
+            p_idx += 1;
+            backtrack_v_idx = v_idx;
+            continue;
+        }
+        if let Some(star) = star_idx {
+            p_idx = star + 1;
+            backtrack_v_idx += 1;
+            v_idx = backtrack_v_idx;
+            continue;
+        }
+        return false;
+    }
+
+    while p_idx < pattern.len() && pattern[p_idx] == b'*' {
+        p_idx += 1;
+    }
+    p_idx == pattern.len()
 }
 
 #[cfg(test)]
@@ -767,6 +833,23 @@ mod tests {
         .unwrap();
 
         assert!(has_role(&env, &subject, "finance.viewer").unwrap());
+    }
+
+    #[test]
+    fn scope_allows_supports_prefix_and_glob_matching() {
+        assert!(scope_allows("all", "action.Touch"));
+        assert!(scope_allows("*", "action.Touch"));
+        assert!(scope_allows("action.Touch", "action.Touch"));
+        assert!(scope_allows("action", "action.Touch"));
+        assert!(scope_allows("finance", "finance.approve"));
+        assert!(scope_allows("finance.*", "finance.approve"));
+        assert!(scope_allows("finance.?", "finance.a"));
+        assert!(scope_allows("chat", "channel.chat.send"));
+
+        assert!(!scope_allows("", "action.Touch"));
+        assert!(!scope_allows("fin", "finance.approve"));
+        assert!(!scope_allows("finance.approver", "finance.approve"));
+        assert!(!scope_allows("finance.?", "finance.approve"));
     }
 
     #[test]
