@@ -73,6 +73,7 @@ fn run() -> Result<(), DharmaError> {
     let addr = format!("0.0.0.0:{}", config.network.listen_port);
     let options = net::server::ServerOptions {
         relay,
+        max_connections: config.network.max_connections,
         ..Default::default()
     };
     net::server::listen_with_options(&addr, identity, store, options)?;

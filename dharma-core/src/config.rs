@@ -10,6 +10,7 @@ use std::time::Duration;
 
 const DEFAULT_LISTEN_PORT: u16 = 3000;
 const DEFAULT_MAX_PEERS: usize = 50;
+const DEFAULT_MAX_CONNECTIONS: usize = 256;
 const DEFAULT_MAX_FRAME_SIZE: usize = 1_048_576;
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_READ_TIMEOUT_MS: u64 = 5000;
@@ -51,6 +52,7 @@ pub struct NetworkConfig {
     pub listen_port: u16,
     pub peers: Vec<String>,
     pub max_peers: usize,
+    pub max_connections: usize,
     pub max_frame_size: usize,
     pub connect_timeout_ms: u64,
     pub read_timeout_ms: u64,
@@ -163,6 +165,7 @@ impl Default for Config {
                 listen_port: DEFAULT_LISTEN_PORT,
                 peers: Vec::new(),
                 max_peers: DEFAULT_MAX_PEERS,
+                max_connections: DEFAULT_MAX_CONNECTIONS,
                 max_frame_size: DEFAULT_MAX_FRAME_SIZE,
                 connect_timeout_ms: DEFAULT_CONNECT_TIMEOUT_MS,
                 read_timeout_ms: DEFAULT_READ_TIMEOUT_MS,
@@ -254,6 +257,10 @@ impl Config {
         out.push(format!("listen_port = {}", self.network.listen_port));
         out.push(format!("peers = [{}]", format_string_array(&self.network.peers)));
         out.push(format!("max_peers = {}", self.network.max_peers));
+        out.push(format!(
+            "max_connections = {}",
+            self.network.max_connections
+        ));
         out.push(format!("max_frame_size = {}", self.network.max_frame_size));
         out.push(format!(
             "connect_timeout_ms = {}",
@@ -474,6 +481,29 @@ impl Config {
                 if let ConfigValue::Int(val) = value {
                     if val > 0 {
                         self.network.max_peers = val as usize;
+                    }
+                }
+            }
+            "network.max_connections" => {
+                match value {
+                    ConfigValue::Int(val) => {
+                        if val <= 0 {
+                            return Err(DharmaError::Config(
+                                "network.max_connections must be a positive integer".to_string(),
+                            ));
+                        }
+                        let parsed = usize::try_from(val).map_err(|_| {
+                            DharmaError::Config(
+                                "network.max_connections is too large for this platform"
+                                    .to_string(),
+                            )
+                        })?;
+                        self.network.max_connections = parsed;
+                    }
+                    _ => {
+                        return Err(DharmaError::Config(
+                            "network.max_connections must be a positive integer".to_string(),
+                        ));
                     }
                 }
             }
@@ -844,6 +874,7 @@ fn default_config_template() -> String {
         &format!("listen_port = {}", DEFAULT_LISTEN_PORT),
         "peers = []",
         &format!("max_peers = {}", DEFAULT_MAX_PEERS),
+        &format!("max_connections = {}", DEFAULT_MAX_CONNECTIONS),
         &format!("max_frame_size = {}", DEFAULT_MAX_FRAME_SIZE),
         &format!("connect_timeout_ms = {}", DEFAULT_CONNECT_TIMEOUT_MS),
         &format!("read_timeout_ms = {}", DEFAULT_READ_TIMEOUT_MS),
@@ -1068,6 +1099,7 @@ mod tests {
         let text = r#"
 [network]
 listen_port = 4040
+max_connections = 77
 peers = ["tcp://a:1", "tcp://b:2"]
 
 [registry.pins]
@@ -1079,6 +1111,7 @@ peers = ["tcp://a:1", "tcp://b:2"]
             cfg.apply_pair(&key, value).unwrap();
         }
         assert_eq!(cfg.network.listen_port, 4040);
+        assert_eq!(cfg.network.max_connections, 77);
         assert_eq!(cfg.network.peers.len(), 2);
         assert_eq!(
             cfg.registry.pins.get("std.finance").cloned(),
@@ -1086,6 +1119,7 @@ peers = ["tcp://a:1", "tcp://b:2"]
         );
         let rendered = cfg.to_toml_string();
         assert!(rendered.contains("[network]"));
+        assert!(rendered.contains("max_connections"));
         assert!(rendered.contains("max_frame_size"));
     }
 
@@ -1098,5 +1132,26 @@ peers = ["tcp://a:1", "tcp://b:2"]
         let contents = fs::read_to_string(path).unwrap();
         assert!(contents.contains("[storage]"));
         env::remove_var("DHARMA_CONFIG_PATH");
+    }
+
+    #[test]
+    fn max_connections_rejects_non_positive_value() {
+        let mut cfg = Config::default();
+        let err = cfg
+            .apply_pair("network.max_connections", ConfigValue::Int(0))
+            .unwrap_err();
+        assert!(matches!(err, DharmaError::Config(_)));
+    }
+
+    #[test]
+    fn max_connections_rejects_non_integer_value() {
+        let mut cfg = Config::default();
+        let err = cfg
+            .apply_pair(
+                "network.max_connections",
+                ConfigValue::Str("invalid".to_string()),
+            )
+            .unwrap_err();
+        assert!(matches!(err, DharmaError::Config(_)));
     }
 }
