@@ -41,7 +41,10 @@ impl Session {
 
     pub fn encrypt(&mut self, t: u8, payload: &[u8]) -> Result<Vec<u8>, DharmaError> {
         let nonce = next_nonce(self.send_counter);
-        self.send_counter = self.send_counter.wrapping_add(1);
+        let next_counter = self
+            .send_counter
+            .checked_add(1)
+            .ok_or_else(|| DharmaError::Crypto("nonce counter overflow".to_string()))?;
         let aad = build_aad(t);
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&self.send_key));
         let ct = cipher.encrypt(
@@ -51,6 +54,7 @@ impl Session {
                 aad: &aad,
             },
         )?;
+        self.send_counter = next_counter;
         let frame = Value::Map(vec![
             (Value::Text("magic".to_string()), Value::Integer(MAGIC.into())),
             (Value::Text("v".to_string()), Value::Integer(VERSION.into())),
@@ -79,11 +83,15 @@ impl Session {
         let ct = expect_bytes(map_get(map, "ct").ok_or_else(|| DharmaError::Validation("missing ct".to_string()))?)?;
         let aad = build_aad(t);
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&self.recv_key));
+        let next_counter = self
+            .recv_counter
+            .checked_add(1)
+            .ok_or_else(|| DharmaError::Crypto("nonce counter overflow".to_string()))?;
         let pt = cipher.decrypt(
             Nonce::from_slice(&nonce),
             chacha20poly1305::aead::Payload { msg: &ct, aad: &aad },
         )?;
-        self.recv_counter = self.recv_counter.wrapping_add(1);
+        self.recv_counter = next_counter;
         Ok((t, pt))
     }
 }
@@ -286,5 +294,38 @@ mod tests {
         assert_eq!(payload, b"pong");
 
         server.join().unwrap();
+    }
+
+    #[test]
+    fn nonce_counter_overflow_is_rejected() {
+        let mut session = Session {
+            send_key: [0u8; 32],
+            recv_key: [0u8; 32],
+            send_counter: u64::MAX,
+            recv_counter: 0,
+        };
+        let err = session.encrypt(1, b"overflow").unwrap_err();
+        match err {
+            DharmaError::Crypto(msg) => assert!(msg.contains("nonce counter overflow")),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recv_counter_overflow_is_rejected() {
+        let key = [7u8; 32];
+        let mut sender = Session::new(key, key);
+        let mut receiver = Session {
+            send_key: key,
+            recv_key: key,
+            send_counter: 0,
+            recv_counter: u64::MAX,
+        };
+        let frame = sender.encrypt(1, b"ping").unwrap();
+        let err = receiver.decrypt(&frame).unwrap_err();
+        match err {
+            DharmaError::Crypto(msg) => assert!(msg.contains("nonce counter overflow")),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }
