@@ -3,6 +3,11 @@
 ## Goal
 Create a benchmark tool to generate ~100M rows and run 3–4 representative queries.
 
+## ADR Dependency (DHA-55)
+- Reference: `dev_docs/adr/ADR-0071-runtime-storage-migration.md`
+- Risk register: `dev_docs/adr/ADR-0071-risk-register.md`
+- Benchmarks must measure ADR-relevant migration metrics (OLTP latency, analytics lag, and dual-path behavior where applicable).
+
 ## Requirements
 - Deterministic data generator with configurable distributions.
 - Generates datasets for:

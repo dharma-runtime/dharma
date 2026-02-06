@@ -5,6 +5,11 @@ Provide a **transparent dual-path query engine** that automatically chooses betw
 - **Row store (transactional, strongly consistent)** for OLTP-style queries.
 - **Column store (analytical, eventually consistent)** for scans, aggregates, and analytics.
 
+## ADR Dependency (DHA-55)
+- Reference: `dev_docs/adr/ADR-0071-runtime-storage-migration.md`
+- Risk register: `dev_docs/adr/ADR-0071-risk-register.md`
+- This task is the primary implementation path for ADR consistency/storage decisions and must follow ADR rollout/rollback constraints.
+
 Indexes are **declared in DHL** and drive both storage layout and query planning.
 
 ## Motivation

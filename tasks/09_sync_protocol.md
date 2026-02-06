@@ -3,6 +3,11 @@
 ## Objective
 Align sync behavior and peer handling with README DHARMA-SYNC/1.
 
+## ADR Dependency (DHA-55)
+- Reference: `dev_docs/adr/ADR-0071-runtime-storage-migration.md`
+- Risk register: `dev_docs/adr/ADR-0071-risk-register.md`
+- Runtime network/daemon changes in this task must stay within ADR async boundary decisions and retry/error semantics.
+
 ## Requirements
 - Hello/inv/get/obj/err frames include capabilities + suite info.
 - Subscription/interest filtering (avoid gossiping everything).

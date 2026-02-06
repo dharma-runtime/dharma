@@ -3,6 +3,11 @@
 ## Goal
 Split the monolithic `DharmaError` into actionable categories to improve retry logic and user feedback.
 
+## ADR Dependency (DHA-55)
+- Reference: `dev_docs/adr/ADR-0071-runtime-storage-migration.md`
+- Risk register: `dev_docs/adr/ADR-0071-risk-register.md`
+- Error taxonomy must map cleanly to ADR retryable vs fatal vs compensating-action-required classes.
+
 ## Why
 - **Sync Logic:** `NetworkError` should trigger retry. `ValidationError` (bad sig) should ban the peer.
 - **UX:** "IO Error" is useless. "Disk Full" or "Permission Denied" is helpful.
