@@ -1,0 +1,140 @@
+---
+namespace: std.commerce.inventory.batch
+version: 1.0.0
+---
+
+# Commerce Inventory Batch (Physical Lot)
+
+Inventory batches represent physical lots received from suppliers.
+They bind **item + supplier_item + warehouse** with dates and expiry.
+
+## Shelf-life handling (permissive default)
+- If supplier requires min shelf life on receipt and expiry is known:
+  - insufficient shelf life => batch is quarantined
+- If expiry is missing:
+  - batch is allowed but marked `shelf_life_status = Unknown`
+
+## Queries
+
+### Private queries
+#### GetBatch(batch_id)
+Parameters: `$1 = batch_id`
+```dhl
+query GetBatch(batch_id: Ref<std.commerce.inventory.batch>)
+    private
+    dhlq
+    std.commerce.inventory.batch
+    | where subject == $1
+    | take 1
+```
+
+#### ListBatchesByItem(item_id, page)
+Parameters: `$1 = item_id`, `$2 = offset`, `$3 = limit`
+```dhl
+query ListBatchesByItem(item_id: Ref<std.commerce.catalog.item>, offset: Int, limit: Int)
+    private
+    dhlq
+    std.commerce.inventory.batch
+    | where item_id == $1
+    | sort -expected_at
+    | drop $2
+    | take $3
+```
+
+## Code
+
+```dhl
+aggregate InventoryBatch
+    state
+        public external_id: Text(len=64)?
+        public human_ref: Text(len=64)?
+        public item_id: Ref<std.commerce.catalog.item>
+        public supplier_item_id: Ref<std.commerce.procurement.supplier_item>
+        public warehouse_id: Ref<std.commerce.logistics.warehouse>
+        public expected_at: Timestamp?
+        public received_at: Timestamp?
+        public expiry_date: Timestamp?
+        public qty_expected: Decimal(scale=6)?
+        public qty_received: Decimal(scale=6)?
+        public shelf_life_status: Enum(Ok, Unknown, Insufficient) = 'Unknown
+        public shelf_life_unverified: Bool = true
+        public status: Enum(Planned, InTransit, Received, Quarantined, Depleted, Cancelled) = 'Planned
+        public created_at: Timestamp?
+        public updated_at: Timestamp?
+
+action CreateBatch(
+    item_id: Ref<std.commerce.catalog.item>,
+    supplier_item_id: Ref<std.commerce.procurement.supplier_item>,
+    warehouse_id: Ref<std.commerce.logistics.warehouse>,
+    expected_at: Timestamp?,
+    qty_expected: Decimal(scale=6)?,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.created_at == null
+    apply
+        state.item_id = item_id
+        state.supplier_item_id = supplier_item_id
+        state.warehouse_id = warehouse_id
+        state.expected_at = expected_at
+        state.qty_expected = qty_expected
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.status = 'Planned
+        state.created_at = context.timestamp
+        state.updated_at = context.timestamp
+
+action MarkInTransit()
+    validate
+        state.status == 'Planned
+    apply
+        state.status = 'InTransit
+        state.updated_at = context.timestamp
+
+action ReceiveBatch(
+    received_at: Timestamp,
+    qty_received: Decimal(scale=6),
+    expiry_date: Timestamp?,
+    shelf_life_on_receipt_days: Int?,
+    min_shelf_life_on_receipt_days: Int?
+)
+    validate
+        state.status == 'Planned || state.status == 'InTransit
+        qty_received >= 0
+        (min_shelf_life_on_receipt_days == null) || (min_shelf_life_on_receipt_days >= 0)
+        (shelf_life_on_receipt_days == null) || (shelf_life_on_receipt_days >= 0)
+    apply
+        state.received_at = received_at
+        state.qty_received = qty_received
+        state.expiry_date = expiry_date
+        state.status = 'Received
+        state.shelf_life_status = 'Unknown
+        state.shelf_life_unverified = expiry_date == null || shelf_life_on_receipt_days == null
+        if (min_shelf_life_on_receipt_days != null) && (shelf_life_on_receipt_days != null)
+            if shelf_life_on_receipt_days < min_shelf_life_on_receipt_days
+                state.status = 'Quarantined
+                state.shelf_life_status = 'Insufficient
+            else
+                state.shelf_life_status = 'Ok
+                state.shelf_life_unverified = false
+        if (min_shelf_life_on_receipt_days == null) && (shelf_life_on_receipt_days != null)
+            state.shelf_life_status = 'Ok
+            state.shelf_life_unverified = false
+        state.updated_at = context.timestamp
+
+action ReleaseQuarantine()
+    validate
+        state.status == 'Quarantined
+    apply
+        state.status = 'Received
+        state.updated_at = context.timestamp
+
+action CancelBatch()
+    validate
+        state.status != 'Cancelled
+        state.status != 'Received
+    apply
+        state.status = 'Cancelled
+        state.updated_at = context.timestamp
+```

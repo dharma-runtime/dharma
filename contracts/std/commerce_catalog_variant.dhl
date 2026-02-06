@@ -1,0 +1,270 @@
+---
+namespace: std.commerce.catalog.variant
+version: 1.1.0
+---
+
+# Commerce Catalog Variant
+
+Variants are the **commercial offers** customers buy. They are intentionally mutable for catalog management.
+
+## Business meaning
+- A variant defines the promise: unit of measure, offer constraints, and optional base price.
+- Variants are linked to a core **Item** for compliance and availability.
+- Orders must capture a **Variant Snapshot** to lock the promise at purchase time.
+
+## Offer constraints
+- `offer_spec` carries the enforceable constraints used later to match sellables.
+- `forbidden_allergens` is normalized for deterministic comparison.
+
+## Lifecycle rules
+- Variants can be updated while active.
+- Archive is terminal for operational safety.
+
+## Queries
+
+### Public queries
+#### GetVariant(variant_id) — product published + variant active
+Parameters: `$1 = variant_id`
+```dhl
+query GetVariant(variant_id: Ref<std.commerce.catalog.variant>)
+    public
+    dhlq
+    std.commerce.catalog.variant
+    | lj std.commerce.catalog.product on product_id=std.commerce.catalog.product.subject
+    | where std.commerce.catalog.variant.subject == $1,
+            std.commerce.catalog.variant.status == 'Active,
+            std.commerce.catalog.product.status == 'Published
+    | take 1
+```
+
+#### ListVariantsForProduct(product_id)
+Parameters: `$1 = product_id`, `$2 = offset`, `$3 = limit`
+```dhl
+query ListVariantsForProduct(product_id: Ref<std.commerce.catalog.product>, offset: Int, limit: Int)
+    public
+    dhlq
+    std.commerce.catalog.variant
+    | where product_id == $1, status == 'Active
+    | sort designation
+    | drop $2
+    | take $3
+```
+
+#### SearchVariants(q, category_id, option_filters, sort, page)
+Parameters: `$1 = q`, `$2 = category_id`, `$3 = offset`, `$4 = limit`  
+Option filters expand into additional `where` predicates on option fields.  
+Default sort: `-score` (search relevance).
+```dhl
+query SearchVariants(q: Text, category_id: Text(len=64), offset: Int, limit: Int)
+    public
+    dhlq
+    search $1 in std.commerce.catalog.variant.designation,std.commerce.catalog.variant.variant_code fuzz=1
+    | lj std.commerce.catalog.variant on oid=std.commerce.catalog.variant.oid
+    | lj std.commerce.catalog.product on product_id=std.commerce.catalog.product.subject
+    | where std.commerce.catalog.variant.status == 'Active,
+            std.commerce.catalog.product.category_id == $2
+    | sort -score
+    | drop $3
+    | take $4
+```
+
+#### GetVariantAvailabilityHint(variant_id, qty, delivery_area?, bucket_date?)
+Parameters: `$1 = variant_id`, `$2 = qty`, `$3 = delivery_area?`, `$4 = bucket_date?`  
+Uses a time-bucketed availability projection by variant.
+```dhl
+query GetVariantAvailabilityHint(
+    variant_id: Ref<std.commerce.catalog.variant>,
+    qty: Decimal(scale=6),
+    delivery_area: Text(len=64)?,
+    bucket_date: Timestamp?
+)
+    public
+    dhlq
+    std.commerce.catalog.variant_availability
+    | where variant_id == $1, bucket_date == $4
+    | take 1
+```
+
+#### PriceRangeForCategory(category_id, q?)
+Parameters: `$1 = category_id`
+```dhl
+query PriceRangeForCategory(category_id: Text(len=64))
+    public
+    dhlq
+    std.commerce.catalog.variant
+    | lj std.commerce.catalog.product on product_id=std.commerce.catalog.product.subject
+    | where std.commerce.catalog.variant.status == 'Active,
+            std.commerce.catalog.product.category_id == $1
+    | agg min(base_price_minor), max(base_price_minor)
+```
+
+### Private queries
+#### GetVariantAdmin(variant_id)
+Parameters: `$1 = variant_id`
+```dhl
+query GetVariantAdmin(variant_id: Ref<std.commerce.catalog.variant>)
+    private
+    dhlq
+    std.commerce.catalog.variant
+    | where subject == $1
+    | take 1
+```
+
+#### ListVariantsAdmin(product_id?, status?, page)
+Parameters: `$1 = product_id`, `$2 = status`, `$3 = offset`, `$4 = limit`
+```dhl
+query ListVariantsAdmin(
+    product_id: Ref<std.commerce.catalog.product>,
+    status: Enum(Active, Archived),
+    offset: Int,
+    limit: Int
+)
+    private
+    dhlq
+    std.commerce.catalog.variant
+    | where product_id == $1, status == $2
+    | sort -updated_at
+    | drop $3
+    | take $4
+```
+
+#### SearchVariantsAdmin(q, status, offer_spec_fields, price_rule_type, page)
+Parameters: `$1 = q`, `$2 = status`, `$3 = offset`, `$4 = limit`
+```dhl
+query SearchVariantsAdmin(q: Text, status: Enum(Active, Archived), offset: Int, limit: Int)
+    private
+    dhlq
+    search $1 in std.commerce.catalog.variant.designation,std.commerce.catalog.variant.variant_code fuzz=1
+    | lj std.commerce.catalog.variant on oid=std.commerce.catalog.variant.oid
+    | where std.commerce.catalog.variant.status == $2
+    | sort -score
+    | drop $3
+    | take $4
+```
+
+#### VariantsNeedingReview()
+```dhl
+query VariantsNeedingReview
+    private
+    dhlq
+    std.commerce.catalog.variant
+    | where status == 'Active
+    | sel subject, designation, variant_code, updated_at, base_price_minor
+```
+
+## Code
+
+### Types and offer spec
+```dhl
+
+
+
+
+
+
+struct OfferConstraints
+    public designation: Text(len=128)?
+    public origin: Text(len=64)?
+    public aging_min_months: Int?
+    public format: Text(len=64)?
+    public temp_chain: Text(len=16)?
+    public forbidden_allergens: List<Text(len=64)>
+    public allow_equivalent: Bool?
+    public allow_substitution: Bool?
+
+struct OfferSpec
+    public kind: Enum(PhysicalFood, PhysicalGeneric)
+    public constraints: OfferConstraints
+    public extra: Map<Text(len=64), Text(len=256)>?
+```
+
+### Aggregate state
+```dhl
+aggregate Variant
+    state
+        public external_id: Text(len=64)?
+        public human_ref: Text(len=64)?
+        public product_id: Ref<std.commerce.catalog.product>
+        public item_id: Ref<std.commerce.catalog.item>
+        public variant_code: Text(len=64)?
+        public option_values: Map<Text(len=64), Text(len=128)>
+        public uom: Text(len=16)
+        public offer_spec: OfferSpec
+        public designation: Text(len=128)?
+        public base_price_minor: Int?
+        public currency: Currency?
+        public status: Enum(Active, Archived) = 'Active
+        public created_at: Timestamp?
+        public updated_at: Timestamp?
+```
+
+### Actions
+```dhl
+action Create(
+    product_id: Ref<std.commerce.catalog.product>,
+    item_id: Ref<std.commerce.catalog.item>,
+    variant_code: Text(len=64)?,
+    option_values: Map<Text(len=64), Text(len=128)>,
+    uom: Text(len=16),
+    offer_spec: OfferSpec,
+    designation: Text(len=128)?,
+    base_price_minor: Int?,
+    currency: Currency?,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.created_at == null
+    apply
+        state.product_id = product_id
+        state.item_id = item_id
+        state.variant_code = variant_code
+        state.option_values = option_values
+        state.uom = uom
+        state.offer_spec = offer_spec
+        state.offer_spec.constraints.forbidden_allergens.normalize()
+        state.designation = designation
+        state.base_price_minor = base_price_minor
+        state.currency = currency
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.status = 'Active
+        state.created_at = context.timestamp
+        state.updated_at = context.timestamp
+
+action UpdateOffer(
+    option_values: Map<Text(len=64), Text(len=128)>,
+    uom: Text(len=16),
+    offer_spec: OfferSpec,
+    designation: Text(len=128)?,
+    variant_code: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.status == 'Active
+    apply
+        state.option_values = option_values
+        state.uom = uom
+        state.offer_spec = offer_spec
+        state.offer_spec.constraints.forbidden_allergens.normalize()
+        state.designation = designation
+        state.variant_code = variant_code
+        state.human_ref = human_ref
+        state.updated_at = context.timestamp
+
+action UpdatePrice(base_price_minor: Int, currency: Currency)
+    validate
+        state.status == 'Active
+        base_price_minor >= 0
+    apply
+        state.base_price_minor = base_price_minor
+        state.currency = currency
+        state.updated_at = context.timestamp
+
+action Archive()
+    validate
+        state.status != 'Archived
+    apply
+        state.status = 'Archived
+        state.updated_at = context.timestamp
+```

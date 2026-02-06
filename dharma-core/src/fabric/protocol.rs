@@ -42,6 +42,41 @@ pub struct ExecStats {
 
 pub trait FabricDispatcher {
     fn now(&self) -> u64;
+    fn authorize_exec_action(
+        &self,
+        _req: &FabricRequest,
+        _subject: &SubjectId,
+        _action: &str,
+    ) -> Result<(), DharmaError> {
+        Ok(())
+    }
+    fn authorize_exec_query(
+        &self,
+        _req: &FabricRequest,
+        _subject: &SubjectId,
+        _query: &str,
+        _predefined: bool,
+    ) -> Result<(), DharmaError> {
+        Ok(())
+    }
+    fn authorize_query_fast(
+        &self,
+        _req: &FabricRequest,
+        _table: &str,
+        _key: &Value,
+        _query: &str,
+    ) -> Result<(), DharmaError> {
+        Ok(())
+    }
+    fn authorize_query_wide(
+        &self,
+        _req: &FabricRequest,
+        _table: &str,
+        _shard: u32,
+        _query: &str,
+    ) -> Result<(), DharmaError> {
+        Ok(())
+    }
     fn exec_action(&self, req: &FabricRequest, subject: &SubjectId, action: &str, args: &Value) -> Result<FabricResponse, DharmaError>;
     fn exec_query(&self, req: &FabricRequest, subject: &SubjectId, query: &str, params: &Value, predefined: bool) -> Result<FabricResponse, DharmaError>;
     fn query_fast(&self, req: &FabricRequest, table: &str, key: &Value, query: &str) -> Result<FabricResponse, DharmaError>;
@@ -61,6 +96,7 @@ pub fn dispatch<D: FabricDispatcher>(dispatcher: &D, req: &FabricRequest) -> Res
     match &req.op {
         FabricOp::ExecAction { subject, action, args } => {
             req.cap.check_access(Op::Execute, &Scope::Subject(*subject))?;
+            dispatcher.authorize_exec_action(req, subject, action)?;
             dispatcher.exec_action(req, subject, action, args)
         }
         FabricOp::ExecQuery { subject, query, params, predefined } => {
@@ -68,6 +104,7 @@ pub fn dispatch<D: FabricDispatcher>(dispatcher: &D, req: &FabricRequest) -> Res
             if !*predefined && !req.cap.flags.contains(&Flag::AllowCustomQuery) {
                 return Err(DharmaError::Validation("custom query not allowed".to_string()));
             }
+            dispatcher.authorize_exec_query(req, subject, query, *predefined)?;
             dispatcher.exec_query(req, subject, query, params, *predefined)
         }
         FabricOp::QueryFast { table, key, query } => {
@@ -75,6 +112,7 @@ pub fn dispatch<D: FabricDispatcher>(dispatcher: &D, req: &FabricRequest) -> Res
             if !req.cap.flags.contains(&Flag::AllowCustomQuery) {
                 return Err(DharmaError::Validation("custom query not allowed".to_string()));
             }
+            dispatcher.authorize_query_fast(req, table, key, query)?;
             dispatcher.query_fast(req, table, key, query)
         }
         FabricOp::QueryWide { table, shard, query } => {
@@ -82,6 +120,7 @@ pub fn dispatch<D: FabricDispatcher>(dispatcher: &D, req: &FabricRequest) -> Res
             if !req.cap.flags.contains(&Flag::AllowCustomQuery) {
                 return Err(DharmaError::Validation("custom query not allowed".to_string()));
             }
+            dispatcher.authorize_query_wide(req, table, *shard, query)?;
             dispatcher.query_wide(req, table, *shard, query)
         }
         FabricOp::Fetch { id } => {
@@ -425,6 +464,64 @@ mod tests {
         let err = dispatch(&Dummy, &req).unwrap_err();
         match err {
             DharmaError::Validation(_) => {}
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_enforces_authorizer() {
+        struct Dummy;
+        impl FabricDispatcher for Dummy {
+            fn now(&self) -> u64 { 10 }
+            fn authorize_exec_query(
+                &self,
+                _: &FabricRequest,
+                _: &SubjectId,
+                _: &str,
+                _: bool,
+            ) -> Result<(), DharmaError> {
+                Err(DharmaError::Validation("denied".to_string()))
+            }
+            fn exec_action(&self, _: &FabricRequest, _: &SubjectId, _: &str, _: &Value) -> Result<FabricResponse, DharmaError> { unreachable!() }
+            fn exec_query(&self, _: &FabricRequest, _: &SubjectId, _: &str, _: &Value, _: bool) -> Result<FabricResponse, DharmaError> { unreachable!() }
+            fn query_fast(&self, _: &FabricRequest, _: &str, _: &Value, _: &str) -> Result<FabricResponse, DharmaError> { unreachable!() }
+            fn query_wide(&self, _: &FabricRequest, _: &str, _: u32, _: &str) -> Result<FabricResponse, DharmaError> { unreachable!() }
+            fn fetch(&self, _: &FabricRequest, _: &EnvelopeId) -> Result<FabricResponse, DharmaError> { unreachable!() }
+            fn oracle_invoke(&self, _: &FabricRequest, _: &str, _: OracleMode, _: OracleTiming, _: &Value) -> Result<FabricResponse, DharmaError> { unreachable!() }
+        }
+        let subject = SubjectId::from_bytes([4u8; 32]);
+        let token = CapToken {
+            v: 1,
+            id: [9u8; 32],
+            issuer: IdentityKey::from_bytes([2u8; 32]),
+            domain: "corp.example".to_string(),
+            level: "public".to_string(),
+            subject: Some(subject),
+            scopes: vec![Scope::Subject(subject)],
+            ops: vec![Op::Read],
+            actions: vec![],
+            queries: vec![],
+            flags: vec![Flag::AllowCustomQuery],
+            oracles: vec![],
+            constraints: vec![],
+            nbf: 0,
+            exp: 100,
+            sig: vec![1; 64],
+        };
+        let req = FabricRequest {
+            req_id: [1u8; 16],
+            cap: token,
+            op: FabricOp::ExecQuery {
+                subject,
+                query: "List".to_string(),
+                params: Value::Map(vec![]),
+                predefined: true,
+            },
+            deadline: 100,
+        };
+        let err = dispatch(&Dummy, &req).unwrap_err();
+        match err {
+            DharmaError::Validation(msg) => assert!(msg.contains("denied")),
             other => panic!("unexpected error: {other:?}"),
         }
     }

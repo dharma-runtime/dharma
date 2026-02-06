@@ -21,6 +21,7 @@ pub struct ReplContext {
     pub confirmations: bool,
     pub aliases: AliasMap,
     pub last_results: Vec<QueryRow>,
+    pub last_backup_policy_warned: Option<SubjectId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,6 +60,7 @@ impl ReplContext {
             confirmations: true,
             aliases,
             last_results: Vec::new(),
+            last_backup_policy_warned: None,
         }
     }
 
@@ -102,6 +104,58 @@ impl ReplContext {
 
     pub fn alias_for_subject(&self, subject: &SubjectId) -> Option<String> {
         alias_for_subject(&self.aliases, subject)
+    }
+
+    pub fn maybe_warn_backup_policy(&mut self) {
+        let Some(subject) = self.current_subject else {
+            return;
+        };
+        if self.last_backup_policy_warned == Some(subject) {
+            return;
+        }
+        let env = dharma::env::StdEnv::new(&self.data_dir);
+        let store = dharma::Store::new(&env);
+        let status = match dharma::backup::backup_policy_status(&store, &subject) {
+            Ok(status) => status,
+            Err(_) => return,
+        };
+        let message = match status {
+            dharma::backup::BackupPolicyStatus::Defined { .. } => return,
+            dharma::backup::BackupPolicyStatus::MissingDomainPolicy { domain } => {
+                format!("Domain {domain} has no backup policy; backups disabled.")
+            }
+            dharma::backup::BackupPolicyStatus::MissingRelayDomain {
+                domain,
+                relay_domain,
+            } => format!(
+                "Domain {domain} points to relay {relay_domain}, but relay domain is missing."
+            ),
+            dharma::backup::BackupPolicyStatus::MissingRelayPlan {
+                domain,
+                relay_domain,
+                plan,
+            } => format!(
+                "Domain {domain} uses relay plan {plan} on {relay_domain}, but plan is undefined."
+            ),
+            dharma::backup::BackupPolicyStatus::MissingRelayGrant {
+                domain,
+                relay_domain,
+                plan,
+            } => format!(
+                "Domain {domain} has no active grant for plan {plan} on relay {relay_domain}."
+            ),
+            dharma::backup::BackupPolicyStatus::OwnerIdentity => {
+                "Subject owner is identity; no domain backup policy.".to_string()
+            }
+            dharma::backup::BackupPolicyStatus::MissingOwnership => {
+                "Subject ownership missing; backup policy undefined.".to_string()
+            }
+            dharma::backup::BackupPolicyStatus::MissingDomainName => {
+                "Domain subject missing domain name; backup policy undefined.".to_string()
+            }
+        };
+        eprintln!("[alert] {message}");
+        self.last_backup_policy_warned = Some(subject);
     }
 
     fn paint(&self, text: &str, color: Color) -> String {

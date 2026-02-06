@@ -1079,6 +1079,44 @@ fn append_field_writes(
                 bytes_per_row: 32,
             });
         }
+        CqrsTypeSpec::SubjectRef(_) => {
+            let (bytes, valid) = match value {
+                Some(Value::Map(entries)) => {
+                    let mut id: Option<Vec<u8>> = None;
+                    let mut seq: Option<u64> = None;
+                    for (k, v) in entries {
+                        if let Value::Text(key) = k {
+                            if key == "id" {
+                                if let Value::Bytes(bytes) = v {
+                                    if bytes.len() == 32 {
+                                        id = Some(bytes.clone());
+                                    }
+                                }
+                            } else if key == "seq" {
+                                if let Value::Integer(int) = v {
+                                    seq = (*int).try_into().ok();
+                                }
+                            }
+                        }
+                    }
+                    if let (Some(id), Some(seq)) = (id, seq) {
+                        let mut out = vec![0u8; 40];
+                        out[..32].copy_from_slice(&id);
+                        out[32..40].copy_from_slice(&seq.to_le_bytes());
+                        (out, true)
+                    } else {
+                        (vec![0u8; 40], false)
+                    }
+                }
+                _ => (vec![0u8; 40], false),
+            };
+            writes.push(ColumnWrite {
+                name: name.to_string(),
+                bytes,
+                valid,
+                bytes_per_row: 40,
+            });
+        }
         CqrsTypeSpec::GeoPoint => {
             let (lat, lon, valid) = parse_geo_point(value);
             writes.push(ColumnWrite {
@@ -1096,6 +1134,9 @@ fn append_field_writes(
         }
         CqrsTypeSpec::Ratio => {
             return Err(DharmaError::Validation("ratio unsupported in dharma-q".to_string()));
+        }
+        CqrsTypeSpec::Struct(_) => {
+            return Err(DharmaError::Validation("struct unsupported in dharma-q".to_string()));
         }
         CqrsTypeSpec::List(_) | CqrsTypeSpec::Map(_, _) => {
             return Err(DharmaError::Validation("collection unsupported in dharma-q".to_string()));
@@ -2412,8 +2453,12 @@ mod tests {
             version: "1.0.0".to_string(),
             aggregate: "Ticket".to_string(),
             extends: None,
+            implements: Vec::new(),
+            structs: BTreeMap::new(),
             fields,
             actions,
+            queries: BTreeMap::new(),
+        projections: BTreeMap::new(),
             concurrency: crate::pdl::schema::ConcurrencyMode::Strict,
         };
         let schema_bytes = schema.to_cbor().unwrap();

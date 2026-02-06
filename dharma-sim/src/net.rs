@@ -427,6 +427,13 @@ impl SimStream {
     }
 }
 
+impl Drop for SimStream {
+    fn drop(&mut self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.hub.notify();
+    }
+}
+
 impl Read for SimStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         loop {

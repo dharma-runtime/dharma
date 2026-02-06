@@ -242,6 +242,7 @@ mod tests {
         SchemaManifest {
             v: 1,
             name: "test".to_string(),
+            implements: Vec::new(),
             types: {
                 let mut map = BTreeMap::new();
                 map.insert(

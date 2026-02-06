@@ -5,6 +5,7 @@ use dharma::DharmaError;
 use ciborium::value::Value;
 use dharma::assertion::{add_signer_meta, AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION};
 use dharma::crypto;
+use dharma::keys::Keyring;
 use dharma::pdl::schema::{validate_args, ConcurrencyMode, CqrsSchema, TypeSpec, Visibility};
 use dharma::store::index::FrontierIndex;
 use dharma::types::{AssertionId, ContractId, SchemaId, SubjectId};
@@ -22,8 +23,10 @@ pub fn action_cmd(subject_hex: &str, action: &str, args: &[String]) -> Result<()
     let store = dharma::Store::new(&env);
 
     let subject = SubjectId::from_hex(subject_hex)?;
-    let mut keys = HashMap::new();
-    keys.insert(identity.subject_id, identity.subject_key);
+    let mut legacy_keys = HashMap::new();
+    legacy_keys.insert(identity.subject_id, identity.subject_key);
+    let mut keys = Keyring::from_subject_keys(&legacy_keys);
+    keys.insert_hpke_secret(identity.public_key, identity.noise_sk);
     if !store.subject_dir(&subject).join("assertions").exists() {
         store.rebuild_subject_views(&keys)?;
     }
@@ -72,7 +75,8 @@ pub(crate) fn apply_action_prepared(
         .ok_or_else(|| DharmaError::Schema("unknown action".to_string()))?;
     validate_args(action_schema, &args_value)?;
     let action_index = action_index(schema, action)?;
-    let args_buffer = encode_args_buffer(action_schema, action_index, &args_value, false)?;
+    let args_buffer =
+        encode_args_buffer(action_schema, &schema.structs, action_index, &args_value, false)?;
     let (base_args, overlay_args) = split_args(action_schema, &args_value)?;
 
     let env = dharma::env::StdEnv::new(data_dir);
@@ -169,6 +173,16 @@ pub(crate) fn apply_action_prepared(
             memory: state.memory.clone(),
         };
         save_snapshot(&env, &subject, &snapshot)?;
+    }
+
+    if subject == identity.subject_id {
+        let _ = crate::vault::maybe_archive_after_write(
+            &store,
+            subject,
+            ver,
+            schema_id,
+            contract_id,
+        );
     }
 
     Ok((assertion_id, last_seq + 1))
@@ -293,6 +307,24 @@ fn parse_value(raw: &str, typ: &TypeSpec) -> Result<Value, DharmaError> {
             }
             Ok(Value::Bytes(bytes))
         }
+        TypeSpec::SubjectRef(_) => {
+            let (id_raw, seq_raw) = raw
+                .split_once('@')
+                .or_else(|| raw.split_once(':'))
+                .ok_or_else(|| DharmaError::Validation("subject_ref expects hex@seq".to_string()))?;
+            let bytes = dharma::types::hex_decode(id_raw)?;
+            if bytes.len() != 32 {
+                return Err(DharmaError::Validation("invalid subject_ref id".to_string()));
+            }
+            let seq = seq_raw
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| DharmaError::Validation("invalid subject_ref seq".to_string()))?;
+            Ok(Value::Map(vec![
+                (Value::Text("id".to_string()), Value::Bytes(bytes)),
+                (Value::Text("seq".to_string()), Value::Integer(seq.into())),
+            ]))
+        }
         TypeSpec::GeoPoint => {
             let parts: Vec<&str> = raw.split(',').collect();
             if parts.len() != 2 {
@@ -316,6 +348,9 @@ fn parse_value(raw: &str, typ: &TypeSpec) -> Result<Value, DharmaError> {
                 (Value::Text("den".to_string()), Value::Integer(den.into())),
             ]))
         }
+        TypeSpec::Struct(_) => Err(DharmaError::Validation(
+            "struct args unsupported".to_string(),
+        )),
         TypeSpec::List(_) | TypeSpec::Map(_, _) => {
             Err(DharmaError::Validation("collection args unsupported".to_string()))
         }

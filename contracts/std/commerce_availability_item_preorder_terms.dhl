@@ -1,0 +1,88 @@
+---
+namespace: std.commerce.availability.item_preorder_terms
+version: 1.0.0
+---
+
+# Commerce Availability Item Preorder Terms (Projection)
+
+Aggregates supplier-item preorder policies into a single item-level view.
+This avoids duplicating batch rows in availability projections.
+
+## Access control
+Only projection writers may update this subject.
+
+```dhl
+external
+    roles: [projection.writer]
+```
+
+## Code
+
+```dhl
+aggregate ItemPreorderTerms
+    state
+        public item_id: Ref<std.commerce.catalog.item>
+        public preorder_allowed: Bool
+        public preorder_capacity: Decimal(scale=6)
+        public preorder_unverified: Bool
+        public as_of: Timestamp?
+
+action Upsert(
+    item_id: Ref<std.commerce.catalog.item>,
+    preorder_allowed: Bool,
+    preorder_capacity: Decimal(scale=6),
+    preorder_unverified: Bool,
+    as_of: Timestamp?
+)
+    validate
+        has_role(context.signer, "projection.writer")
+        preorder_capacity >= 0
+    apply
+        state.item_id = item_id
+        state.preorder_allowed = preorder_allowed
+        state.preorder_capacity = preorder_capacity
+        state.preorder_unverified = preorder_unverified
+        state.as_of = as_of
+
+action Deactivate()
+    validate
+        has_role(context.signer, "projection.writer")
+    apply
+        state.preorder_allowed = false
+        state.preorder_capacity = 0
+        state.preorder_unverified = false
+        state.as_of = context.timestamp
+```
+
+## Projection
+
+```dhl
+projection ItemPreorderTermsByItem
+    trigger std.commerce.procurement.supplier_item.Create
+    trigger std.commerce.procurement.supplier_item.UpdateTerms
+    trigger std.commerce.procurement.supplier_item.SetPreorderPolicy
+    trigger std.commerce.procurement.supplier_item.Archive
+    trigger std.commerce.catalog.item.Create
+    trigger std.commerce.catalog.item.Archive
+    scope item_id = state.item_id
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.catalog.item
+        | lj std.commerce.procurement.supplier_item on subject=std.commerce.procurement.supplier_item.item_id
+        | where std.commerce.catalog.item.status == 'Active,
+                std.commerce.procurement.supplier_item.status == 'Active || std.commerce.procurement.supplier_item.status == null
+        | sel subject as item_id, std.commerce.procurement.supplier_item.preorder_allowed, std.commerce.procurement.supplier_item.preorder_capacity, std.commerce.procurement.supplier_item.preorder_unverified
+        | by item_id
+        | agg max(preorder_allowed) as preorder_allowed, sum(preorder_capacity) as preorder_capacity, max(preorder_unverified) as preorder_unverified
+    emit upsert std.commerce.availability.item_preorder_terms
+        id = proj_id(item_id)
+        item_id = item_id
+        preorder_allowed = preorder_allowed == true
+        preorder_capacity = preorder_capacity
+        preorder_unverified = preorder_unverified == true
+        as_of = null
+    prune
+        by (item_id)
+```

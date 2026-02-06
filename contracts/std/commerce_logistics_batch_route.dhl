@@ -1,0 +1,78 @@
+---
+namespace: std.commerce.logistics.batch_route
+version: 1.0.0
+---
+
+# Commerce Logistics Batch Route (Projection)
+
+This projection maps **routes** to batches for dispatch planning.
+It is **derived data** and can be rebuilt at any time.
+
+## Scope
+- One subject per `(route_id, date, batch_id)` entry.
+
+## Access control
+Only projection writers may update this subject.
+
+```dhl
+external
+    roles: [projection.writer]
+```
+
+## Code
+
+```dhl
+aggregate BatchRoute
+    state
+        public route_id: Text(len=64)
+        public date: Timestamp
+        public batch_id: Ref<std.commerce.logistics.batch>
+        public sequence: Int?
+        public updated_at: Timestamp?
+
+action Upsert(
+    route_id: Text(len=64),
+    date: Timestamp,
+    batch_id: Ref<std.commerce.logistics.batch>,
+    sequence: Int?
+)
+    validate
+        has_role(context.signer, "projection.writer")
+    apply
+        state.route_id = route_id
+        state.date = date
+        state.batch_id = batch_id
+        state.sequence = sequence
+        state.updated_at = context.timestamp
+
+action Remove()
+    validate
+        has_role(context.signer, "projection.writer")
+    apply
+        state.sequence = null
+        state.updated_at = context.timestamp
+```
+
+## Projection
+
+```dhl
+projection BatchRouteAssignments
+    trigger std.commerce.logistics.batch.AssignRoute
+    trigger std.commerce.logistics.batch.ScheduleBatch
+    trigger std.commerce.logistics.batch.CancelBatch
+    scope route_id = route_id
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.logistics.batch
+        | where route_id != null
+    emit upsert std.commerce.logistics.batch_route
+        id = proj_id(route_id, scheduled_for, subject)
+        route_id = route_id
+        date = scheduled_for
+        batch_id = subject
+        sequence = route_sequence
+    prune
+        by (route_id, date, batch_id)
+```

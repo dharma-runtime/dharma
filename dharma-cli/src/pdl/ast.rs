@@ -34,6 +34,7 @@ pub struct Header {
     pub namespace: String,
     pub version: String,
     pub imports: Vec<String>,
+    pub implements: Vec<String>,
     pub concurrency: ConcurrencyMode,
 }
 
@@ -43,6 +44,7 @@ impl Default for Header {
             namespace: "default".to_string(),
             version: "0.0.0".to_string(),
             imports: Vec::new(),
+            implements: Vec::new(),
             concurrency: ConcurrencyMode::Strict,
         }
     }
@@ -76,9 +78,12 @@ pub struct AstFile {
     pub header: Header,
     pub package: Option<String>,
     pub external: Option<ExternalDef>,
+    pub structs: Vec<StructDef>,
     pub aggregates: Vec<AggregateDef>,
     pub actions: Vec<ActionDef>,
     pub reactors: Vec<ReactorDef>,
+    pub queries: Vec<QueryDef>,
+    pub projections: Vec<ProjectionDef>,
     pub views: Vec<ViewDef>,
 }
 
@@ -88,6 +93,12 @@ pub struct AggregateDef {
     pub extends: Option<String>,
     pub fields: Vec<FieldDef>,
     pub invariants: Vec<Spanned<Expr>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructDef {
+    pub name: String,
+    pub fields: Vec<FieldDef>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -104,6 +115,24 @@ pub struct ActionDef {
     pub args: Vec<ArgDef>,
     pub validates: Vec<Spanned<Expr>>,
     pub applies: Vec<Spanned<Assignment>>,
+    pub doc: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct QueryDef {
+    pub name: String,
+    pub args: Vec<ArgDef>,
+    pub visibility: Visibility,
+    pub body: Vec<String>,
+    pub start_line: usize,
+    pub doc: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectionDef {
+    pub name: String,
+    pub body: Vec<String>,
+    pub start_line: usize,
     pub doc: Option<String>,
 }
 
@@ -155,7 +184,9 @@ pub enum TypeSpec {
     Bool,
     Enum(Vec<String>),
     Identity,
+    SubjectRef(Option<String>),
     Ref(String),
+    Struct(String),
     GeoPoint,
     List(Box<TypeSpec>),
     Map(Box<TypeSpec>, Box<TypeSpec>),
@@ -177,6 +208,7 @@ pub enum Literal {
     Null,
     List(Vec<Expr>),
     Map(Vec<(Expr, Expr)>),
+    Struct(String, Vec<(String, Expr)>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

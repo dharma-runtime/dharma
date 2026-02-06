@@ -1,0 +1,92 @@
+---
+namespace: std.atlas.domain
+version: 1.0.0
+implements:
+  - std.protocol.atlas.domain@1
+---
+
+# Atlas Domain Contract
+
+Defines domain membership, roles/scopes, and hierarchy in a contract-driven way.
+
+Metadata (v1 defaults)
+- ownership_default: domain
+- ownership_transfer: forbidden
+
+```dhl
+aggregate Domain
+    state
+        public domain: Text(len=128)
+        public owner: Identity
+        public parent: Text(len=128)?
+        public ownership_default: Text(len=32)
+        public transfer_policy: Text(len=32)
+        public backup_relay_domain: Text(len=128)?
+        public backup_relay_plan: Text(len=64)?
+        public roles: Map<Identity, List<Text(len=64)>>
+        public scopes: Map<Identity, List<Text(len=64)>>
+        public expires: Map<Identity, Int>
+        public invites: Map<Identity, List<Text(len=64)>>
+        public requests: Map<Identity, List<Text(len=64)>>
+
+action Genesis(domain: Text, owner: Identity, parent: Text(len=128)?)
+    apply
+        state.domain = domain
+        state.owner = owner
+        state.parent = parent
+        state.ownership_default = "domain"
+        state.transfer_policy = "forbidden"
+        state.roles.set(owner, ["owner"])
+        state.scopes.set(owner, ["all"])
+        state.expires.set(owner, 0)
+
+action Invite(target: Identity, roles: List<Text(len=64)>, scopes: List<Text(len=64)>, expires: Int)
+    validate
+        context.signer == state.owner
+    apply
+        state.invites.set(target, roles)
+        state.scopes.set(target, scopes)
+        state.expires.set(target, expires)
+
+action Request(target: Identity, roles: List<Text(len=64)>, scopes: List<Text(len=64)>)
+    validate
+        context.signer == target
+    apply
+        state.requests.set(target, roles)
+        state.scopes.set(target, scopes)
+
+action Approve(target: Identity, roles: List<Text(len=64)>, scopes: List<Text(len=64)>, expires: Int)
+    validate
+        context.signer == state.owner
+    apply
+        state.roles.set(target, roles)
+        state.scopes.set(target, scopes)
+        state.expires.set(target, expires)
+        state.invites.remove(target)
+        state.requests.remove(target)
+
+action Revoke(target: Identity)
+    validate
+        context.signer == state.owner
+    apply
+        state.roles.remove(target)
+        state.scopes.remove(target)
+        state.expires.remove(target)
+        state.invites.remove(target)
+        state.requests.remove(target)
+
+action Leave(target: Identity)
+    validate
+        context.signer == target
+    apply
+        state.roles.remove(target)
+        state.scopes.remove(target)
+        state.expires.remove(target)
+
+action Policy(relay_domain: Text(len=128), relay_plan: Text(len=64))
+    validate
+        context.signer == state.owner
+    apply
+        state.backup_relay_domain = relay_domain
+        state.backup_relay_plan = relay_plan
+```

@@ -1,5 +1,5 @@
 use crate::error::DharmaError;
-use crate::pdl::ast::{ActionDef, ArgDef, AstFile, AggregateDef};
+use crate::pdl::ast::{ActionDef, ArgDef, AstFile, AggregateDef, ProjectionDef, QueryDef};
 use std::collections::{HashMap, HashSet};
 
 pub fn merge_parent(
@@ -24,6 +24,8 @@ pub fn merge_parent(
     child.actions = merge_actions(&child.actions, &parent.actions)?;
     child_agg.invariants.extend(parent_agg.invariants.clone());
     child.reactors.extend(parent.reactors.clone());
+    child.queries = merge_queries(&child.queries, &parent.queries)?;
+    child.projections = merge_projections(&child.projections, &parent.projections)?;
 
     Ok(child)
 }
@@ -60,6 +62,36 @@ fn merge_actions(child_actions: &[ActionDef], parent_actions: &[ActionDef]) -> R
     let mut actions = map.into_values().collect::<Vec<_>>();
     actions.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(actions)
+}
+
+fn merge_queries(child_queries: &[QueryDef], parent_queries: &[QueryDef]) -> Result<Vec<QueryDef>, DharmaError> {
+    let mut map: HashMap<String, QueryDef> = HashMap::new();
+    for query in child_queries {
+        map.insert(query.name.clone(), query.clone());
+    }
+    for parent in parent_queries {
+        if !map.contains_key(&parent.name) {
+            map.insert(parent.name.clone(), parent.clone());
+        }
+    }
+    let mut queries = map.into_values().collect::<Vec<_>>();
+    queries.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(queries)
+}
+
+fn merge_projections(child_proj: &[ProjectionDef], parent_proj: &[ProjectionDef]) -> Result<Vec<ProjectionDef>, DharmaError> {
+    let mut map: HashMap<String, ProjectionDef> = HashMap::new();
+    for proj in child_proj {
+        map.insert(proj.name.clone(), proj.clone());
+    }
+    for parent in parent_proj {
+        if !map.contains_key(&parent.name) {
+            map.insert(parent.name.clone(), parent.clone());
+        }
+    }
+    let mut projections = map.into_values().collect::<Vec<_>>();
+    projections.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(projections)
 }
 
 fn merge_action(child: &mut ActionDef, parent: &ActionDef) -> Result<(), DharmaError> {
@@ -113,6 +145,7 @@ mod tests {
             header: Header::default(),
             package: None,
             external: None,
+            structs: Vec::new(),
             aggregates: vec![AggregateDef {
                 name: "Invoice".to_string(),
                 extends: None,
@@ -144,12 +177,15 @@ mod tests {
                 doc: None,
             }],
             reactors: Vec::new(),
+            queries: Vec::new(),
+            projections: Vec::new(),
             views: Vec::new(),
         };
         let child = AstFile {
             header: Header::default(),
             package: None,
             external: None,
+            structs: Vec::new(),
             aggregates: vec![AggregateDef {
                 name: "CompanyInvoice".to_string(),
                 extends: Some("std.finance.Invoice".to_string()),
@@ -181,6 +217,8 @@ mod tests {
                 doc: None,
             }],
             reactors: Vec::new(),
+            queries: Vec::new(),
+            projections: Vec::new(),
             views: Vec::new(),
         };
 

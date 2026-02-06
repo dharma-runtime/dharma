@@ -1,6 +1,18 @@
+use crate::assertion::AssertionPlaintext;
+use crate::contacts::{self, ContactRelation};
+use crate::contract::SummaryDecision;
+use crate::error::DharmaError;
 use crate::fabric::auth::{CapToken, Flag};
 use crate::fabric::types::{AdStore, Advertisement, OracleMode, OracleTiming, ShardMap};
-use crate::types::IdentityKey;
+use crate::identity::roles_for_identity;
+use crate::ownership::Owner;
+use crate::pdl::schema::CqrsSchema;
+use crate::protocols::iam;
+use crate::share::{share_context, FieldAccess, ShareState};
+use crate::store::state::{list_assertions, load_ownership};
+use crate::store::Store;
+use crate::types::{ContractId, EnvelopeId, IdentityKey, SchemaId, SubjectId};
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug)]
 pub struct RouterConfig {
@@ -78,6 +90,187 @@ impl Router {
     pub fn hedge_count(&self) -> usize {
         self.config.hedge_count
     }
+}
+
+pub fn enforce_subject_action(
+    store: &Store,
+    token: &CapToken,
+    subject: &SubjectId,
+    now: i64,
+    action: &str,
+) -> Result<(), DharmaError> {
+    let state = ShareState::load(store, subject)?;
+    let ctx = share_context(store, subject, &token.issuer, now)?;
+    if state.allows_action(&ctx, now, action) {
+        if let Some(summary) = load_subject_summary(store, subject)? {
+            let roles = roles_for_token(store, token);
+            if matches!(summary.allows_action(&roles, action), SummaryDecision::Deny) {
+                return Err(DharmaError::Validation("summary denied".to_string()));
+            }
+        }
+        Ok(())
+    } else {
+        Err(DharmaError::Validation("share denied".to_string()))
+    }
+}
+
+pub fn enforce_subject_query(
+    store: &Store,
+    token: &CapToken,
+    subject: &SubjectId,
+    now: i64,
+    query: &str,
+) -> Result<FieldAccess, DharmaError> {
+    let state = ShareState::load(store, subject)?;
+    let ctx = share_context(store, subject, &token.issuer, now)?;
+    if !state.allows_query(&ctx, now, query) {
+        return Err(DharmaError::Validation("share denied".to_string()));
+    }
+    if let Some(summary) = load_subject_summary(store, subject)? {
+        let roles = roles_for_token(store, token);
+        if matches!(summary.allows_query(&roles, query), SummaryDecision::Deny) {
+            return Err(DharmaError::Validation("summary denied".to_string()));
+        }
+    }
+    let access = state.field_access(&ctx, now);
+    apply_iam_contact_gating(store, subject, &token.issuer, ctx.owner, access)
+}
+
+fn load_subject_summary(
+    store: &Store,
+    subject: &SubjectId,
+) -> Result<Option<crate::contract::PermissionSummary>, DharmaError> {
+    let Some((contract, ver)) = latest_contract_meta(store, subject)? else {
+        return Ok(None);
+    };
+    let summary = match store.get_permission_summary(&contract) {
+        Ok(summary) => summary,
+        Err(DharmaError::Validation(msg)) => return Err(DharmaError::Validation(msg)),
+        Err(err) => return Err(err),
+    };
+    let Some(summary) = summary else {
+        return Ok(None);
+    };
+    if summary.ver != ver {
+        return Ok(None);
+    }
+    Ok(Some(summary))
+}
+
+fn latest_contract_meta(
+    store: &Store,
+    subject: &SubjectId,
+) -> Result<Option<(ContractId, u64)>, DharmaError> {
+    let records = list_assertions(store.env(), subject)?;
+    let mut best: Option<(u64, ContractId, u64)> = None;
+    for record in records {
+        let assertion = match AssertionPlaintext::from_cbor(&record.bytes) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if assertion.header.sub != *subject {
+            continue;
+        }
+        match &best {
+            Some((seq, _, _)) if *seq >= record.seq => {}
+            _ => {
+                best = Some((record.seq, assertion.header.contract, assertion.header.ver));
+            }
+        }
+    }
+    Ok(best.map(|(_, contract, ver)| (contract, ver)))
+}
+
+fn apply_iam_contact_gating(
+    store: &Store,
+    subject: &SubjectId,
+    viewer: &IdentityKey,
+    owner: bool,
+    access: FieldAccess,
+) -> Result<FieldAccess, DharmaError> {
+    if owner {
+        return Ok(access);
+    }
+    let Some(schema) = subject_schema(store, subject)? else {
+        return Ok(access);
+    };
+    if schema.namespace != "std.iam" {
+        return Ok(access);
+    }
+    let Some(owner_key) = subject_owner_identity(store, subject)? else {
+        return Ok(access);
+    };
+    if owner_key.as_bytes() == viewer.as_bytes() {
+        return Ok(access);
+    }
+    let relation = contacts::relation(store, &owner_key, viewer)?;
+    if relation == ContactRelation::Accepted {
+        return Ok(access);
+    }
+    let public_fields = iam::public_fields(&schema);
+    let filtered = match access {
+        FieldAccess::All => public_fields,
+        FieldAccess::Fields(fields) => fields
+            .intersection(&public_fields)
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+    };
+    Ok(FieldAccess::Fields(filtered))
+}
+
+fn subject_owner_identity(
+    store: &Store,
+    subject: &SubjectId,
+) -> Result<Option<IdentityKey>, DharmaError> {
+    let Some(record) = load_ownership(store.env(), subject)? else {
+        return Ok(None);
+    };
+    match record.owner {
+        Owner::Identity(owner) => Ok(Some(owner)),
+        Owner::Domain(_) => Ok(None),
+    }
+}
+
+fn subject_schema(store: &Store, subject: &SubjectId) -> Result<Option<CqrsSchema>, DharmaError> {
+    let records = list_assertions(store.env(), subject)?;
+    let mut best: Option<(u64, SchemaId)> = None;
+    for record in records {
+        let assertion = match AssertionPlaintext::from_cbor(&record.bytes) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if assertion.header.sub != *subject {
+            continue;
+        }
+        match &best {
+            Some((seq, _)) if *seq >= record.seq => {}
+            _ => {
+                best = Some((record.seq, assertion.header.schema));
+            }
+        }
+    }
+    let Some((_, schema_id)) = best else {
+        return Ok(None);
+    };
+    let envelope_id = EnvelopeId::from_bytes(*schema_id.as_bytes());
+    let Some(bytes) = store.get_object_any(&envelope_id)? else {
+        return Ok(None);
+    };
+    let schema = CqrsSchema::from_cbor(&bytes)?;
+    Ok(Some(schema))
+}
+
+fn roles_for_token(store: &Store, token: &CapToken) -> Vec<String> {
+    let mut roles = BTreeSet::new();
+    if let Some(subject) = token.subject {
+        if let Ok(found) = roles_for_identity(store.env(), &subject) {
+            roles.extend(found);
+        }
+    }
+    if !token.level.is_empty() {
+        roles.insert(token.level.clone());
+    }
+    roles.into_iter().collect()
 }
 
 fn token_oracle_allowed(

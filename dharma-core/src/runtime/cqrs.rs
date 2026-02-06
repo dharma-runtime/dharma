@@ -6,7 +6,11 @@ use crate::pdl::schema::{
     CqrsSchema, TypeSpec, DEFAULT_TEXT_LEN,
 };
 use crate::runtime::vm::{RuntimeVm, OVERLAY_BASE, STATE_SIZE};
-use crate::store::state::{list_assertions, list_overlays, load_latest_snapshot_for_ver};
+use crate::share::FieldAccess;
+use crate::store::state::{
+    list_assertions, list_overlays, load_latest_snapshot_for_ver, load_snapshot_at_or_before_seq,
+    save_snapshot, Snapshot, SnapshotHeader,
+};
 use crate::types::{AssertionId, SubjectId};
 use ciborium::value::Value;
 use std::collections::{BTreeMap, HashMap};
@@ -19,6 +23,8 @@ pub struct LoadedState {
     pub last_overlay_object: Option<AssertionId>,
 }
 
+const SNAPSHOT_INTERVAL: u64 = 100;
+
 pub fn load_state(
     env: &dyn Env,
     subject: &SubjectId,
@@ -27,6 +33,139 @@ pub fn load_state(
     ver: u64,
 ) -> Result<LoadedState, DharmaError> {
     load_state_until(env, subject, schema, contract, ver, None)
+}
+
+pub fn load_state_at_seq(
+    env: &dyn Env,
+    subject: &SubjectId,
+    schema: &CqrsSchema,
+    contract: &[u8],
+    ver: u64,
+    seq: u64,
+) -> Result<LoadedState, DharmaError> {
+    let mut memory = match load_snapshot_at_or_before_seq(env, subject, ver, seq)? {
+        Some(snapshot) => snapshot.memory,
+        None => default_state(schema),
+    };
+    if memory.len() != STATE_SIZE {
+        memory.resize(STATE_SIZE, 0);
+    }
+
+    let mut last_seq = 0;
+    let mut last_object = None;
+    let mut last_timestamp = 0u64;
+    if let Some(snapshot) = load_snapshot_at_or_before_seq(env, subject, ver, seq)? {
+        last_seq = snapshot.header.seq;
+        last_object = Some(snapshot.header.last_assertion);
+        last_timestamp = snapshot.header.timestamp;
+    }
+
+    let mut last_overlay_seq = 0;
+    let mut last_overlay_object = None;
+    let mut overlay_by_ref: BTreeMap<AssertionId, Value> = BTreeMap::new();
+    let overlay_records = list_overlays(env, subject)?;
+    for record in overlay_records {
+        if record.seq > seq {
+            continue;
+        }
+        let overlay = AssertionPlaintext::from_cbor(&record.bytes)?;
+        if overlay.header.ver != ver {
+            continue;
+        }
+        if record.seq > last_overlay_seq {
+            last_overlay_seq = record.seq;
+            last_overlay_object = Some(record.assertion_id);
+        }
+        if let Some(ref_id) = overlay.header.refs.first() {
+            overlay_by_ref.insert(*ref_id, overlay.body.clone());
+        }
+    }
+
+    let mut assertions: HashMap<AssertionId, AssertionPlaintext> = HashMap::new();
+    let records = list_assertions(env, subject)?;
+    for record in records {
+        if record.seq <= last_seq || record.seq > seq {
+            continue;
+        }
+        let assertion = AssertionPlaintext::from_cbor(&record.bytes)?;
+        if assertion.header.ver != ver {
+            continue;
+        }
+        assertions.insert(record.assertion_id, assertion);
+    }
+
+    let order = crate::validation::order_assertions(&assertions)?;
+    let vm = RuntimeVm::new(contract.to_vec());
+    for assertion_id in order {
+        let assertion = assertions
+            .get(&assertion_id)
+            .ok_or_else(|| DharmaError::Validation("missing assertion".to_string()))?;
+        if assertion.header.typ == "core.merge" {
+            if assertion.header.seq >= last_seq {
+                last_seq = assertion.header.seq;
+                last_object = Some(assertion_id);
+                last_timestamp = assertion
+                    .header
+                    .ts
+                    .and_then(|ts| u64::try_from(ts).ok())
+                    .unwrap_or(last_timestamp);
+            }
+            continue;
+        }
+        let action_name = assertion
+            .header
+            .typ
+            .strip_prefix("action.")
+            .unwrap_or(&assertion.header.typ);
+        let action_schema = schema
+            .action(action_name)
+            .ok_or_else(|| DharmaError::Schema("unknown action".to_string()))?;
+        let action_index = action_index(schema, action_name)?;
+        let overlay = overlay_by_ref.get(&assertion_id);
+        let merged = merge_args(&assertion.body, overlay)?;
+        let args_buffer =
+            encode_args_buffer(action_schema, &schema.structs, action_index, &merged, true)?;
+        let context = context_buffer_for_assertion(assertion);
+        vm.reduce(env, &mut memory, &args_buffer, Some(&context))?;
+        if assertion.header.seq >= last_seq {
+            last_seq = assertion.header.seq;
+            last_object = Some(assertion_id);
+            last_timestamp = assertion
+                .header
+                .ts
+                .and_then(|ts| u64::try_from(ts).ok())
+                .unwrap_or(last_timestamp);
+        }
+    }
+
+    if last_seq != seq {
+        return Err(DharmaError::Validation(
+            "missing assertion for seq".to_string(),
+        ));
+    }
+
+    if last_seq != 0 && last_seq % SNAPSHOT_INTERVAL == 0 {
+        if let Some(last_object) = last_object {
+            let snapshot = Snapshot {
+                header: SnapshotHeader {
+                    seq: last_seq,
+                    ver,
+                    last_assertion: last_object,
+                    timestamp: last_timestamp,
+                },
+                memory: memory.clone(),
+            };
+            save_snapshot(env, subject, &snapshot)?;
+        }
+    }
+
+    Ok(LoadedState {
+        memory,
+        last_seq,
+        last_object,
+        last_overlay_seq,
+        last_overlay_object,
+    })
 }
 
 pub fn default_state_memory(schema: &CqrsSchema) -> Vec<u8> {
@@ -51,9 +190,11 @@ pub fn load_state_until(
 
     let mut last_seq = 0;
     let mut last_object = None;
+    let mut last_timestamp = 0u64;
     if let Some(snapshot) = load_latest_snapshot_for_ver(env, subject, ver)? {
         last_seq = snapshot.header.seq;
         last_object = Some(snapshot.header.last_assertion);
+        last_timestamp = snapshot.header.timestamp;
     }
 
     let mut last_overlay_seq = 0;
@@ -98,6 +239,11 @@ pub fn load_state_until(
             if assertion.header.seq >= last_seq {
                 last_seq = assertion.header.seq;
                 last_object = Some(assertion_id);
+                last_timestamp = assertion
+                    .header
+                    .ts
+                    .and_then(|ts| u64::try_from(ts).ok())
+                    .unwrap_or(last_timestamp);
             }
             if let Some(stop) = stop_at {
                 if assertion_id == stop {
@@ -118,12 +264,18 @@ pub fn load_state_until(
         let action_index = action_index(schema, action_name)?;
         let overlay = overlay_by_ref.get(&assertion_id);
         let merged = merge_args(&assertion.body, overlay)?;
-        let args_buffer = encode_args_buffer(action_schema, action_index, &merged, true)?;
+        let args_buffer =
+            encode_args_buffer(action_schema, &schema.structs, action_index, &merged, true)?;
         let context = context_buffer_for_assertion(assertion);
         vm.reduce(env, &mut memory, &args_buffer, Some(&context))?;
         if assertion.header.seq >= last_seq {
             last_seq = assertion.header.seq;
             last_object = Some(assertion_id);
+            last_timestamp = assertion
+                .header
+                .ts
+                .and_then(|ts| u64::try_from(ts).ok())
+                .unwrap_or(last_timestamp);
         }
         if let Some(stop) = stop_at {
             if assertion_id == stop {
@@ -134,6 +286,21 @@ pub fn load_state_until(
     }
     if !found_stop {
         return Err(DharmaError::Validation("stop-at object not found".to_string()));
+    }
+
+    if stop_at.is_none() && last_seq != 0 && last_seq % SNAPSHOT_INTERVAL == 0 {
+        if let Some(last_object) = last_object {
+            let snapshot = Snapshot {
+                header: SnapshotHeader {
+                    seq: last_seq,
+                    ver,
+                    last_assertion: last_object,
+                    timestamp: last_timestamp,
+                },
+                memory: memory.clone(),
+            };
+            save_snapshot(env, subject, &snapshot)?;
+        }
     }
 
     Ok(LoadedState {
@@ -158,8 +325,14 @@ pub fn decode_state(memory: &[u8], schema: &CqrsSchema) -> Result<Value, DharmaE
     let mut out = BTreeMap::new();
     let public_layout = layout_public(schema);
     let private_layout = layout_private(schema);
-    decode_layout(memory, &public_layout, 0, &mut out)?;
-    decode_layout(memory, &private_layout, OVERLAY_BASE, &mut out)?;
+    decode_layout(memory, &public_layout, 0, &mut out, &schema.structs)?;
+    decode_layout(
+        memory,
+        &private_layout,
+        OVERLAY_BASE,
+        &mut out,
+        &schema.structs,
+    )?;
     let entries = out
         .into_iter()
         .map(|(k, v)| (Value::Text(k), v))
@@ -167,27 +340,58 @@ pub fn decode_state(memory: &[u8], schema: &CqrsSchema) -> Result<Value, DharmaE
     Ok(Value::Map(entries))
 }
 
+pub fn decode_state_with_access(
+    memory: &[u8],
+    schema: &CqrsSchema,
+    access: &FieldAccess,
+) -> Result<Value, DharmaError> {
+    let value = decode_state(memory, schema)?;
+    Ok(filter_state_value(value, access))
+}
+
+pub fn filter_state_value(value: Value, access: &FieldAccess) -> Value {
+    match access {
+        FieldAccess::All => value,
+        FieldAccess::Fields(fields) => match value {
+            Value::Map(entries) => {
+                let filtered = entries
+                    .into_iter()
+                    .filter(|(k, _)| matches!(k, Value::Text(name) if fields.contains(name)))
+                    .collect();
+                Value::Map(filtered)
+            }
+            other => other,
+        },
+    }
+}
+
 fn decode_layout(
     memory: &[u8],
     layout: &[crate::pdl::schema::LayoutEntry],
     base: usize,
     out: &mut BTreeMap<String, Value>,
+    structs: &BTreeMap<String, crate::pdl::schema::StructSchema>,
 ) -> Result<(), DharmaError> {
     for entry in layout {
         let offset = base + entry.offset;
-        let value = decode_value_at(&entry.typ, memory, offset)?;
+        let value = decode_value_at(&entry.typ, memory, offset, structs)?;
         out.insert(entry.name.clone(), value);
     }
     Ok(())
 }
 
-fn decode_value_at(typ: &TypeSpec, memory: &[u8], offset: usize) -> Result<Value, DharmaError> {
+fn decode_value_at(
+    typ: &TypeSpec,
+    memory: &[u8],
+    offset: usize,
+    structs: &BTreeMap<String, crate::pdl::schema::StructSchema>,
+) -> Result<Value, DharmaError> {
     match typ {
         TypeSpec::Optional(inner) => {
             if memory[offset] == 0 {
                 return Ok(Value::Null);
             }
-            return decode_value_at(inner, memory, offset + 1);
+            return decode_value_at(inner, memory, offset + 1, structs);
         }
         TypeSpec::Int | TypeSpec::Decimal(_) | TypeSpec::Duration | TypeSpec::Timestamp => {
             let mut buf = [0u8; 8];
@@ -205,6 +409,29 @@ fn decode_value_at(typ: &TypeSpec, memory: &[u8], offset: usize) -> Result<Value
         TypeSpec::Identity | TypeSpec::Ref(_) => {
             let bytes = memory[offset..offset + 32].to_vec();
             Ok(Value::Bytes(bytes))
+        }
+        TypeSpec::SubjectRef(_) => {
+            let id = memory[offset..offset + 32].to_vec();
+            let mut seq_buf = [0u8; 8];
+            seq_buf.copy_from_slice(&memory[offset + 32..offset + 40]);
+            let seq = u64::from_le_bytes(seq_buf);
+            Ok(Value::Map(vec![
+                (Value::Text("id".to_string()), Value::Bytes(id)),
+                (Value::Text("seq".to_string()), Value::Integer(seq.into())),
+            ]))
+        }
+        TypeSpec::Struct(name) => {
+            let Some(def) = structs.get(name) else {
+                return Err(DharmaError::Validation("unknown struct".to_string()));
+            };
+            let mut out = Vec::new();
+            let mut cursor = offset;
+            for (field_name, field) in &def.fields {
+                let value = decode_value_at(&field.typ, memory, cursor, structs)?;
+                out.push((Value::Text(field_name.clone()), value));
+                cursor += crate::pdl::schema::type_size(&field.typ, structs);
+            }
+            Ok(Value::Map(out))
         }
         TypeSpec::Text(len) => {
             let max = len.unwrap_or(DEFAULT_TEXT_LEN);
@@ -253,8 +480,8 @@ fn decode_value_at(typ: &TypeSpec, memory: &[u8], offset: usize) -> Result<Value
             ]))
         }
         TypeSpec::List(inner) => {
-            let cap = list_capacity(inner);
-            let elem_size = type_size(inner);
+            let cap = list_capacity(inner, structs);
+            let elem_size = type_size(inner, structs);
             let mut len_buf = [0u8; 4];
             len_buf.copy_from_slice(&memory[offset..offset + 4]);
             let len = u32::from_le_bytes(len_buf) as usize;
@@ -264,15 +491,15 @@ fn decode_value_at(typ: &TypeSpec, memory: &[u8], offset: usize) -> Result<Value
             let mut out = Vec::with_capacity(len);
             let mut cursor = offset + 4;
             for _ in 0..len {
-                out.push(decode_value_at(inner, memory, cursor)?);
+                out.push(decode_value_at(inner, memory, cursor, structs)?);
                 cursor += elem_size;
             }
             Ok(Value::Array(out))
         }
         TypeSpec::Map(key, val) => {
-            let cap = map_capacity(key, val);
-            let key_size = type_size(key);
-            let val_size = type_size(val);
+            let cap = map_capacity(key, val, structs);
+            let key_size = type_size(key, structs);
+            let val_size = type_size(val, structs);
             let entry_size = key_size + val_size;
             let mut len_buf = [0u8; 4];
             len_buf.copy_from_slice(&memory[offset..offset + 4]);
@@ -283,8 +510,8 @@ fn decode_value_at(typ: &TypeSpec, memory: &[u8], offset: usize) -> Result<Value
             let mut out = Vec::with_capacity(len);
             let mut cursor = offset + 4;
             for _ in 0..len {
-                let key_val = decode_value_at(key, memory, cursor)?;
-                let val_val = decode_value_at(val, memory, cursor + key_size)?;
+                let key_val = decode_value_at(key, memory, cursor, structs)?;
+                let val_val = decode_value_at(val, memory, cursor + key_size, structs)?;
                 out.push((key_val, val_val));
                 cursor += entry_size;
             }
@@ -293,13 +520,86 @@ fn decode_value_at(typ: &TypeSpec, memory: &[u8], offset: usize) -> Result<Value
     }
 }
 
+pub fn read_value_at_path(
+    memory: &[u8],
+    schema: &CqrsSchema,
+    path: &str,
+) -> Result<(TypeSpec, Value), DharmaError> {
+    let (typ, offset) = resolve_path_offset(memory, schema, path)?;
+    let value = decode_value_at(&typ, memory, offset, &schema.structs)?;
+    Ok((typ, value))
+}
+
+fn resolve_path_offset(
+    memory: &[u8],
+    schema: &CqrsSchema,
+    path: &str,
+) -> Result<(TypeSpec, usize), DharmaError> {
+    let mut parts = path.split('.').filter(|p| !p.is_empty());
+    let Some(root) = parts.next() else {
+        return Err(DharmaError::Validation("empty path".to_string()));
+    };
+    let field = schema.fields.get(root).ok_or_else(|| {
+        DharmaError::Validation("unknown field".to_string())
+    })?;
+    let base = match field.visibility {
+        crate::pdl::schema::Visibility::Public => 0usize,
+        crate::pdl::schema::Visibility::Private => OVERLAY_BASE,
+    };
+    let mut offset = 0usize;
+    for (name, other) in &schema.fields {
+        if other.visibility != field.visibility {
+            continue;
+        }
+        if name == root {
+            break;
+        }
+        offset += type_size(&other.typ, &schema.structs);
+    }
+    let mut typ = field.typ.clone();
+    let mut absolute = base + offset;
+    for part in parts {
+        if let TypeSpec::Optional(inner) = typ {
+            if memory.get(absolute).copied().unwrap_or(0) == 0 {
+                return Err(DharmaError::Validation("optional field missing".to_string()));
+            }
+            absolute += 1;
+            typ = *inner;
+        }
+        let TypeSpec::Struct(name) = typ else {
+            return Err(DharmaError::Validation(
+                "nested path requires struct".to_string(),
+            ));
+        };
+        let Some(def) = schema.structs.get(&name) else {
+            return Err(DharmaError::Validation("unknown struct".to_string()));
+        };
+        let mut found = None;
+        let mut inner_offset = 0usize;
+        for (field_name, field_def) in &def.fields {
+            if field_name == part {
+                found = Some(field_def);
+                break;
+            }
+            inner_offset += type_size(&field_def.typ, &schema.structs);
+        }
+        let Some(field_def) = found else {
+            return Err(DharmaError::Validation("unknown struct field".to_string()));
+        };
+        absolute += inner_offset;
+        typ = field_def.typ.clone();
+    }
+    Ok((typ, absolute))
+}
+
 pub fn encode_args_buffer(
     action: &ActionSchema,
+    structs: &BTreeMap<String, crate::pdl::schema::StructSchema>,
     action_index: u32,
     args_value: &Value,
     fill_missing: bool,
 ) -> Result<Vec<u8>, DharmaError> {
-    let layout = layout_action(action);
+    let layout = layout_action(action, structs);
     let total = layout
         .last()
         .map(|entry| entry.offset + entry.size)
@@ -324,16 +624,20 @@ pub fn encode_args_buffer(
         } else {
             return Err(DharmaError::Validation("missing arg".to_string()));
         };
-        encode_value_at(&entry.typ, &value, &mut buffer, entry.offset)?;
+        encode_value_at(&entry.typ, &value, &mut buffer, entry.offset, structs)?;
     }
     Ok(buffer)
 }
 
-pub fn decode_args_buffer(action: &ActionSchema, buffer: &[u8]) -> Result<Value, DharmaError> {
-    let layout = layout_action(action);
+pub fn decode_args_buffer(
+    action: &ActionSchema,
+    structs: &BTreeMap<String, crate::pdl::schema::StructSchema>,
+    buffer: &[u8],
+) -> Result<Value, DharmaError> {
+    let layout = layout_action(action, structs);
     let mut entries = Vec::new();
     for entry in layout {
-        let value = decode_value_at(&entry.typ, buffer, entry.offset)?;
+        let value = decode_value_at(&entry.typ, buffer, entry.offset, structs)?;
         entries.push((Value::Text(entry.name.clone()), value));
     }
     Ok(Value::Map(entries))
@@ -344,22 +648,23 @@ fn encode_value_at(
     value: &Value,
     buffer: &mut [u8],
     offset: usize,
+    structs: &BTreeMap<String, crate::pdl::schema::StructSchema>,
 ) -> Result<(), DharmaError> {
     match typ {
         TypeSpec::Optional(inner) => {
             if matches!(value, Value::Null) {
                 buffer[offset] = 0;
-                let size = type_size(inner);
+                let size = type_size(inner, structs);
                 let start = offset + 1;
                 buffer[start..start + size].fill(0);
                 return Ok(());
             }
             buffer[offset] = 1;
-            return encode_value_at(inner, value, buffer, offset + 1);
+            return encode_value_at(inner, value, buffer, offset + 1, structs);
         }
         TypeSpec::List(inner) => {
-            let cap = list_capacity(inner);
-            let elem_size = type_size(inner);
+            let cap = list_capacity(inner, structs);
+            let elem_size = type_size(inner, structs);
             let items = match value {
                 Value::Array(items) => items,
                 _ => return Err(DharmaError::Validation("invalid list".to_string())),
@@ -371,7 +676,7 @@ fn encode_value_at(
                 .copy_from_slice(&(items.len() as u32).to_le_bytes());
             let mut cursor = offset + 4;
             for item in items {
-                encode_value_at(inner, item, buffer, cursor)?;
+                encode_value_at(inner, item, buffer, cursor, structs)?;
                 cursor += elem_size;
             }
             let remaining = cap.saturating_sub(items.len());
@@ -383,9 +688,9 @@ fn encode_value_at(
             return Ok(());
         }
         TypeSpec::Map(key, val) => {
-            let cap = map_capacity(key, val);
-            let key_size = type_size(key);
-            let val_size = type_size(val);
+            let cap = map_capacity(key, val, structs);
+            let key_size = type_size(key, structs);
+            let val_size = type_size(val, structs);
             let entry_size = key_size + val_size;
             let entries = match value {
                 Value::Map(entries) => entries,
@@ -398,8 +703,8 @@ fn encode_value_at(
                 .copy_from_slice(&(entries.len() as u32).to_le_bytes());
             let mut cursor = offset + 4;
             for (k, v) in entries {
-                encode_value_at(key, k, buffer, cursor)?;
-                encode_value_at(val, v, buffer, cursor + key_size)?;
+                encode_value_at(key, k, buffer, cursor, structs)?;
+                encode_value_at(val, v, buffer, cursor + key_size, structs)?;
                 cursor += entry_size;
             }
             let remaining = cap.saturating_sub(entries.len());
@@ -438,6 +743,40 @@ fn encode_value_at(
                 _ => return Err(DharmaError::Validation("invalid identity".to_string())),
             };
             buffer[offset..offset + 32].copy_from_slice(bytes);
+        }
+        TypeSpec::SubjectRef(_) => {
+            let map = crate::value::expect_map(value)?;
+            let id_val = crate::value::map_get(map, "id")
+                .ok_or_else(|| DharmaError::Validation("subject_ref missing id".to_string()))?;
+            let seq_val = crate::value::map_get(map, "seq")
+                .ok_or_else(|| DharmaError::Validation("subject_ref missing seq".to_string()))?;
+            let id_bytes = crate::value::expect_bytes(id_val)?;
+            if id_bytes.len() != 32 {
+                return Err(DharmaError::Validation("invalid subject_ref id".to_string()));
+            }
+            let seq = crate::value::expect_uint(seq_val)?;
+            buffer[offset..offset + 32].copy_from_slice(&id_bytes);
+            buffer[offset + 32..offset + 40].copy_from_slice(&seq.to_le_bytes());
+        }
+        TypeSpec::Struct(name) => {
+            let Some(def) = structs.get(name) else {
+                return Err(DharmaError::Validation("unknown struct".to_string()));
+            };
+            let map = crate::value::expect_map(value)?;
+            let mut values = BTreeMap::new();
+            for (k, v) in map {
+                let key = crate::value::expect_text(k)?;
+                values.insert(key, v.clone());
+            }
+            let mut cursor = offset;
+            for (field_name, field) in &def.fields {
+                let value = values
+                    .get(field_name)
+                    .cloned()
+                    .unwrap_or_else(|| default_value_for_type(&field.typ));
+                encode_value_at(&field.typ, &value, buffer, cursor, structs)?;
+                cursor += crate::pdl::schema::type_size(&field.typ, structs);
+            }
         }
         TypeSpec::Text(len) => {
             let max = len.unwrap_or(DEFAULT_TEXT_LEN);
@@ -609,6 +948,11 @@ fn default_value_for_type(typ: &TypeSpec) -> Value {
         TypeSpec::Text(_) | TypeSpec::Currency => Value::Text(String::new()),
         TypeSpec::Enum(variants) => Value::Text(variants.first().cloned().unwrap_or_default()),
         TypeSpec::Identity | TypeSpec::Ref(_) => Value::Bytes(vec![0u8; 32]),
+        TypeSpec::SubjectRef(_) => Value::Map(vec![
+            (Value::Text("id".to_string()), Value::Bytes(vec![0u8; 32])),
+            (Value::Text("seq".to_string()), Value::Integer(0u64.into())),
+        ]),
+        TypeSpec::Struct(_) => Value::Map(Vec::new()),
         TypeSpec::GeoPoint => Value::Map(vec![
             (Value::Text("lat".to_string()), Value::Integer(0.into())),
             (Value::Text("lon".to_string()), Value::Integer(0.into())),
@@ -635,11 +979,11 @@ fn apply_defaults(
                 let default = schema.fields[&entry.name].default.clone().unwrap_or(Value::Null);
                 if matches!(default, Value::Null) {
                     memory[offset] = 0;
-                    let size = type_size(inner);
+                    let size = type_size(inner, &schema.structs);
                     memory[offset + 1..offset + 1 + size].fill(0);
                 } else {
                     memory[offset] = 1;
-                    let _ = encode_value_at(inner, &default, memory, offset + 1);
+                    let _ = encode_value_at(inner, &default, memory, offset + 1, &schema.structs);
                 }
             }
             TypeSpec::Int | TypeSpec::Decimal(_) | TypeSpec::Duration | TypeSpec::Timestamp => {
@@ -747,7 +1091,7 @@ fn apply_defaults(
                     .default
                     .clone()
                     .unwrap_or_else(|| default_value_for_type(&entry.typ));
-                let _ = encode_value_at(&entry.typ, &default, memory, offset);
+                let _ = encode_value_at(&entry.typ, &default, memory, offset, &schema.structs);
             }
             TypeSpec::List(_) | TypeSpec::Map(_, _) => {
                 let default = schema.fields[&entry.name]
@@ -758,7 +1102,14 @@ fn apply_defaults(
                         TypeSpec::Map(_, _) => Value::Map(Vec::new()),
                         _ => Value::Null,
                     });
-                let _ = encode_value_at(&entry.typ, &default, memory, offset);
+                let _ = encode_value_at(&entry.typ, &default, memory, offset, &schema.structs);
+            }
+            TypeSpec::SubjectRef(_) | TypeSpec::Struct(_) => {
+                let default = schema.fields[&entry.name]
+                    .default
+                    .clone()
+                    .unwrap_or_else(|| default_value_for_type(&entry.typ));
+                let _ = encode_value_at(&entry.typ, &default, memory, offset, &schema.structs);
             }
         }
     }
@@ -811,8 +1162,12 @@ mod tests {
             version: "1.0.0".to_string(),
             aggregate: "Dummy".to_string(),
             extends: None,
+            implements: Vec::new(),
+            structs: BTreeMap::new(),
             fields,
             actions,
+            queries: BTreeMap::new(),
+        projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Strict,
         };
 
@@ -904,7 +1259,7 @@ mod tests {
             doc: None,
         };
         let args_value = Value::Map(vec![]);
-        let buffer = encode_args_buffer(&action, 0, &args_value, false).unwrap();
+        let buffer = encode_args_buffer(&action, &BTreeMap::new(), 0, &args_value, false).unwrap();
         assert_eq!(buffer[4], 0);
     }
 
@@ -912,9 +1267,9 @@ mod tests {
     fn list_roundtrip_layout() {
         let typ = TypeSpec::List(Box::new(TypeSpec::Int));
         let value = Value::Array(vec![Value::Integer(1.into()), Value::Integer(2.into())]);
-        let mut buf = vec![0u8; type_size(&typ)];
-        encode_value_at(&typ, &value, &mut buf, 0).unwrap();
-        let decoded = decode_value_at(&typ, &buf, 0).unwrap();
+        let mut buf = vec![0u8; type_size(&typ, &BTreeMap::new())];
+        encode_value_at(&typ, &value, &mut buf, 0, &BTreeMap::new()).unwrap();
+        let decoded = decode_value_at(&typ, &buf, 0, &BTreeMap::new()).unwrap();
         assert_eq!(decoded, value);
     }
 
@@ -925,9 +1280,9 @@ mod tests {
             (Value::Text("a".to_string()), Value::Integer(1.into())),
             (Value::Text("b".to_string()), Value::Integer(2.into())),
         ]);
-        let mut buf = vec![0u8; type_size(&typ)];
-        encode_value_at(&typ, &value, &mut buf, 0).unwrap();
-        let decoded = decode_value_at(&typ, &buf, 0).unwrap();
+        let mut buf = vec![0u8; type_size(&typ, &BTreeMap::new())];
+        encode_value_at(&typ, &value, &mut buf, 0, &BTreeMap::new()).unwrap();
+        let decoded = decode_value_at(&typ, &buf, 0, &BTreeMap::new()).unwrap();
         assert_eq!(decoded, value);
     }
 
@@ -966,8 +1321,12 @@ mod tests {
             version: "1.0.0".to_string(),
             aggregate: "Dummy".to_string(),
             extends: None,
+            implements: Vec::new(),
+            structs: BTreeMap::new(),
             fields,
             actions,
+            queries: BTreeMap::new(),
+        projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Strict,
         };
 
@@ -1081,8 +1440,12 @@ mod tests {
             version: "1.0.0".to_string(),
             aggregate: "Dummy".to_string(),
             extends: None,
+            implements: Vec::new(),
+            structs: BTreeMap::new(),
             fields,
             actions: BTreeMap::new(),
+            queries: BTreeMap::new(),
+        projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Strict,
         };
         let mut memory = vec![0u8; STATE_SIZE];
@@ -1101,8 +1464,8 @@ mod tests {
         let mut memory = vec![0u8; 64];
         let decimal_type = TypeSpec::Decimal(Some(2));
         let decimal_val = Value::Integer(1234.into());
-        encode_value_at(&decimal_type, &decimal_val, &mut memory, 0).unwrap();
-        let decoded = decode_value_at(&decimal_type, &memory, 0).unwrap();
+        encode_value_at(&decimal_type, &decimal_val, &mut memory, 0, &BTreeMap::new()).unwrap();
+        let decoded = decode_value_at(&decimal_type, &memory, 0, &BTreeMap::new()).unwrap();
         assert_eq!(decoded, decimal_val);
 
         let ratio_type = TypeSpec::Ratio;
@@ -1110,8 +1473,8 @@ mod tests {
             (Value::Text("num".to_string()), Value::Integer(3.into())),
             (Value::Text("den".to_string()), Value::Integer(5.into())),
         ]);
-        encode_value_at(&ratio_type, &ratio_val, &mut memory, 16).unwrap();
-        let decoded_ratio = decode_value_at(&ratio_type, &memory, 16).unwrap();
+        encode_value_at(&ratio_type, &ratio_val, &mut memory, 16, &BTreeMap::new()).unwrap();
+        let decoded_ratio = decode_value_at(&ratio_type, &memory, 16, &BTreeMap::new()).unwrap();
         let map = crate::value::expect_map(&decoded_ratio).unwrap();
         let num = crate::value::map_get(map, "num").unwrap().clone();
         let den = crate::value::map_get(map, "den").unwrap().clone();

@@ -1,6 +1,8 @@
 ---
 namespace: std.io.contacts
 version: 1.1.0
+implements:
+  - std.protocol.contacts@1
 ---
 
 # Contacts Contract

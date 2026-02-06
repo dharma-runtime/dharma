@@ -363,7 +363,9 @@ impl Parser {
             Some(Token::Str(value)) => Ok(Expr::Literal(Literal::Text(value))),
             Some(Token::Null) => Ok(Expr::Literal(Literal::Null)),
             Some(Token::Ident(value)) => {
-                if self.peek_is_lparen() {
+                if self.peek_is_lbrace() {
+                    self.parse_struct_literal(value)
+                } else if self.peek_is_lparen() {
                     self.parse_call(value)
                 } else if value.starts_with('.') {
                     Err(DharmaError::Validation("invalid path".to_string()))
@@ -395,6 +397,33 @@ impl Parser {
             _ => Err(DharmaError::Validation("unexpected token".to_string())),
         }?;
         self.parse_postfix(base)
+    }
+
+    fn parse_struct_literal(&mut self, name: String) -> Result<Expr, DharmaError> {
+        self.expect(Token::LBrace)?;
+        let mut items = Vec::new();
+        if !self.peek_is_rbrace() {
+            loop {
+                let field_name = match self.next() {
+                    Some(Token::Ident(value)) => value,
+                    Some(Token::Str(value)) => value,
+                    _ => {
+                        return Err(DharmaError::Validation(
+                            "struct field name must be identifier or text".to_string(),
+                        ))
+                    }
+                };
+                self.expect(Token::Colon)?;
+                let value = self.parse_or()?;
+                items.push((field_name, value));
+                if self.peek_is_rbrace() {
+                    break;
+                }
+                self.expect(Token::Comma)?;
+            }
+        }
+        self.expect(Token::RBrace)?;
+        Ok(Expr::Literal(Literal::Struct(name, items)))
     }
 
     fn parse_postfix(&mut self, mut expr: Expr) -> Result<Expr, DharmaError> {
@@ -516,6 +545,10 @@ impl Parser {
 
     fn peek_is_lparen(&self) -> bool {
         matches!(self.tokens.get(self.pos), Some(Token::LParen))
+    }
+
+    fn peek_is_lbrace(&self) -> bool {
+        matches!(self.tokens.get(self.pos), Some(Token::LBrace))
     }
 
     fn peek_is_rparen(&self) -> bool {

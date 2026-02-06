@@ -22,7 +22,7 @@ use crate::DharmaError;
 use crate::pdl::schema::{validate_args, ActionSchema, ConcurrencyMode, CqrsSchema, TypeSpec, Visibility};
 use crate::net::policy::{OverlayAccess, OverlayPolicy, PeerClaims};
 use crate::net::trust::PeerPolicy;
-use crate::sync::{Get, Hello, Subscriptions, SyncMessage};
+use crate::sync::{Get, Hello, ObjectRef, Subscriptions, SyncMessage};
 use ciborium::value::Value;
 use crossterm::style::{Color, Stylize};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -537,6 +537,10 @@ fn handle_identity(ctx: &mut ReplContext, args: &[&str]) -> Result<(), DharmaErr
                 println!("Subject: {}", id.subject_id.to_hex());
                 println!("Root Pubkey: {}", id.root_public_key.to_hex());
                 println!("Device Pubkey: {}", id.public_key.to_hex());
+                let env = dharma::env::StdEnv::new(&ctx.data_dir);
+                if let Ok(Some(handle)) = identity_store::read_local_handle(&env) {
+                    println!("Local Handle: {handle}");
+                }
             } else {
                 println!("Not logged in.");
             }
@@ -575,11 +579,17 @@ fn identity_status(ctx: &ReplContext) -> Result<(), DharmaError> {
         println!("Subject: {}", identity.subject_id.to_hex());
         println!("Root Pubkey: {}", identity.root_public_key.to_hex());
         println!("Device Pubkey: {}", identity.public_key.to_hex());
+        if let Ok(Some(handle)) = identity_store::read_local_handle(&env) {
+            println!("Local Handle: {handle}");
+        }
         return Ok(());
     }
     println!("Status: Locked");
     if let Ok(subject) = identity_store::read_identity_subject(&env) {
         println!("Subject: {}", subject.to_hex());
+    }
+    if let Ok(Some(handle)) = identity_store::read_local_handle(&env) {
+        println!("Local Handle: {handle}");
     }
     Ok(())
 }
@@ -1365,6 +1375,7 @@ fn handle_why(ctx: &mut ReplContext, args: &[&str]) -> Result<(), DharmaError> {
         let merged = merge_args(&assertion.body, overlay)?;
         let args_buffer = crate::runtime::cqrs::encode_args_buffer(
             action_schema,
+            &schema.structs,
             action_index,
             &merged,
             true,
@@ -1726,7 +1737,7 @@ fn fetch_objects_from_peer(
     exchange_hello_for_fetch(&mut stream, &mut session, identity)?;
     let mut remaining: BTreeSet<EnvelopeId> = pending.clone();
     let get = SyncMessage::Get(Get {
-        ids: remaining.iter().copied().collect(),
+        ids: remaining.iter().copied().map(ObjectRef::Envelope).collect(),
     });
     send_sync_msg(&mut stream, &mut session, &get)?;
     let mut received = Vec::new();
@@ -1740,16 +1751,19 @@ fn fetch_objects_from_peer(
         };
         match msg {
             SyncMessage::Obj(obj) => {
-                if !remaining.contains(&obj.id) {
+                let ObjectRef::Envelope(env_id) = obj.id else {
+                    continue;
+                };
+                if !remaining.contains(&env_id) {
                     continue;
                 }
                 let actual = crate::crypto::envelope_id(&obj.bytes);
-                if actual != obj.id {
+                if actual != env_id {
                     return Err(DharmaError::Validation("artifact hash mismatch".to_string()));
                 }
-                store.put_object(&obj.id, &obj.bytes)?;
-                remaining.remove(&obj.id);
-                received.push(obj.id);
+                store.put_object(&env_id, &obj.bytes)?;
+                remaining.remove(&env_id);
+                received.push(env_id);
             }
             SyncMessage::Err(err) => {
                 return Err(DharmaError::Validation(format!("peer error: {}", err.message)));
@@ -2704,9 +2718,13 @@ fn prepare_action(
     let subject = current_subject_or_identity(ctx)?;
     let store = Store::from_root(&ctx.data_dir);
     if !store.subject_dir(&subject).join("assertions").exists() {
-        let mut keys = std::collections::HashMap::new();
+        let mut legacy_keys = std::collections::HashMap::new();
         if let Some(identity) = &ctx.identity {
-            keys.insert(identity.subject_id, identity.subject_key);
+            legacy_keys.insert(identity.subject_id, identity.subject_key);
+        }
+        let mut keys = dharma::keys::Keyring::from_subject_keys(&legacy_keys);
+        if let Some(identity) = &ctx.identity {
+            keys.insert_hpke_secret(identity.public_key, identity.noise_sk);
         }
         store.rebuild_subject_views(&keys)?;
     }
@@ -2720,7 +2738,13 @@ fn prepare_action(
     let args_value = parse_action_args(action_schema, args)?;
     validate_args(action_schema, &args_value)?;
     let action_index = crate::runtime::cqrs::action_index(&schema, action)?;
-    let args_buffer = crate::runtime::cqrs::encode_args_buffer(action_schema, action_index, &args_value, false)?;
+    let args_buffer = crate::runtime::cqrs::encode_args_buffer(
+        action_schema,
+        &schema.structs,
+        action_index,
+        &args_value,
+        false,
+    )?;
     let (base_args, overlay_args) = split_action_args(action_schema, &args_value)?;
     Ok(ActionPlan {
         root: ctx.data_dir.clone(),
@@ -3226,6 +3250,24 @@ fn parse_value(raw: &str, typ: &TypeSpec) -> Result<Value, DharmaError> {
             }
             Ok(Value::Bytes(bytes))
         }
+        TypeSpec::SubjectRef(_) => {
+            let (id_raw, seq_raw) = raw
+                .split_once('@')
+                .or_else(|| raw.split_once(':'))
+                .ok_or_else(|| DharmaError::Validation("subject_ref expects hex@seq".to_string()))?;
+            let bytes = crate::types::hex_decode(id_raw)?;
+            if bytes.len() != 32 {
+                return Err(DharmaError::Validation("invalid subject_ref id".to_string()));
+            }
+            let seq = seq_raw
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| DharmaError::Validation("invalid subject_ref seq".to_string()))?;
+            Ok(Value::Map(vec![
+                (Value::Text("id".to_string()), Value::Bytes(bytes)),
+                (Value::Text("seq".to_string()), Value::Integer(seq.into())),
+            ]))
+        }
         TypeSpec::GeoPoint => {
             let parts: Vec<&str> = raw.split(',').collect();
             if parts.len() != 2 {
@@ -3249,6 +3291,9 @@ fn parse_value(raw: &str, typ: &TypeSpec) -> Result<Value, DharmaError> {
                 (Value::Text("den".to_string()), Value::Integer(den.into())),
             ]))
         }
+        TypeSpec::Struct(_) => Err(DharmaError::Validation(
+            "struct args unsupported".to_string(),
+        )),
         TypeSpec::List(_) | TypeSpec::Map(_, _) => {
             Err(DharmaError::Validation("collection args unsupported".to_string()))
         }
@@ -3822,8 +3867,10 @@ fn sync_with_peer(
     let store = Store::from_root(&ctx.data_dir);
     let mut stream = TcpStream::connect(addr)?;
     let session = crate::net::handshake::client_handshake(&mut stream, identity)?;
-    let mut keys: HashMap<SubjectId, [u8; 32]> = HashMap::new();
-    keys.insert(identity.subject_id, identity.subject_key);
+    let mut legacy_keys: HashMap<SubjectId, [u8; 32]> = HashMap::new();
+    legacy_keys.insert(identity.subject_id, identity.subject_key);
+    let mut keys = dharma::keys::Keyring::from_subject_keys(&legacy_keys);
+    keys.insert_hpke_secret(identity.public_key, identity.noise_sk);
     let mut index = FrontierIndex::build(&store, &keys)?;
     let policy = OverlayPolicy::load(store.root());
     let claims = PeerClaims::default();
@@ -3835,7 +3882,7 @@ fn sync_with_peer(
             session,
             &store,
             &mut index,
-            &keys,
+            &mut keys,
             identity,
             &access,
             crate::net::sync::SyncOptions {
@@ -4114,7 +4161,13 @@ fn prove_cqrs_contract(
         let action_index = crate::runtime::cqrs::action_index(schema, action_name)?;
         let overlay = overlay_map.get(&assertion_id);
         let merged = merge_args(&assertion.body, overlay)?;
-        let args_buffer = crate::runtime::cqrs::encode_args_buffer(action_schema, action_index, &merged, true)?;
+        let args_buffer = crate::runtime::cqrs::encode_args_buffer(
+            action_schema,
+            &schema.structs,
+            action_index,
+            &merged,
+            true,
+        )?;
         let context = context_buffer_for_assertion(assertion);
         if assertion_id == target_id {
             match vm.validate(env, &mut memory, &args_buffer, Some(&context)) {
@@ -4967,6 +5020,9 @@ pub(crate) fn format_type(typ: &TypeSpec) -> String {
         TypeSpec::Enum(values) => format!("Enum({})", values.join(", ")),
         TypeSpec::Identity => "Identity".to_string(),
         TypeSpec::Ref(name) => format!("Ref<{name}>"),
+        TypeSpec::SubjectRef(Some(name)) => format!("SubjectRef<{name}>"),
+        TypeSpec::SubjectRef(None) => "SubjectRef".to_string(),
+        TypeSpec::Struct(name) => format!("Struct<{name}>"),
         TypeSpec::GeoPoint => "GeoPoint".to_string(),
         TypeSpec::List(inner) => format!("List<{}>", format_type(inner)),
         TypeSpec::Map(key, value) => format!(
@@ -5228,8 +5284,12 @@ mod tests {
             version: "1.0.0".to_string(),
             aggregate: "Test".to_string(),
             extends: None,
+            implements: Vec::new(),
+            structs: BTreeMap::new(),
             fields,
             actions: BTreeMap::new(),
+            queries: BTreeMap::new(),
+        projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Strict,
         };
         let value = Value::Map(vec![

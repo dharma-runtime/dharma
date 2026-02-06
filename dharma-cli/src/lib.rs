@@ -7,16 +7,20 @@ pub use dharma_core::{
 };
 
 pub mod cmd;
+pub mod dhlq;
+pub mod dhlp;
 pub mod pdl;
 pub mod pkg;
 pub mod dharmaq;
 pub mod repl;
 pub mod reactor;
+pub mod vault;
 
 use dharma::assertion::AssertionPlaintext;
 #[cfg(feature = "compiler")]
 use dharma::assertion::DEFAULT_DATA_VERSION;
 use dharma::lock::LockHandle;
+use dharma::keys::Keyring;
 use dharma::store::state::list_assertions;
 use dharma::types::SubjectId;
 #[cfg(feature = "compiler")]
@@ -82,6 +86,14 @@ pub fn run() -> Result<(), DharmaError> {
         }
         [_, "compile", source] => compile_dhl(source),
         [_, "test", args @ ..] => run_tests(args),
+        [_, "doctor"] => cmd::ops::doctor(),
+        [_, "gc", args @ ..] => cmd::ops::gc(args),
+        [_, "reserve", "expire", args @ ..] => cmd::ops::reserve_expire(args),
+        [_, "backup", "export", path] => cmd::ops::backup_export(path),
+        [_, "backup", "import", path] => cmd::ops::backup_import(path, false),
+        [_, "backup", "import", "--force", path]
+        | [_, "backup", "import", path, "--force"] => cmd::ops::backup_import(path, true),
+        [_, "project", args @ ..] => cmd::project::project(args),
         [_, "action", subject, action] => cmd::action::action_cmd(subject, action, &[]),
         [_, "action", subject, action, args @ ..] => {
             cmd::action::action_cmd(
@@ -123,10 +135,15 @@ fn requires_write(argv: &[&str]) -> bool {
     match argv {
         [_, "identity", "export"] | [_, "export"] => false,
         [_, "config", "show"] | [_, "config"] => false,
+        [_, "doctor"] => false,
         [_, "identity", "init", ..] | [_, "init", ..] => true,
         [_, "connect", ..] => true,
         [_, "compile", ..] => true,
         [_, "test", ..] => true,
+        [_, "gc", ..] => true,
+        [_, "reserve", ..] => true,
+        [_, "backup", ..] => true,
+        [_, "project", ..] => true,
         [_, "action", ..] => true,
         [_, "write", ..] => true,
         [_, "repl"] => true,
@@ -144,7 +161,14 @@ fn print_usage() {
     println!("  dh connect <addr:port> [--verbose]");
     println!("  dh config show");
     println!("  dh compile <file.dhl>");
-    println!("  dh test [--deep] [--chaos] [--ci] [--relay] [--replay SEED=<seed>]");
+    println!("  dh test [--deep] [--chaos] [--ci] [--relay] [--external] [--replay SEED=<seed>]");
+    println!("  dh doctor");
+    println!("  dh gc [--dry-run] [--no-prune] [--no-dharmaq]");
+    println!("  dh reserve expire [--dry-run]");
+    println!("  dh backup export <path>");
+    println!("  dh backup import <path> [--force]");
+    println!("  dh project rebuild [--scope std.commerce]");
+    println!("  dh project watch [--scope std.commerce] [--interval SECONDS]");
     println!("  dh serve [--relay] [--verbose]");
     println!("  dh");
 }
@@ -168,6 +192,7 @@ fn run_tests(args: &[&str]) -> Result<(), DharmaError> {
         ci: false,
         replay_seed: None,
         relay_only: false,
+        external: false,
     };
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -176,6 +201,7 @@ fn run_tests(args: &[&str]) -> Result<(), DharmaError> {
             "--chaos" => opts.chaos = true,
             "--ci" => opts.ci = true,
             "--relay" => opts.relay_only = true,
+            "--external" => opts.external = true,
             "--replay" => {
                 if let Some(next) = iter.next() {
                     opts.replay_seed = parse_replay_seed(next);
@@ -225,7 +251,7 @@ fn init_identity(alias: &str) -> Result<(), DharmaError> {
 }
 
 #[cfg(feature = "compiler")]
-fn compile_dhl(source: &str) -> Result<(), DharmaError> {
+pub(crate) fn compile_dhl(source: &str) -> Result<(), DharmaError> {
     let data_dir = ensure_data_dir()?;
     let source_path = Path::new(source);
     let contents = fs::read_to_string(source_path)?;
@@ -252,6 +278,8 @@ fn compile_dhl(source: &str) -> Result<(), DharmaError> {
     let schema_obj = EnvelopeId::from_bytes(*schema_id.as_bytes());
     let contract_obj = EnvelopeId::from_bytes(*contract_id.as_bytes());
     let reactor_obj = EnvelopeId::from_bytes(crypto::sha256(&reactor_bytes));
+    let summary = pdl::codegen::permissions::compile_permissions(&ast, contract_id, data_ver);
+    let summary_bytes = summary.to_cbor()?;
 
     let stem = output_stem_for_source(source_path);
     if let Some(parent) = stem.parent() {
@@ -260,11 +288,13 @@ fn compile_dhl(source: &str) -> Result<(), DharmaError> {
     fs::write(stem.with_extension("schema"), &schema_bytes)?;
     fs::write(stem.with_extension("contract"), &contract_bytes)?;
     fs::write(stem.with_extension("reactor"), &reactor_bytes)?;
+    fs::write(stem.with_extension("summary"), &summary_bytes)?;
 
     let store = Store::from_root(&data_dir);
     store.put_object(&schema_obj, &schema_bytes)?;
     store.put_object(&contract_obj, &contract_bytes)?;
     store.put_object(&reactor_obj, &reactor_bytes)?;
+    store.put_permission_summary(&summary)?;
 
     update_config(
         &data_dir.join(CONFIG_TOML),
@@ -449,8 +479,10 @@ fn connect(addr: &str, verbose: bool) -> Result<(), DharmaError> {
     println!("Connected. Handshake Complete.");
 
     let store = Store::new(&env);
-    let mut keys: HashMap<SubjectId, [u8; 32]> = HashMap::new();
-    keys.insert(identity.subject_id, identity.subject_key);
+    let mut legacy_keys: HashMap<SubjectId, [u8; 32]> = HashMap::new();
+    legacy_keys.insert(identity.subject_id, identity.subject_key);
+    let mut keys = Keyring::from_subject_keys(&legacy_keys);
+    keys.insert_hpke_secret(identity.public_key, identity.noise_sk);
     let mut index = FrontierIndex::build(&store, &keys)?;
     let policy = net::policy::OverlayPolicy::load(store.root());
     let claims = net::policy::PeerClaims::default();
@@ -460,7 +492,7 @@ fn connect(addr: &str, verbose: bool) -> Result<(), DharmaError> {
         session,
         &store,
         &mut index,
-        &keys,
+        &mut keys,
         &identity,
         &access,
         net::sync::SyncOptions {

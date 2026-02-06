@@ -1,0 +1,116 @@
+---
+namespace: std.commerce.client_group
+version: 1.0.0
+---
+
+# Commerce Client Group (Policy)
+
+Client groups define **payment and reservation policy** for their members.
+
+## Reservation policy
+- `reserve_on_accepted`: reserve stock when PO is accepted.
+- `reserve_on_authorized`: reserve stock when payment is authorized.
+- `reserve_on_captured`: reserve stock when payment is captured (must be true for prepaid).
+- Timeouts are in hours. `0` means **no timeout** (definitive reserve).
+
+## Post-capture adjustments
+When a paid order is reduced:
+- `Refund` triggers a payment refund.
+- `CreditNote` issues a credit note.
+
+## Code
+
+```dhl
+aggregate ClientGroup
+    state
+        public name: Text(len=128)
+        public payment_terms: Enum(Prepaid, Postpaid, Credit)
+        public reserve_on_accepted: Bool = false
+        public reserve_timeout_accepted_hours: Int = 0
+        public reserve_on_authorized: Bool = false
+        public reserve_timeout_authorized_hours: Int = 0
+        public reserve_on_captured: Bool = true
+        public reserve_timeout_captured_hours: Int = 0
+        public post_capture_adjustment: Enum(Refund, CreditNote) = 'Refund
+        public status: Enum(Active, Archived) = 'Active
+        public created_at: Timestamp?
+        public updated_at: Timestamp?
+
+action Create(
+    name: Text(len=128),
+    payment_terms: Enum(Prepaid, Postpaid, Credit),
+    reserve_on_accepted: Bool,
+    reserve_timeout_accepted_hours: Int,
+    reserve_on_authorized: Bool,
+    reserve_timeout_authorized_hours: Int,
+    reserve_on_captured: Bool,
+    reserve_timeout_captured_hours: Int,
+    post_capture_adjustment: Enum(Refund, CreditNote)
+)
+    validate
+        state.created_at == null
+        reserve_timeout_accepted_hours >= 0
+        reserve_timeout_authorized_hours >= 0
+        reserve_timeout_captured_hours >= 0
+        (reserve_on_accepted == true) || (reserve_timeout_accepted_hours == 0)
+        (reserve_on_authorized == true) || (reserve_timeout_authorized_hours == 0)
+        reserve_on_captured == true
+        reserve_timeout_captured_hours == 0
+    apply
+        state.name = name
+        state.payment_terms = payment_terms
+        state.reserve_on_accepted = reserve_on_accepted
+        state.reserve_timeout_accepted_hours = reserve_timeout_accepted_hours
+        state.reserve_on_authorized = reserve_on_authorized
+        state.reserve_timeout_authorized_hours = reserve_timeout_authorized_hours
+        state.reserve_on_captured = reserve_on_captured
+        state.reserve_timeout_captured_hours = reserve_timeout_captured_hours
+        state.post_capture_adjustment = post_capture_adjustment
+        state.status = 'Active
+        state.created_at = context.timestamp
+        state.updated_at = context.timestamp
+
+action UpdatePolicy(
+    payment_terms: Enum(Prepaid, Postpaid, Credit),
+    reserve_on_accepted: Bool,
+    reserve_timeout_accepted_hours: Int,
+    reserve_on_authorized: Bool,
+    reserve_timeout_authorized_hours: Int,
+    reserve_on_captured: Bool,
+    reserve_timeout_captured_hours: Int,
+    post_capture_adjustment: Enum(Refund, CreditNote)
+)
+    validate
+        state.status == 'Active
+        reserve_timeout_accepted_hours >= 0
+        reserve_timeout_authorized_hours >= 0
+        reserve_timeout_captured_hours >= 0
+        (reserve_on_accepted == true) || (reserve_timeout_accepted_hours == 0)
+        (reserve_on_authorized == true) || (reserve_timeout_authorized_hours == 0)
+        reserve_on_captured == true
+        reserve_timeout_captured_hours == 0
+    apply
+        state.payment_terms = payment_terms
+        state.reserve_on_accepted = reserve_on_accepted
+        state.reserve_timeout_accepted_hours = reserve_timeout_accepted_hours
+        state.reserve_on_authorized = reserve_on_authorized
+        state.reserve_timeout_authorized_hours = reserve_timeout_authorized_hours
+        state.reserve_on_captured = reserve_on_captured
+        state.reserve_timeout_captured_hours = reserve_timeout_captured_hours
+        state.post_capture_adjustment = post_capture_adjustment
+        state.updated_at = context.timestamp
+
+action Rename(name: Text(len=128))
+    validate
+        state.status == 'Active
+    apply
+        state.name = name
+        state.updated_at = context.timestamp
+
+action Archive()
+    validate
+        state.status != 'Archived
+    apply
+        state.status = 'Archived
+        state.updated_at = context.timestamp
+```

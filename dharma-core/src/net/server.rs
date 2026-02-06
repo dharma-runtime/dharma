@@ -9,12 +9,28 @@ use crate::net::trust::PeerPolicy;
 use crate::net::sync::{sync_loop_with, SyncOptions};
 use crate::store::index::FrontierIndex;
 use crate::store::Store;
+use crate::metrics;
 use std::collections::HashMap;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
+struct ConnectionGauge;
+
+impl ConnectionGauge {
+    fn new() -> Self {
+        metrics::peers_connected_inc();
+        Self
+    }
+}
+
+impl Drop for ConnectionGauge {
+    fn drop(&mut self) {
+        metrics::peers_connected_dec();
+    }
+}
 
 #[derive(Clone)]
 pub struct ServerOptions {
@@ -109,6 +125,7 @@ fn handle_connection(
     store: Store,
     options: ServerOptions,
 ) -> Result<(), DharmaError> {
+    let _gauge = ConnectionGauge::new();
     if let Ok(root) = std::env::current_dir() {
         if let Ok(cfg) = config::Config::load(&root) {
             cfg.apply_timeouts(&stream);
@@ -126,8 +143,10 @@ fn handle_connection(
     if !peer_policy.allows(peer.subject, peer.public_key) {
         return Err(DharmaError::Validation("peer denied by policy".to_string()));
     }
-    let mut keys = HashMap::new();
-    keys.insert(identity.subject_id, identity.subject_key);
+    let mut legacy_keys = HashMap::new();
+    legacy_keys.insert(identity.subject_id, identity.subject_key);
+    let mut keys = crate::keys::Keyring::from_subject_keys(&legacy_keys);
+    keys.insert_hpke_secret(identity.public_key, identity.noise_sk);
     let mut index = FrontierIndex::build(&store, &keys)?;
     let policy = OverlayPolicy::load(store.root());
     let claims = claims.unwrap_or_default();
@@ -138,12 +157,13 @@ fn handle_connection(
         &claims,
     );
     if options.relay {
+        let mut relay_keys = crate::keys::Keyring::new();
         sync_loop_with(
             &mut stream,
             session,
             &store,
             &mut index,
-            &HashMap::new(),
+            &mut relay_keys,
             &identity,
             &access,
             SyncOptions {
@@ -161,7 +181,7 @@ fn handle_connection(
             session,
             &store,
             &mut index,
-            &keys,
+            &mut keys,
             &identity,
             &access,
             SyncOptions {

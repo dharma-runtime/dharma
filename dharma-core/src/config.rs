@@ -22,6 +22,12 @@ const DEFAULT_PROFILE_MODE: &str = "embedded";
 const DEFAULT_REGISTRY_URL: &str = "https://registry.dharma.systems";
 const DEFAULT_VM_FUEL: u64 = 1_000_000;
 const DEFAULT_VM_MEMORY_BYTES: usize = 640 * 1024;
+const DEFAULT_VAULT_MODE: &str = "safe_storage";
+const DEFAULT_VAULT_MAX_LOCAL_STORAGE_MB: u64 = 1024;
+const DEFAULT_VAULT_DISK_PRESSURE_PCT: u8 = 90;
+const DEFAULT_VAULT_ALERT_THRESHOLD_PCT: u8 = 80;
+const DEFAULT_VAULT_CHECK_INTERVAL_SECS: u64 = 60;
+const DEFAULT_VAULT_ALERT_INTERVAL_SECS: u64 = 3600;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -31,6 +37,7 @@ pub struct Config {
     pub profile: ProfileConfig,
     pub registry: RegistryConfig,
     pub vm: VmConfig,
+    pub vault: VaultPolicyConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +81,77 @@ pub struct VmConfig {
     pub memory_bytes: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VaultArchiveMode {
+    SafeStorage,
+    InfiniteStorage,
+}
+
+impl VaultArchiveMode {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_lowercase().as_str() {
+            "safe_storage" | "safe-storage" | "safe" => Some(VaultArchiveMode::SafeStorage),
+            "infinite_storage" | "infinite-storage" | "infinite" => {
+                Some(VaultArchiveMode::InfiniteStorage)
+            }
+            _ => None,
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            VaultArchiveMode::SafeStorage => "safe_storage",
+            VaultArchiveMode::InfiniteStorage => "infinite_storage",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct VaultPolicyConfig {
+    pub enabled: bool,
+    pub mode: VaultArchiveMode,
+    pub driver: Option<String>,
+    pub max_local_storage_mb: u64,
+    pub disk_pressure_pct: u8,
+    pub alert_threshold_pct: u8,
+    pub check_interval_secs: u64,
+    pub alert_interval_secs: u64,
+    pub checkpoint_schema: Option<String>,
+    pub checkpoint_contract: Option<String>,
+    pub local: VaultLocalConfig,
+    pub peer: VaultPeerConfig,
+    pub s3: VaultS3Config,
+    pub arweave: VaultArweaveConfig,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct VaultLocalConfig {
+    pub path: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct VaultPeerConfig {
+    pub peer_id: Option<String>,
+    pub root: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct VaultS3Config {
+    pub bucket: Option<String>,
+    pub prefix: Option<String>,
+    pub endpoint_url: Option<String>,
+    pub region: Option<String>,
+    pub force_path_style: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct VaultArweaveConfig {
+    pub upload_url: Option<String>,
+    pub gateway_url: Option<String>,
+    pub token: Option<String>,
+    pub arlocal: bool,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -105,6 +183,22 @@ impl Default for Config {
             vm: VmConfig {
                 fuel: DEFAULT_VM_FUEL,
                 memory_bytes: DEFAULT_VM_MEMORY_BYTES,
+            },
+            vault: VaultPolicyConfig {
+                enabled: true,
+                mode: VaultArchiveMode::SafeStorage,
+                driver: None,
+                max_local_storage_mb: DEFAULT_VAULT_MAX_LOCAL_STORAGE_MB,
+                disk_pressure_pct: DEFAULT_VAULT_DISK_PRESSURE_PCT,
+                alert_threshold_pct: DEFAULT_VAULT_ALERT_THRESHOLD_PCT,
+                check_interval_secs: DEFAULT_VAULT_CHECK_INTERVAL_SECS,
+                alert_interval_secs: DEFAULT_VAULT_ALERT_INTERVAL_SECS,
+                checkpoint_schema: None,
+                checkpoint_contract: None,
+                local: VaultLocalConfig::default(),
+                peer: VaultPeerConfig::default(),
+                s3: VaultS3Config::default(),
+                arweave: VaultArweaveConfig::default(),
             },
         }
     }
@@ -200,6 +294,103 @@ impl Config {
         out.push("[vm]".to_string());
         out.push(format!("fuel = {}", self.vm.fuel));
         out.push(format!("memory_bytes = {}", self.vm.memory_bytes));
+        out.push(String::new());
+
+        out.push("[vault]".to_string());
+        out.push(format!("enabled = {}", self.vault.enabled));
+        out.push(format!("mode = \"{}\"", self.vault.mode.as_str()));
+        out.push(format!(
+            "driver = \"{}\"",
+            self.vault.driver.clone().unwrap_or_default()
+        ));
+        out.push(format!(
+            "max_local_storage_mb = {}",
+            self.vault.max_local_storage_mb
+        ));
+        out.push(format!(
+            "disk_pressure_pct = {}",
+            self.vault.disk_pressure_pct
+        ));
+        out.push(format!(
+            "alert_threshold_pct = {}",
+            self.vault.alert_threshold_pct
+        ));
+        out.push(format!(
+            "check_interval_secs = {}",
+            self.vault.check_interval_secs
+        ));
+        out.push(format!(
+            "alert_interval_secs = {}",
+            self.vault.alert_interval_secs
+        ));
+        out.push(format!(
+            "checkpoint_schema = \"{}\"",
+            self.vault.checkpoint_schema.clone().unwrap_or_default()
+        ));
+        out.push(format!(
+            "checkpoint_contract = \"{}\"",
+            self.vault.checkpoint_contract.clone().unwrap_or_default()
+        ));
+        out.push(String::new());
+
+        out.push("[vault.local]".to_string());
+        out.push(format!(
+            "path = \"{}\"",
+            self.vault.local.path.clone().unwrap_or_default()
+        ));
+        out.push(String::new());
+
+        out.push("[vault.peer]".to_string());
+        out.push(format!(
+            "peer_id = \"{}\"",
+            self.vault.peer.peer_id.clone().unwrap_or_default()
+        ));
+        out.push(format!(
+            "root = \"{}\"",
+            self.vault.peer.root.clone().unwrap_or_default()
+        ));
+        out.push(String::new());
+
+        out.push("[vault.s3]".to_string());
+        out.push(format!(
+            "bucket = \"{}\"",
+            self.vault.s3.bucket.clone().unwrap_or_default()
+        ));
+        out.push(format!(
+            "prefix = \"{}\"",
+            self.vault.s3.prefix.clone().unwrap_or_default()
+        ));
+        out.push(format!(
+            "endpoint_url = \"{}\"",
+            self.vault.s3.endpoint_url.clone().unwrap_or_default()
+        ));
+        out.push(format!(
+            "region = \"{}\"",
+            self.vault.s3.region.clone().unwrap_or_default()
+        ));
+        out.push(format!(
+            "force_path_style = {}",
+            self.vault.s3.force_path_style
+        ));
+        out.push(String::new());
+
+        out.push("[vault.arweave]".to_string());
+        out.push(format!(
+            "upload_url = \"{}\"",
+            self.vault.arweave.upload_url.clone().unwrap_or_default()
+        ));
+        out.push(format!(
+            "gateway_url = \"{}\"",
+            self.vault.arweave.gateway_url.clone().unwrap_or_default()
+        ));
+        out.push(format!(
+            "token = \"{}\"",
+            self.vault.arweave.token.clone().unwrap_or_default()
+        ));
+        out.push(format!(
+            "arlocal = {}",
+            self.vault.arweave.arlocal
+        ));
         out.push(String::new());
 
         out.join("\n")
@@ -365,6 +556,180 @@ impl Config {
                     }
                 }
             }
+            "vault.enabled" => {
+                if let ConfigValue::Bool(val) = value {
+                    self.vault.enabled = val;
+                }
+            }
+            "vault.mode" => {
+                if let ConfigValue::Str(val) = value {
+                    if let Some(mode) = VaultArchiveMode::parse(&val) {
+                        self.vault.mode = mode;
+                    }
+                }
+            }
+            "vault.driver" => {
+                if let ConfigValue::Str(val) = value {
+                    if val.is_empty() {
+                        self.vault.driver = None;
+                    } else {
+                        self.vault.driver = Some(val);
+                    }
+                }
+            }
+            "vault.max_local_storage_mb" => {
+                if let ConfigValue::Int(val) = value {
+                    if val > 0 {
+                        self.vault.max_local_storage_mb = val as u64;
+                    }
+                }
+            }
+            "vault.disk_pressure_pct" => {
+                if let ConfigValue::Int(val) = value {
+                    if val >= 0 && val <= 100 {
+                        self.vault.disk_pressure_pct = val as u8;
+                    }
+                }
+            }
+            "vault.alert_threshold_pct" => {
+                if let ConfigValue::Int(val) = value {
+                    if val >= 0 && val <= 100 {
+                        self.vault.alert_threshold_pct = val as u8;
+                    }
+                }
+            }
+            "vault.check_interval_secs" => {
+                if let ConfigValue::Int(val) = value {
+                    if val >= 0 {
+                        self.vault.check_interval_secs = val as u64;
+                    }
+                }
+            }
+            "vault.alert_interval_secs" => {
+                if let ConfigValue::Int(val) = value {
+                    if val >= 0 {
+                        self.vault.alert_interval_secs = val as u64;
+                    }
+                }
+            }
+            "vault.checkpoint_schema" => {
+                if let ConfigValue::Str(val) = value {
+                    if val.is_empty() {
+                        self.vault.checkpoint_schema = None;
+                    } else {
+                        self.vault.checkpoint_schema = Some(val);
+                    }
+                }
+            }
+            "vault.checkpoint_contract" => {
+                if let ConfigValue::Str(val) = value {
+                    if val.is_empty() {
+                        self.vault.checkpoint_contract = None;
+                    } else {
+                        self.vault.checkpoint_contract = Some(val);
+                    }
+                }
+            }
+            "vault.local.path" => {
+                if let ConfigValue::Str(val) = value {
+                    if val.is_empty() {
+                        self.vault.local.path = None;
+                    } else {
+                        self.vault.local.path = Some(val);
+                    }
+                }
+            }
+            "vault.peer.peer_id" => {
+                if let ConfigValue::Str(val) = value {
+                    if val.is_empty() {
+                        self.vault.peer.peer_id = None;
+                    } else {
+                        self.vault.peer.peer_id = Some(val);
+                    }
+                }
+            }
+            "vault.peer.root" => {
+                if let ConfigValue::Str(val) = value {
+                    if val.is_empty() {
+                        self.vault.peer.root = None;
+                    } else {
+                        self.vault.peer.root = Some(val);
+                    }
+                }
+            }
+            "vault.s3.bucket" => {
+                if let ConfigValue::Str(val) = value {
+                    if val.is_empty() {
+                        self.vault.s3.bucket = None;
+                    } else {
+                        self.vault.s3.bucket = Some(val);
+                    }
+                }
+            }
+            "vault.s3.prefix" => {
+                if let ConfigValue::Str(val) = value {
+                    if val.is_empty() {
+                        self.vault.s3.prefix = None;
+                    } else {
+                        self.vault.s3.prefix = Some(val);
+                    }
+                }
+            }
+            "vault.s3.endpoint_url" => {
+                if let ConfigValue::Str(val) = value {
+                    if val.is_empty() {
+                        self.vault.s3.endpoint_url = None;
+                    } else {
+                        self.vault.s3.endpoint_url = Some(val);
+                    }
+                }
+            }
+            "vault.s3.region" => {
+                if let ConfigValue::Str(val) = value {
+                    if val.is_empty() {
+                        self.vault.s3.region = None;
+                    } else {
+                        self.vault.s3.region = Some(val);
+                    }
+                }
+            }
+            "vault.s3.force_path_style" => {
+                if let ConfigValue::Bool(val) = value {
+                    self.vault.s3.force_path_style = val;
+                }
+            }
+            "vault.arweave.upload_url" => {
+                if let ConfigValue::Str(val) = value {
+                    if val.is_empty() {
+                        self.vault.arweave.upload_url = None;
+                    } else {
+                        self.vault.arweave.upload_url = Some(val);
+                    }
+                }
+            }
+            "vault.arweave.gateway_url" => {
+                if let ConfigValue::Str(val) = value {
+                    if val.is_empty() {
+                        self.vault.arweave.gateway_url = None;
+                    } else {
+                        self.vault.arweave.gateway_url = Some(val);
+                    }
+                }
+            }
+            "vault.arweave.token" => {
+                if let ConfigValue::Str(val) = value {
+                    if val.is_empty() {
+                        self.vault.arweave.token = None;
+                    } else {
+                        self.vault.arweave.token = Some(val);
+                    }
+                }
+            }
+            "vault.arweave.arlocal" => {
+                if let ConfigValue::Bool(val) = value {
+                    self.vault.arweave.arlocal = val;
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -500,6 +865,53 @@ fn default_config_template() -> String {
         "[vm]",
         &format!("fuel = {}", DEFAULT_VM_FUEL),
         &format!("memory_bytes = {}", DEFAULT_VM_MEMORY_BYTES),
+        "",
+        "[vault]",
+        "enabled = true",
+        &format!("mode = \"{}\"", DEFAULT_VAULT_MODE),
+        "driver = \"\"",
+        &format!(
+            "max_local_storage_mb = {}",
+            DEFAULT_VAULT_MAX_LOCAL_STORAGE_MB
+        ),
+        &format!(
+            "disk_pressure_pct = {}",
+            DEFAULT_VAULT_DISK_PRESSURE_PCT
+        ),
+        &format!(
+            "alert_threshold_pct = {}",
+            DEFAULT_VAULT_ALERT_THRESHOLD_PCT
+        ),
+        &format!(
+            "check_interval_secs = {}",
+            DEFAULT_VAULT_CHECK_INTERVAL_SECS
+        ),
+        &format!(
+            "alert_interval_secs = {}",
+            DEFAULT_VAULT_ALERT_INTERVAL_SECS
+        ),
+        "checkpoint_schema = \"\"",
+        "checkpoint_contract = \"\"",
+        "",
+        "[vault.local]",
+        "path = \"\"",
+        "",
+        "[vault.peer]",
+        "peer_id = \"\"",
+        "root = \"\"",
+        "",
+        "[vault.s3]",
+        "bucket = \"\"",
+        "prefix = \"\"",
+        "endpoint_url = \"\"",
+        "region = \"\"",
+        "force_path_style = false",
+        "",
+        "[vault.arweave]",
+        "upload_url = \"\"",
+        "gateway_url = \"\"",
+        "token = \"\"",
+        "arlocal = false",
         "",
     ]
     .join("\n")

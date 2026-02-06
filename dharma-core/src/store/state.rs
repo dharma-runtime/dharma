@@ -3,7 +3,9 @@ use crate::cbor;
 use crate::crypto;
 use crate::env::Env;
 use crate::error::DharmaError;
-use crate::types::{AssertionId, EnvelopeId, SubjectId};
+use crate::ownership::OwnershipRecord;
+use crate::types::{AssertionId, EnvelopeId, KeyId, SubjectId};
+use crate::value::{expect_bytes, expect_map, expect_uint, map_get};
 use ciborium::value::Value;
 use crc32fast::Hasher;
 use std::path::{Path, PathBuf};
@@ -66,6 +68,130 @@ pub fn snapshots_dir(env: &dyn Env, subject: &SubjectId) -> PathBuf {
 
 pub fn indexes_dir(env: &dyn Env, subject: &SubjectId) -> PathBuf {
     subject_dir(env, subject).join("indexes")
+}
+
+pub fn ownership_path(env: &dyn Env, subject: &SubjectId) -> PathBuf {
+    indexes_dir(env, subject).join("ownership.cbor")
+}
+
+pub fn epoch_path(env: &dyn Env, subject: &SubjectId) -> PathBuf {
+    indexes_dir(env, subject).join("epoch.cbor")
+}
+
+pub fn key_bind_path(env: &dyn Env, subject: &SubjectId) -> PathBuf {
+    indexes_dir(env, subject).join("key_bind.cbor")
+}
+
+pub fn load_ownership(
+    env: &dyn Env,
+    subject: &SubjectId,
+) -> Result<Option<OwnershipRecord>, DharmaError> {
+    let path = ownership_path(env, subject);
+    if !env.exists(&path) {
+        return Ok(None);
+    }
+    let bytes = env.read(&path)?;
+    let value = cbor::ensure_canonical(&bytes)?;
+    Ok(Some(OwnershipRecord::from_value(&value)?))
+}
+
+pub fn save_ownership(
+    env: &dyn Env,
+    subject: &SubjectId,
+    record: &OwnershipRecord,
+) -> Result<(), DharmaError> {
+    let dir = indexes_dir(env, subject);
+    env.create_dir_all(&dir)?;
+    let bytes = cbor::encode_canonical_value(&record.to_value())?;
+    write_with_retry(env, &ownership_path(env, subject), &bytes)
+}
+
+pub fn load_epoch(env: &dyn Env, subject: &SubjectId) -> Result<Option<u64>, DharmaError> {
+    let path = epoch_path(env, subject);
+    if !env.exists(&path) {
+        return Ok(None);
+    }
+    let bytes = env.read(&path)?;
+    let value = cbor::ensure_canonical(&bytes)?;
+    let map = crate::value::expect_map(&value)?;
+    let epoch = crate::value::expect_uint(
+        crate::value::map_get(map, "epoch")
+            .ok_or_else(|| DharmaError::Validation("missing epoch".to_string()))?,
+    )?;
+    Ok(Some(epoch))
+}
+
+pub fn save_epoch(env: &dyn Env, subject: &SubjectId, epoch: u64) -> Result<(), DharmaError> {
+    let dir = indexes_dir(env, subject);
+    env.create_dir_all(&dir)?;
+    let value = Value::Map(vec![(Value::Text("epoch".to_string()), Value::Integer(epoch.into()))]);
+    let bytes = cbor::encode_canonical_value(&value)?;
+    write_with_retry(env, &epoch_path(env, subject), &bytes)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyBindRecord {
+    pub domain: SubjectId,
+    pub epoch: u64,
+    pub sdk_id: KeyId,
+}
+
+impl KeyBindRecord {
+    pub fn to_value(&self) -> Value {
+        Value::Map(vec![
+            (
+                Value::Text("domain".to_string()),
+                Value::Bytes(self.domain.as_bytes().to_vec()),
+            ),
+            (Value::Text("epoch".to_string()), Value::Integer(self.epoch.into())),
+            (
+                Value::Text("sdk_id".to_string()),
+                Value::Bytes(self.sdk_id.as_bytes().to_vec()),
+            ),
+        ])
+    }
+
+    pub fn from_value(value: &Value) -> Result<Self, DharmaError> {
+        let map = expect_map(value)?;
+        let domain_bytes = expect_bytes(map_get(map, "domain").ok_or_else(|| {
+            DharmaError::Validation("missing domain".to_string())
+        })?)?;
+        let epoch = expect_uint(map_get(map, "epoch").ok_or_else(|| {
+            DharmaError::Validation("missing epoch".to_string())
+        })?)?;
+        let sdk_bytes = expect_bytes(map_get(map, "sdk_id").ok_or_else(|| {
+            DharmaError::Validation("missing sdk_id".to_string())
+        })?)?;
+        Ok(KeyBindRecord {
+            domain: SubjectId::from_slice(&domain_bytes)?,
+            epoch,
+            sdk_id: KeyId::from_slice(&sdk_bytes)?,
+        })
+    }
+}
+
+pub fn load_key_bind(
+    env: &dyn Env,
+    subject: &SubjectId,
+) -> Result<Option<KeyBindRecord>, DharmaError> {
+    let path = key_bind_path(env, subject);
+    if !env.exists(&path) {
+        return Ok(None);
+    }
+    let bytes = env.read(&path)?;
+    let value = cbor::ensure_canonical(&bytes)?;
+    Ok(Some(KeyBindRecord::from_value(&value)?))
+}
+
+pub fn save_key_bind(
+    env: &dyn Env,
+    subject: &SubjectId,
+    record: &KeyBindRecord,
+) -> Result<(), DharmaError> {
+    let dir = indexes_dir(env, subject);
+    env.create_dir_all(&dir)?;
+    let bytes = cbor::encode_canonical_value(&record.to_value())?;
+    write_with_retry(env, &key_bind_path(env, subject), &bytes)
 }
 
 fn log_path(dir: &Path) -> PathBuf {
@@ -510,6 +636,28 @@ pub fn list_assertions(env: &dyn Env, subject: &SubjectId) -> Result<Vec<Asserti
     Ok(records)
 }
 
+pub fn subject_has_facts(env: &dyn Env, subject: &SubjectId) -> Result<bool, DharmaError> {
+    let dir = assertions_dir(env, subject);
+    if !env.exists(&dir) {
+        return Ok(false);
+    }
+    if let Ok(entries) = read_log_entries(env, &dir) {
+        if !entries.is_empty() {
+            return Ok(true);
+        }
+    }
+    for path in env.list_dir(&dir)? {
+        if !env.is_file(&path) {
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) != Some("dharma") {
+            continue;
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 pub fn list_overlays(env: &dyn Env, subject: &SubjectId) -> Result<Vec<AssertionRecord>, DharmaError> {
     let dir = overlays_dir(env, subject);
     if !env.exists(&dir) {
@@ -591,6 +739,19 @@ pub fn find_assertion_by_id(
     Ok(None)
 }
 
+pub fn find_assertion_by_seq(
+    env: &dyn Env,
+    subject: &SubjectId,
+    seq: u64,
+) -> Result<Option<Vec<u8>>, DharmaError> {
+    for record in list_assertions(env, subject)? {
+        if record.seq == seq {
+            return Ok(Some(record.bytes));
+        }
+    }
+    Ok(None)
+}
+
 pub fn find_overlay_by_id(
     env: &dyn Env,
     subject: &SubjectId,
@@ -651,6 +812,48 @@ pub fn load_latest_snapshot_for_ver(
         if let Ok(seq) = parse_seq(&name) {
             if best.as_ref().map(|(s, _)| seq > *s).unwrap_or(true) {
                 best = Some((seq, path));
+            }
+        }
+    }
+    let Some((_, path)) = best else { return Ok(None) };
+    let bytes = env.read(&path)?;
+    let snapshot = decode_snapshot(&bytes)?;
+    if snapshot.header.ver != ver {
+        return Ok(None);
+    }
+    Ok(Some(snapshot))
+}
+
+pub fn load_snapshot_at_or_before_seq(
+    env: &dyn Env,
+    subject: &SubjectId,
+    ver: u64,
+    seq: u64,
+) -> Result<Option<Snapshot>, DharmaError> {
+    let dir = snapshots_dir(env, subject);
+    if !env.exists(&dir) {
+        return Ok(None);
+    }
+    let mut best: Option<(u64, PathBuf)> = None;
+    for path in env.list_dir(&dir)? {
+        if !env.is_file(&path) {
+            continue;
+        }
+        let Some(name) = path.file_name() else { continue };
+        let name = name.to_string_lossy();
+        if parse_snapshot_ver(&name).map(|file_ver| file_ver != ver).unwrap_or(false) {
+            continue;
+        }
+        if let Ok(snap_seq) = parse_seq(&name) {
+            if snap_seq > seq {
+                continue;
+            }
+            if best
+                .as_ref()
+                .map(|(best_seq, _)| snap_seq > *best_seq)
+                .unwrap_or(true)
+            {
+                best = Some((snap_seq, path));
             }
         }
     }
@@ -797,6 +1000,7 @@ mod tests {
     use crate::assertion::{AssertionHeader, AssertionPlaintext};
     use crate::crypto;
     use crate::env::Fs;
+    use crate::ownership::{Owner, OwnershipRecord};
     use crate::types::{AssertionId, ContractId, IdentityKey, SchemaId};
     use ciborium::value::Value;
     use rand::SeedableRng;
@@ -980,5 +1184,21 @@ mod tests {
         let err = read_log_entries(&env, &dir).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("checksum"));
+    }
+
+    #[test]
+    fn ownership_roundtrip() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = crate::env::StdEnv::new(temp.path());
+        let subject = SubjectId::from_bytes([12u8; 32]);
+        let record = OwnershipRecord {
+            owner: Owner::Identity(IdentityKey::from_bytes([1u8; 32])),
+            creator: IdentityKey::from_bytes([2u8; 32]),
+            acting_domain: Some(SubjectId::from_bytes([3u8; 32])),
+            role: Some("admin".to_string()),
+        };
+        save_ownership(&env, &subject, &record).unwrap();
+        let loaded = load_ownership(&env, &subject).unwrap().unwrap();
+        assert_eq!(loaded, record);
     }
 }

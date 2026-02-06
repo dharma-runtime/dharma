@@ -1,0 +1,53 @@
+---
+namespace: std.commerce.client
+version: 1.0.0
+---
+
+# Commerce Client
+
+Clients link an identity to a **client group policy**.
+
+## Code
+
+```dhl
+aggregate Client
+    state
+        public identity_id: Ref<std.iam.Identity>
+        public group_ref: SubjectRef<std.commerce.client_group>
+        public external_id: Text(len=64)?
+        public human_ref: Text(len=64)?
+        public status: Enum(Active, Archived) = 'Active
+        public created_at: Timestamp?
+        public updated_at: Timestamp?
+
+action Create(
+    identity_id: Ref<std.iam.Identity>,
+    group_ref: SubjectRef<std.commerce.client_group>,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.created_at == null
+    apply
+        state.identity_id = identity_id
+        state.group_ref = group_ref
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.status = 'Active
+        state.created_at = context.timestamp
+        state.updated_at = context.timestamp
+
+action SetGroup(group_ref: SubjectRef<std.commerce.client_group>)
+    validate
+        state.status == 'Active
+    apply
+        state.group_ref = group_ref
+        state.updated_at = context.timestamp
+
+action Archive()
+    validate
+        state.status != 'Archived
+    apply
+        state.status = 'Archived
+        state.updated_at = context.timestamp
+```

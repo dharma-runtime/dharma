@@ -10,5 +10,8 @@ path = "src/main.rs"
 [dependencies]
 dharma-core = { path = "../dharma-core" }
 
+[features]
+server = []
+
 [dev-dependencies]
 tempfile = "3"

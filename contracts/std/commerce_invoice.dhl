@@ -1,0 +1,288 @@
+---
+namespace: std.commerce.invoice
+version: 1.1.0
+---
+
+# Commerce Invoice (Fiscal Truth)
+
+Invoices are **fiscal truth** derived from fulfillment reality.
+
+## Business meaning
+- Invoices are generated from fulfillment, not from orders.
+- Lines should reference the originating line and fulfillment for traceability.
+
+## Lifecycle rules
+- Draft → Posted is irreversible.
+- Posted invoices are immutable; use credit notes for adjustments.
+
+## Queries
+
+### Public queries
+#### ListMyInvoices(po_id or date_range, page)
+Parameters: `$1 = customer_id`, `$2 = date_from`, `$3 = date_to`, `$4 = offset`, `$5 = limit`
+```dhl
+query ListMyInvoices(
+    customer_id: Ref<std.iam.Identity>,
+    date_from: Timestamp,
+    date_to: Timestamp,
+    offset: Int,
+    limit: Int
+)
+    public
+    dhlq
+    std.commerce.invoice
+    | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+    | where std.commerce.invoice.state == 'Posted,
+            std.commerce.order.po.customer_id == $1,
+            std.commerce.invoice.issued_at between ($2,$3)
+    | sort -issued_at
+    | drop $4
+    | take $5
+```
+
+#### GetMyInvoice(invoice_id) (posted only)
+Parameters: `$1 = customer_id`, `$2 = invoice_id`
+```dhl
+query GetMyInvoice(customer_id: Ref<std.iam.Identity>, invoice_id: Ref<std.commerce.invoice>)
+    public
+    dhlq
+    std.commerce.invoice
+    | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+    | where std.commerce.invoice.subject == $2,
+            std.commerce.invoice.state == 'Posted,
+            std.commerce.order.po.customer_id == $1
+    | take 1
+```
+
+#### SearchMyInvoices(q, date_range?, status=posted, page)
+Parameters: `$1 = q`, `$2 = customer_id`, `$3 = date_from`, `$4 = date_to`, `$5 = offset`, `$6 = limit`
+```dhl
+query SearchMyInvoices(
+    q: Text,
+    customer_id: Ref<std.iam.Identity>,
+    date_from: Timestamp,
+    date_to: Timestamp,
+    offset: Int,
+    limit: Int
+)
+    public
+    dhlq
+    search $1 in std.commerce.invoice.human_ref,std.commerce.invoice.external_id fuzz=1
+    | lj std.commerce.invoice on oid=std.commerce.invoice.oid
+    | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+    | where std.commerce.invoice.state == 'Posted,
+            std.commerce.order.po.customer_id == $2,
+            std.commerce.invoice.issued_at between ($3,$4)
+    | sort -score
+    | drop $5
+    | take $6
+```
+
+#### MyBalanceSummary()
+Parameters: `$1 = customer_id`
+```dhl
+query MyBalanceSummary(customer_id: Ref<std.iam.Identity>)
+    public
+    dhlq
+    std.commerce.invoice_line
+    | lj std.commerce.invoice on invoice_id=std.commerce.invoice.subject
+    | lj std.commerce.order.po on std.commerce.invoice.po_id=std.commerce.order.po.subject
+    | where std.commerce.invoice.state == 'Posted,
+            std.commerce.order.po.customer_id == $1
+    | agg sum(std.commerce.invoice_line.gross_amount_minor)
+```
+
+### Private queries
+#### GetInvoice(invoice_id)
+Parameters: `$1 = invoice_id`
+```dhl
+query GetInvoice(invoice_id: Ref<std.commerce.invoice>)
+    private
+    dhlq
+    std.commerce.invoice
+    | where subject == $1
+    | take 1
+```
+
+#### GetInvoiceByNumber(series, number)
+Parameters: `$1 = series`, `$2 = number`
+```dhl
+query GetInvoiceByNumber(series: Text, number: Int)
+    private
+    dhlq
+    std.commerce.invoice
+    | where human_ref == $1
+    | take 1
+```
+
+#### ListInvoices(date_range, state?, page)
+Parameters: `$1 = date_from`, `$2 = date_to`, `$3 = state`, `$4 = offset`, `$5 = limit`
+```dhl
+query ListInvoices(
+    date_from: Timestamp,
+    date_to: Timestamp,
+    state: Enum(Draft, Posted, Void),
+    offset: Int,
+    limit: Int
+)
+    private
+    dhlq
+    std.commerce.invoice
+    | where issued_at between ($1,$2), state == $3
+    | sort -issued_at
+    | drop $4
+    | take $5
+```
+
+#### SearchInvoices(q, customer_id?, date_range?, state?, outstanding_only?, page)
+Parameters: `$1 = q`, `$2 = date_from`, `$3 = date_to`, `$4 = state`, `$5 = offset`, `$6 = limit`
+```dhl
+query SearchInvoices(
+    q: Text,
+    date_from: Timestamp,
+    date_to: Timestamp,
+    state: Enum(Draft, Posted, Void),
+    offset: Int,
+    limit: Int
+)
+    private
+    dhlq
+    search $1 in std.commerce.invoice.human_ref,std.commerce.invoice.external_id fuzz=1
+    | lj std.commerce.invoice on oid=std.commerce.invoice.oid
+    | where std.commerce.invoice.state == $4,
+            std.commerce.invoice.issued_at between ($2,$3)
+    | sort -score
+    | drop $5
+    | take $6
+```
+
+#### InvoicesReadyToPost(batch_id? / delivered_only?)
+Parameters: `$1 = batch_id`
+```dhl
+query InvoicesReadyToPost(batch_id: Ref<std.commerce.logistics.batch>?)
+    private
+    dhlq
+    std.commerce.invoice
+    | where state == 'Draft
+```
+
+#### AR_AgingReport(as_of_date, buckets=[0-7,8-30,31-60,60+])
+Parameters: `$1 = as_of_date`
+```dhl
+query AR_AgingReport(as_of_date: Timestamp)
+    private
+    dhlq
+    std.commerce.invoice
+    | where state == 'Posted
+    | agg count()
+```
+
+#### RevenueByDay(date_from, date_to)
+Parameters: `$1 = date_from`, `$2 = date_to`
+```dhl
+query RevenueByDay(date_from: Timestamp, date_to: Timestamp)
+    private
+    dhlq
+    std.commerce.invoice_line
+    | lj std.commerce.invoice on invoice_id=std.commerce.invoice.subject
+    | where std.commerce.invoice.state == 'Posted, std.commerce.invoice.posted_at between ($1,$2)
+    | bucket std.commerce.invoice.posted_at 1d
+    | by bucket
+    | agg sum(std.commerce.invoice_line.gross_amount_minor)
+```
+
+#### TaxSummary(date_from, date_to, by=tax_class)
+Parameters: `$1 = date_from`, `$2 = date_to`
+```dhl
+query TaxSummary(date_from: Timestamp, date_to: Timestamp)
+    private
+    dhlq
+    std.commerce.invoice_line
+    | lj std.commerce.invoice on invoice_id=std.commerce.invoice.subject
+    | where std.commerce.invoice.state == 'Posted, std.commerce.invoice.posted_at between ($1,$2)
+    | agg sum(std.commerce.invoice_line.tax_amount_minor)
+```
+
+#### InvoiceAdjustmentsReport()
+```dhl
+query InvoiceAdjustmentsReport
+    private
+    dhlq
+    std.commerce.credit_note_line
+    | lj std.commerce.credit_note on credit_note_id=std.commerce.credit_note.subject
+    | where std.commerce.credit_note.state == 'Posted
+    | agg sum(std.commerce.credit_note_line.gross_amount_minor)
+```
+
+## Code
+
+### Types
+```dhl
+
+
+
+struct InvoiceLine
+    public invoice_line_id: Text(len=64)
+    public line_id: Ref<std.commerce.order.line>
+    public fulfillment_id: Text(len=64)
+    public description: Text(len=256)
+    public qty: Decimal(scale=6)
+    public unit_price_minor: Int
+    public tax_amount_minor: Int
+    public net_amount_minor: Int
+    public gross_amount_minor: Int
+```
+
+### Aggregate state
+```dhl
+aggregate Invoice
+    state
+        public external_id: Text(len=64)?
+        public human_ref: Text(len=64)?
+        public po_id: Ref<std.commerce.order.po>
+        public issued_at: Timestamp?
+        public posted_at: Timestamp?
+        public state: Enum(Draft, Posted, Void) = 'Draft
+        public buyer_snapshot: Map<Text(len=64), Text(len=256)>
+        public currency: Currency
+        public source_scope: Text(len=128)?
+        public lines: List<InvoiceLine>
+```
+
+### Actions
+```dhl
+action IssueInvoiceFromBatch(
+    po_id: Ref<std.commerce.order.po>,
+    buyer_snapshot: Map<Text(len=64), Text(len=256)>,
+    currency: Currency,
+    source_scope: Text(len=128)?,
+    lines: List<InvoiceLine>,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.issued_at == null
+    apply
+        state.po_id = po_id
+        state.buyer_snapshot = buyer_snapshot
+        state.currency = currency
+        state.source_scope = source_scope
+        state.lines = lines
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.issued_at = context.timestamp
+        state.state = 'Draft
+
+action PostInvoice()
+    validate
+        state.state == 'Draft
+    apply
+        state.state = 'Posted
+        state.posted_at = context.timestamp
+
+action VoidInvoice()
+    validate
+        state.state == 'Draft
+    apply
+        state.state = 'Void
+```

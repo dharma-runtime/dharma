@@ -1,19 +1,24 @@
 use crate::assertion::{is_overlay, AssertionPlaintext};
 use crate::cbor;
+use crate::contract::PermissionSummary;
+use crate::keys::Keyring;
 use crate::envelope::AssertionEnvelope;
 use crate::env::{Env, StdEnv};
 use crate::error::DharmaError;
 pub mod index;
+pub mod pending;
 pub mod state;
-use crate::types::{AssertionId, EnvelopeId, SubjectId};
+use crate::types::{AssertionId, ContractId, EnvelopeId, SubjectId};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct Store {
     env: Arc<dyn Env + Send + Sync>,
     verified_contracts: Arc<Mutex<HashMap<EnvelopeId, Vec<u8>>>>,
+    permission_summaries: Arc<Mutex<HashMap<ContractId, Option<PermissionSummary>>>>,
 }
 
 fn is_torn_write(err: &DharmaError) -> bool {
@@ -30,15 +35,25 @@ fn write_with_retry(env: &dyn Env, path: &Path, data: &[u8]) -> Result<(), Dharm
 
 fn read_cbor_with_retry(env: &dyn Env, path: &Path, attempts: usize) -> Result<Vec<u8>, DharmaError> {
     let mut last_err: Option<DharmaError> = None;
-    for _ in 0..attempts {
-        let bytes = env.read(path)?;
-        if looks_like_wasm(&bytes) {
-            return Ok(bytes);
+    for i in 0..attempts {
+        match env.read(path) {
+            Ok(bytes) => {
+                if looks_like_wasm(&bytes) {
+                    return Ok(bytes);
+                }
+                if cbor::ensure_canonical(&bytes).is_ok() {
+                    return Ok(bytes);
+                }
+                last_err = Some(DharmaError::Cbor("corrupt cbor".to_string()));
+            }
+            Err(DharmaError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+                last_err = Some(DharmaError::Io(err));
+            }
+            Err(err) => return Err(err),
         }
-        if cbor::ensure_canonical(&bytes).is_ok() {
-            return Ok(bytes);
+        if i < attempts - 1 {
+            std::thread::sleep(Duration::from_millis(10));
         }
-        last_err = Some(DharmaError::Cbor("corrupt cbor".to_string()));
     }
     Err(last_err.unwrap_or_else(|| DharmaError::Cbor("corrupt cbor".to_string())))
 }
@@ -47,22 +62,7 @@ pub(crate) fn looks_like_wasm(bytes: &[u8]) -> bool {
     bytes.len() >= 4 && bytes[..4] == [0x00, 0x61, 0x73, 0x6d]
 }
 
-fn repair_semantic_index(env: &dyn Env, path: &Path) -> Result<(), DharmaError> {
-    if !env.exists(path) {
-        return Ok(());
-    }
-    let buf = env.read(path)?;
-    let entry_len = 64;
-    let usable = (buf.len() / entry_len) * entry_len;
-    if usable == buf.len() {
-        return Ok(());
-    }
-    if usable == 0 {
-        env.remove_file(path)?;
-        return Ok(());
-    }
-    write_with_retry(env, path, &buf[..usable])
-}
+
 
 impl Store {
     pub fn new<E>(env: &E) -> Self
@@ -72,6 +72,7 @@ impl Store {
         Self {
             env: Arc::new(env.clone()),
             verified_contracts: Arc::new(Mutex::new(HashMap::new())),
+            permission_summaries: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -102,6 +103,19 @@ impl Store {
     fn cache_contract(&self, envelope_id: EnvelopeId, bytes: Vec<u8>) {
         if let Ok(mut guard) = self.verified_contracts.lock() {
             guard.insert(envelope_id, bytes);
+        }
+    }
+
+    fn cached_permission_summary(&self, contract: &ContractId) -> Option<Option<PermissionSummary>> {
+        let Ok(guard) = self.permission_summaries.lock() else {
+            return None;
+        };
+        guard.get(contract).cloned()
+    }
+
+    fn cache_permission_summary(&self, contract: ContractId, summary: Option<PermissionSummary>) {
+        if let Ok(mut guard) = self.permission_summaries.lock() {
+            guard.insert(contract, summary);
         }
     }
 
@@ -151,6 +165,10 @@ impl Store {
 
     pub fn indexes_dir(&self) -> PathBuf {
         self.root().join("indexes")
+    }
+
+    pub fn permission_summaries_dir(&self) -> PathBuf {
+        self.indexes_dir().join("permission_summaries")
     }
 
     pub fn subjects_root(&self) -> PathBuf {
@@ -257,10 +275,7 @@ impl Store {
         Ok(out)
     }
 
-    pub fn rebuild_subject_views(
-        &self,
-        keys: &HashMap<SubjectId, [u8; 32]>,
-    ) -> Result<(), DharmaError> {
+    pub fn rebuild_subject_views(&self, keys: &Keyring) -> Result<(), DharmaError> {
         let subjects_root = self.subjects_root();
         if self.env.exists(&subjects_root) {
             self.env.remove_dir_all(&subjects_root)?;
@@ -326,23 +341,19 @@ impl Store {
     ) -> Result<(), DharmaError> {
         let dir = self.indexes_dir();
         self.env.create_dir_all(&dir)?;
-        let path = dir.join("semantic.idx");
+        let path = dir.join("semantic_v2.idx");
         let mut buf = Vec::with_capacity(64);
         buf.extend_from_slice(assertion_id.as_bytes());
         buf.extend_from_slice(envelope_id.as_bytes());
         match self.env.append(&path, &buf) {
             Ok(()) => {}
-            Err(err) if is_torn_write(&err) => {
-                repair_semantic_index(self.env.as_ref(), &path)?;
-                self.env.append(&path, &buf)?;
-            }
             Err(err) => return Err(err),
         }
         Ok(())
     }
 
     pub fn lookup_envelope(&self, assertion_id: &AssertionId) -> Result<Option<EnvelopeId>, DharmaError> {
-        let path = self.indexes_dir().join("semantic.idx");
+        let path = self.indexes_dir().join("semantic_v2.idx");
         if !self.env.exists(&path) {
             return Ok(None);
         }
@@ -358,14 +369,51 @@ impl Store {
         }
         Ok(None)
     }
+
+    pub fn put_permission_summary(&self, summary: &PermissionSummary) -> Result<(), DharmaError> {
+        let dir = self.permission_summaries_dir();
+        self.env.create_dir_all(&dir)?;
+        let path = dir.join(format!("{}.cbor", summary.contract.to_hex()));
+        let bytes = summary.to_cbor()?;
+        write_with_retry(self.env.as_ref(), &path, &bytes)?;
+        self.cache_permission_summary(summary.contract, Some(summary.clone()));
+        Ok(())
+    }
+
+    pub fn get_permission_summary(
+        &self,
+        contract: &ContractId,
+    ) -> Result<Option<PermissionSummary>, DharmaError> {
+        if let Some(entry) = self.cached_permission_summary(contract) {
+            return Ok(entry);
+        }
+        let path = self
+            .permission_summaries_dir()
+            .join(format!("{}.cbor", contract.to_hex()));
+        if !self.env.exists(&path) {
+            self.cache_permission_summary(*contract, None);
+            return Ok(None);
+        }
+        let bytes = self.env.read(&path)?;
+        let value = match cbor::ensure_canonical(&bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                self.cache_permission_summary(*contract, None);
+                return Ok(None);
+            }
+        };
+        let summary = PermissionSummary::from_value(&value)?;
+        self.cache_permission_summary(*contract, Some(summary.clone()));
+        Ok(Some(summary))
+    }
 }
 
 fn decode_assertion(
     bytes: &[u8],
-    keys: &HashMap<SubjectId, [u8; 32]>,
+    keys: &Keyring,
 ) -> Option<AssertionPlaintext> {
     if let Ok(envelope) = AssertionEnvelope::from_cbor(bytes) {
-        for key in keys.values() {
+        if let Some(key) = keys.key_for_kid(&envelope.kid) {
             if let Ok(plaintext) = crate::envelope::decrypt_assertion(&envelope, key) {
                 if let Ok(assertion) = AssertionPlaintext::from_cbor(&plaintext) {
                     return Some(assertion);
@@ -545,8 +593,9 @@ mod tests {
         let envelope_id = envelope.envelope_id().unwrap();
         store.put_object(&envelope_id, &envelope.to_cbor().unwrap()).unwrap();
 
-        let mut keys = HashMap::new();
-        keys.insert(subject, subject_key);
+        let mut keys_map = HashMap::new();
+        keys_map.insert(subject, subject_key);
+        let keys = Keyring::from_subject_keys(&keys_map);
         store.rebuild_subject_views(&keys).unwrap();
 
         let subjects = store.list_subjects().unwrap();

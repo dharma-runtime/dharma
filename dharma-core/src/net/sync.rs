@@ -9,11 +9,13 @@ use crate::net::policy::OverlayAccess;
 use crate::net::subscriptions::load_subscriptions;
 use crate::net::trust::PeerPolicy;
 use crate::identity::IdentityState;
+use crate::keys;
 use crate::pdl::schema::CqrsSchema;
 use crate::store::index::FrontierIndex;
+use crate::keys::Keyring;
 use crate::store::state::{find_assertion_by_id, find_overlay_by_id, list_assertions, list_overlays, overlays_for_ref};
 use crate::store::Store;
-use crate::sync::{Ads, Get, GetAds, Inventory, Obj, SubjectInventory, Subscriptions, SyncMessage, Hello};
+use crate::sync::{Ads, Get, GetAds, Inventory, Obj, ObjectRef, SubjectInventory, Subscriptions, SyncMessage, Hello};
 use crate::types::{AssertionId, EnvelopeId, SchemaId, SubjectId};
 use std::collections::{HashMap, HashSet};
 use crate::net::io::ReadWrite;
@@ -56,7 +58,7 @@ pub fn sync_loop(
     session: Session,
     store: &Store,
     index: &mut FrontierIndex,
-    keys: &HashMap<SubjectId, [u8; 32]>,
+    keys: &mut Keyring,
     identity: &IdentityState,
     overlay: &OverlayAccess,
 ) -> Result<(), DharmaError> {
@@ -77,7 +79,7 @@ pub fn sync_loop_with(
     mut session: Session,
     store: &Store,
     index: &mut FrontierIndex,
-    keys: &HashMap<SubjectId, [u8; 32]>,
+    keys: &mut Keyring,
     identity: &IdentityState,
     overlay: &OverlayAccess,
     options: SyncOptions,
@@ -128,8 +130,13 @@ pub fn sync_loop_with(
         let _ = send_msg(stream, &mut session, &SyncMessage::GetAds(GetAds));
     }
 
-    let mut pending_get: HashSet<EnvelopeId> = HashSet::new();
+    let mut pending_get: HashSet<ObjectRef> = HashSet::new();
+    let mut pending_subjects: HashMap<ObjectRef, SubjectId> = HashMap::new();
     loop {
+        if options.exit_on_idle && saw_inventory && pending_get.is_empty() {
+            log_sync(&options, "sync: complete (no pending)");
+            return Ok(());
+        }
         let frame = match crate::net::codec::read_frame_optional(stream) {
             Ok(Some(frame)) => frame,
             Ok(None) => return Ok(()),
@@ -143,7 +150,7 @@ pub fn sync_loop_with(
                     if options.exit_on_idle {
                         return Ok(());
                     }
-                    std::thread::sleep(Duration::from_millis(200));
+                    std::thread::sleep(Duration::from_millis(50));
                     continue;
                 }
                 log_sync(&options, format!("sync: network glitch ({msg})"));
@@ -170,8 +177,28 @@ pub fn sync_loop_with(
                     log_sync(&options, "sync: sending delta inv");
                     send_msg(stream, &mut session, &SyncMessage::Inv(delta))?;
                 }
+                let mut subject_map: HashMap<AssertionId, SubjectId> = HashMap::new();
+                if let Inventory::Subjects(subjects) = &inv {
+                    for subject in subjects {
+                        for tip in &subject.frontier {
+                            subject_map.insert(*tip, subject.sub);
+                        }
+                        for tip in &subject.overlay {
+                            subject_map.insert(*tip, subject.sub);
+                        }
+                    }
+                }
                 let missing =
                     handle_inv(&inv, store, index, &mut pending_get, overlay, &local_subs);
+                if options.relay {
+                    for obj in &missing {
+                        if let ObjectRef::Assertion(assertion_id) = obj {
+                            if let Some(subject) = subject_map.get(assertion_id) {
+                                pending_subjects.insert(obj.clone(), *subject);
+                            }
+                        }
+                    }
+                }
                 if !missing.is_empty() {
                     log_sync(&options, format!("sync: send get ids={}", missing.len()));
                     send_get(stream, &mut session, missing)?;
@@ -180,26 +207,43 @@ pub fn sync_loop_with(
             SyncMessage::Get(get) => {
                 log_sync(&options, format!("sync: recv get ids={}", get.ids.len()));
                 for obj in handle_get(store, get, overlay, &peer_subs)? {
-                    log_sync(&options, format!("sync: send obj {}", obj.id.to_hex()));
+                    log_sync(&options, format!("sync: send obj {}", object_ref_hex(&obj.id)));
                     send_obj(stream, &mut session, obj)?;
                 }
             }
             SyncMessage::Obj(obj) => {
-                log_sync(&options, format!("sync: recv obj {}", obj.id.to_hex()));
+                log_sync(&options, format!("sync: recv obj {}", object_ref_hex(&obj.id)));
+                let envelope_id = crate::crypto::envelope_id(&obj.bytes);
                 if crate::store::looks_like_wasm(&obj.bytes) {
-                    store.verify_contract_bytes(&obj.id, &obj.bytes)?;
-                    let _ = store.put_object(&obj.id, &obj.bytes);
+                    store.verify_contract_bytes(&envelope_id, &obj.bytes)?;
+                    let _ = store.put_object(&envelope_id, &obj.bytes);
                     pending_get.remove(&obj.id);
+                    pending_get.remove(&ObjectRef::Envelope(envelope_id));
+                    let _ = retry_pending(store, index, keys);
                 } else if options.relay {
-                    match ingest_object_relay(store, index, obj.id, &obj.bytes) {
-                        Ok(RelayIngestStatus::Accepted(env_id))
-                        | Ok(RelayIngestStatus::Opaque(env_id)) => {
-                            pending_get.remove(&env_id);
+                    let subject_hint = pending_subjects.remove(&obj.id);
+                    match ingest_object_relay(
+                        store,
+                        index,
+                        identity,
+                        envelope_id,
+                        &obj.bytes,
+                        subject_hint,
+                    ) {
+                        Ok(RelayIngestStatus::Accepted(env_id, assertion_id)) => {
+                            pending_get.remove(&ObjectRef::Envelope(env_id));
+                            pending_get.remove(&ObjectRef::Assertion(assertion_id));
+                            pending_get.remove(&obj.id);
+                            let _ = retry_pending(store, index, keys);
+                        }
+                        Ok(RelayIngestStatus::Opaque(env_id)) => {
+                            pending_get.remove(&ObjectRef::Envelope(env_id));
+                            pending_get.remove(&obj.id);
+                            let _ = retry_pending(store, index, keys);
                         }
                         Ok(RelayIngestStatus::Pending(assertion_id, reason)) => {
                             pending_get.remove(&obj.id);
-                            let fallback = EnvelopeId::from_bytes(*assertion_id.as_bytes());
-                            pending_get.remove(&fallback);
+                            pending_get.remove(&ObjectRef::Assertion(assertion_id));
                             log_sync(
                                 &options,
                                 format!("sync: pending {} ({reason})", assertion_id.to_hex()),
@@ -208,33 +252,12 @@ pub fn sync_loop_with(
                         }
                         Err(IngestError::MissingDependency { assertion_id, missing }) => {
                             pending_get.remove(&obj.id);
-                            let fallback = EnvelopeId::from_bytes(*assertion_id.as_bytes());
-                            pending_get.remove(&fallback);
-                            if let Some(env) = store.lookup_envelope(&missing)? {
-                                if store.get_object_any(&env)?.is_some() {
-                                    log_sync(
-                                        &options,
-                                        format!(
-                                            "sync: dependency {} present but pending",
-                                            missing.to_hex()
-                                        ),
-                                    );
-                                } else if !index.has_envelope(&env) && pending_get.insert(env) {
-                                    send_get(stream, &mut session, vec![env])?;
-                                }
-                            } else {
-                                let fallback = EnvelopeId::from_bytes(*missing.as_bytes());
-                                if store.get_object_any(&fallback)?.is_some() {
-                                    log_sync(
-                                        &options,
-                                        format!(
-                                            "sync: dependency {} present but pending",
-                                            missing.to_hex()
-                                        ),
-                                    );
-                                } else if pending_get.insert(fallback) {
-                                    send_get(stream, &mut session, vec![fallback])?;
-                                }
+                            pending_get.remove(&ObjectRef::Assertion(assertion_id));
+                            if let Some(subject) = subject_hint {
+                                pending_subjects.insert(ObjectRef::Assertion(missing), subject);
+                            }
+                            if pending_get.insert(ObjectRef::Assertion(missing)) {
+                                send_get(stream, &mut session, vec![ObjectRef::Assertion(missing)])?;
                             }
                         }
                         Err(IngestError::Validation(reason)) => {
@@ -251,60 +274,36 @@ pub fn sync_loop_with(
                     match ingest_object(store, index, &obj.bytes, keys) {
                         Ok(IngestStatus::Accepted(assertion_id)) => {
                             pending_get.remove(&obj.id);
-                            let fallback = EnvelopeId::from_bytes(*assertion_id.as_bytes());
-                            pending_get.remove(&fallback);
+                            pending_get.remove(&ObjectRef::Assertion(assertion_id));
                             let _ = retry_pending(store, index, keys);
                         }
                         Ok(IngestStatus::Pending(assertion_id, reason)) => {
                             pending_get.remove(&obj.id);
-                            let fallback = EnvelopeId::from_bytes(*assertion_id.as_bytes());
-                            pending_get.remove(&fallback);
+                            pending_get.remove(&ObjectRef::Assertion(assertion_id));
                             log_sync(
                                 &options,
                                 format!("sync: pending {} ({reason})", assertion_id.to_hex()),
                             );
-                            eprintln!("Pending object {}: {reason}", obj.id.to_hex());
+                            eprintln!("Pending object {}: {reason}", object_ref_hex(&obj.id));
                         }
                         Err(IngestError::MissingDependency { assertion_id, missing }) => {
                             pending_get.remove(&obj.id);
-                            let fallback = EnvelopeId::from_bytes(*assertion_id.as_bytes());
-                            pending_get.remove(&fallback);
-                            if let Some(env) = store.lookup_envelope(&missing)? {
-                                if store.get_object_any(&env)?.is_some() {
-                                    log_sync(
-                                        &options,
-                                        format!(
-                                            "sync: dependency {} present but pending",
-                                            missing.to_hex()
-                                        ),
-                                    );
-                                    let _ = retry_pending(store, index, keys);
-                                } else if !index.has_envelope(&env) && pending_get.insert(env) {
-                                    send_get(stream, &mut session, vec![env])?;
-                                }
-                            } else {
-                                let fallback = EnvelopeId::from_bytes(*missing.as_bytes());
-                                if store.get_object_any(&fallback)?.is_some() {
-                                    log_sync(
-                                        &options,
-                                        format!(
-                                            "sync: dependency {} present but pending",
-                                            missing.to_hex()
-                                        ),
-                                    );
-                                    let _ = retry_pending(store, index, keys);
-                                } else if pending_get.insert(fallback) {
-                                    send_get(stream, &mut session, vec![fallback])?;
-                                }
+                            pending_get.remove(&ObjectRef::Assertion(assertion_id));
+                            if pending_get.insert(ObjectRef::Assertion(missing)) {
+                                send_get(stream, &mut session, vec![ObjectRef::Assertion(missing)])?;
                             }
                         }
                         Err(IngestError::Pending(reason)) => {
                             eprintln!("Pending object: {reason}");
                         }
-                        Err(IngestError::Validation(reason)) => {
-                            return Err(DharmaError::Validation(format!(
-                                "peer sent invalid object: {reason}"
-                            )));
+                        Err(IngestError::Validation(_reason)) => {
+                            // If it's not an assertion, it might be a schema or other object.
+                            if let Err(err) = store.put_object(&envelope_id, &obj.bytes) {
+                                return Err(err);
+                            }
+                            pending_get.remove(&obj.id);
+                            pending_get.remove(&ObjectRef::Envelope(envelope_id));
+                            let _ = retry_pending(store, index, keys);
                         }
                         Err(IngestError::Dharma(err)) => return Err(err),
                     }
@@ -379,7 +378,7 @@ fn send_inv(
 fn send_get(
     stream: &mut dyn ReadWrite,
     session: &mut Session,
-    ids: Vec<EnvelopeId>,
+    ids: Vec<ObjectRef>,
 ) -> Result<(), DharmaError> {
     let msg = SyncMessage::Get(Get { ids });
     send_msg(stream, session, &msg)
@@ -412,6 +411,13 @@ fn log_sync(options: &SyncOptions, msg: impl Into<String>) {
     }
 }
 
+fn object_ref_hex(id: &ObjectRef) -> String {
+    match id {
+        ObjectRef::Assertion(id) => id.to_hex(),
+        ObjectRef::Envelope(id) => id.to_hex(),
+    }
+}
+
 fn send_obj(
     stream: &mut dyn ReadWrite,
     session: &mut Session,
@@ -440,7 +446,7 @@ fn send_msg(
     match crate::net::codec::write_frame(stream, &frame) {
         Ok(()) => Ok(()),
         Err(DharmaError::Network(msg)) => {
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(50));
             crate::net::codec::write_frame(stream, &frame).map_err(|err| match err {
                 DharmaError::Network(_) => DharmaError::Network(msg),
                 other => other,
@@ -455,9 +461,38 @@ fn send_inv_objects(
     session: &mut Session,
     store: &Store,
 ) -> Result<(), DharmaError> {
-    let objects = store.list_objects()?;
+    let objects = list_opaque_objects(store)?;
     let msg = SyncMessage::Inv(Inventory::Objects(objects));
     send_msg(stream, session, &msg)
+}
+
+fn list_opaque_objects(store: &Store) -> Result<Vec<EnvelopeId>, DharmaError> {
+    let asserted = list_semantic_envelopes(store)?;
+    let mut out = Vec::new();
+    for obj in store.list_objects()? {
+        if !asserted.contains(&obj) {
+            out.push(obj);
+        }
+    }
+    Ok(out)
+}
+
+fn list_semantic_envelopes(store: &Store) -> Result<HashSet<EnvelopeId>, DharmaError> {
+    let mut out = HashSet::new();
+    let path = store.indexes_dir().join("semantic_v2.idx");
+    if !store.env().exists(&path) {
+        return Ok(out);
+    }
+    let buf = store.env().read(&path)?;
+    let usable_len = (buf.len() / 64) * 64;
+    if usable_len == 0 {
+        return Ok(out);
+    }
+    for chunk in buf[..usable_len].chunks_exact(64) {
+        let env_id = EnvelopeId::from_slice(&chunk[32..64])?;
+        out.insert(env_id);
+    }
+    Ok(out)
 }
 
 fn exchange_hello(
@@ -469,7 +504,7 @@ fn exchange_hello(
     let hello = Hello {
         v: 1,
         peer_id: identity.public_key,
-        hpke_pk: crate::types::HpkePublicKey::from_bytes([0u8; 32]),
+        hpke_pk: keys::hpke_public_key_from_secret(&identity.noise_sk),
         suites: vec![1],
         caps: vec!["sync.range".to_string(), "overlay.acl".to_string()],
         subs: Some(subs.clone()),
@@ -490,10 +525,10 @@ fn handle_inv(
     inv: &Inventory,
     store: &Store,
     index: &FrontierIndex,
-    pending: &mut HashSet<EnvelopeId>,
+    pending: &mut HashSet<ObjectRef>,
     overlay: &OverlayAccess,
     subs: &Subscriptions,
-) -> Vec<EnvelopeId> {
+) -> Vec<ObjectRef> {
     let mut missing = Vec::new();
     match inv {
         Inventory::Subjects(subjects) => {
@@ -503,15 +538,19 @@ fn handle_inv(
                     continue;
                 }
                 for tip in &subject.frontier {
-                    if !index.has_envelope(tip) && pending.insert(*tip) {
-                        missing.push(*tip);
+                    if !has_assertion(store, index, tip)
+                        && pending.insert(ObjectRef::Assertion(*tip))
+                    {
+                        missing.push(ObjectRef::Assertion(*tip));
                     }
                 }
                 let allow_overlay = allow_overlay_for_subject(overlay, store, &subject.sub);
                 if allow_overlay {
                     for tip in &subject.overlay {
-                        if !index.has_envelope(tip) && pending.insert(*tip) {
-                            missing.push(*tip);
+                        if !has_assertion(store, index, tip)
+                            && pending.insert(ObjectRef::Assertion(*tip))
+                        {
+                            missing.push(ObjectRef::Assertion(*tip));
                         }
                     }
                 }
@@ -519,16 +558,31 @@ fn handle_inv(
         }
         Inventory::Objects(objects) => {
             for obj in objects {
-                if !index.has_envelope(&obj) && pending.insert(*obj) {
+                if !index.has_envelope(&obj) && pending.insert(ObjectRef::Envelope(*obj)) {
                     let already = store.get_object_any(obj).ok().flatten();
                     if already.is_none() {
-                        missing.push(*obj);
+                        missing.push(ObjectRef::Envelope(*obj));
                     }
                 }
             }
         }
     }
     missing
+}
+
+fn has_assertion(store: &Store, index: &FrontierIndex, assertion_id: &AssertionId) -> bool {
+    if index.is_pending(assertion_id) {
+        return true;
+    }
+    if let Ok(Some(env_id)) = store.lookup_envelope(assertion_id) {
+        if index.has_envelope(&env_id) {
+            return true;
+        }
+        if let Ok(Some(_)) = store.get_object_any(&env_id) {
+            return true;
+        }
+    }
+    false
 }
 
 fn delta_inventory_from_peer(
@@ -610,8 +664,7 @@ fn build_subject_inventory(
     } else {
         Vec::new()
     };
-    let frontier = map_assertions_to_envelopes(store, frontier)?;
-    let overlay = map_assertions_to_envelopes(store, overlay_assertions)?;
+    let overlay = overlay_assertions;
     if frontier.is_empty() && overlay.is_empty() {
         return Ok(None);
     }
@@ -655,21 +708,6 @@ fn overlay_frontier(store: &Store, subject: &SubjectId) -> Result<Vec<AssertionI
     Ok(tips.into_iter().collect())
 }
 
-fn map_assertions_to_envelopes(
-    store: &Store,
-    tips: Vec<AssertionId>,
-) -> Result<Vec<EnvelopeId>, DharmaError> {
-    let mut out = Vec::new();
-    for tip in tips {
-        if let Some(env) = store.lookup_envelope(&tip)? {
-            out.push(env);
-        } else {
-            out.push(EnvelopeId::from_bytes(*tip.as_bytes()));
-        }
-    }
-    Ok(out)
-}
-
 fn handle_get(
     store: &Store,
     get: Get,
@@ -677,67 +715,103 @@ fn handle_get(
     subs: &Subscriptions,
 ) -> Result<Vec<Obj>, DharmaError> {
     let mut out = Vec::new();
-    let mut sent: HashSet<EnvelopeId> = HashSet::new();
+    let mut sent: HashSet<ObjectRef> = HashSet::new();
     for id in get.ids {
-        if let Some((kind, subject, assertion_id, bytes)) =
-            find_cqrs_object_by_envelope(store, &id)?
-        {
-            let namespace = subject_namespace(store, &subject);
-            if !subs.allows_subject(&subject, namespace.as_deref()) {
-                continue;
-            }
-            let allow_overlay = allow_overlay_for_bytes(overlay, store, &subject, &bytes);
-            if kind == CqrsKind::OverlayAction && !allow_overlay {
-                continue;
-            }
-            if let Some(env_bytes) = store.get_object_any(&id)? {
-                if sent.insert(id) {
-                    out.push(Obj { id, bytes: env_bytes });
+        match id {
+            ObjectRef::Envelope(env_id) => {
+                if let Some(bytes) = store.get_object_any(&env_id)? {
+                    push_obj_with_overlays(
+                        store,
+                        overlay,
+                        subs,
+                        ObjectRef::Envelope(env_id),
+                        bytes,
+                        &mut out,
+                        &mut sent,
+                    )?;
+                    continue;
                 }
-            } else if sent.insert(id) {
-                out.push(Obj { id, bytes: bytes.clone() });
-            }
-            if allow_overlay && kind == CqrsKind::BaseAction {
-                append_overlays(store, &subject, &assertion_id, &mut out, &mut sent)?;
-            }
-            continue;
-        }
-        let assertion_id = AssertionId::from_bytes(*id.as_bytes());
-        if let Some((kind, subject, bytes)) = find_cqrs_object(store, &assertion_id)? {
-            let namespace = subject_namespace(store, &subject);
-            if !subs.allows_subject(&subject, namespace.as_deref()) {
-                continue;
-            }
-            let allow_overlay = allow_overlay_for_bytes(overlay, store, &subject, &bytes);
-            if kind == CqrsKind::OverlayAction && !allow_overlay {
-                continue;
-            }
-            let env_id = store
-                .lookup_envelope(&assertion_id)?
-                .unwrap_or(id);
-            if let Some(env_bytes) = store.get_object_any(&env_id)? {
-                if sent.insert(env_id) {
-                    out.push(Obj { id: env_id, bytes: env_bytes });
+                if let Some((_kind, _subject, _assertion_id, bytes)) =
+                    find_cqrs_object_by_envelope(store, &env_id)?
+                {
+                    push_obj_with_overlays(
+                        store,
+                        overlay,
+                        subs,
+                        ObjectRef::Envelope(env_id),
+                        bytes,
+                        &mut out,
+                        &mut sent,
+                    )?;
                 }
             }
-            if allow_overlay && kind == CqrsKind::BaseAction {
-                append_overlays(store, &subject, &assertion_id, &mut out, &mut sent)?;
-            }
-            continue;
-        }
-        if let Some(bytes) = store.get_object_any(&id)? {
-            if sent.insert(id) {
-                out.push(Obj { id, bytes });
-            }
-        } else if let Some(env) = store.lookup_envelope(&assertion_id)? {
-            if let Some(bytes) = store.get_object_any(&env)? {
-                if sent.insert(env) {
-                    out.push(Obj { id: env, bytes });
+            ObjectRef::Assertion(assertion_id) => {
+                let mut bytes_opt = None;
+                if let Some(env_id) = store.lookup_envelope(&assertion_id)? {
+                    if let Some(bytes) = store.get_object_any(&env_id)? {
+                        bytes_opt = Some(bytes);
+                    }
+                }
+                if bytes_opt.is_none() {
+                    if let Some((_kind, _subject, bytes)) =
+                        find_cqrs_object(store, &assertion_id)?
+                    {
+                        bytes_opt = Some(bytes);
+                    }
+                }
+                if let Some(bytes) = bytes_opt {
+                    push_obj_with_overlays(
+                        store,
+                        overlay,
+                        subs,
+                        ObjectRef::Assertion(assertion_id),
+                        bytes,
+                        &mut out,
+                        &mut sent,
+                    )?;
                 }
             }
         }
     }
     Ok(out)
+}
+
+fn push_obj_with_overlays(
+    store: &Store,
+    overlay: &OverlayAccess,
+    subs: &Subscriptions,
+    id: ObjectRef,
+    bytes: Vec<u8>,
+    out: &mut Vec<Obj>,
+    sent: &mut HashSet<ObjectRef>,
+) -> Result<(), DharmaError> {
+    if let Ok(assertion) = AssertionPlaintext::from_cbor(&bytes) {
+        let subject = assertion.header.sub;
+        let namespace = subject_namespace(store, &subject);
+        if !subs.allows_subject(&subject, namespace.as_deref()) {
+            return Ok(());
+        }
+        let allow_overlay = allow_overlay_for_bytes(overlay, store, &subject, &bytes);
+        let kind = classify_assertion(&bytes);
+        if kind == CqrsKind::OverlayAction && !allow_overlay {
+            return Ok(());
+        }
+        if sent.insert(id.clone()) {
+            out.push(Obj {
+                id: id.clone(),
+                bytes: bytes.clone(),
+            });
+        }
+        if allow_overlay && kind == CqrsKind::BaseAction {
+            let assertion_id = assertion.assertion_id()?;
+            append_overlays(store, &subject, &assertion_id, out, sent)?;
+        }
+        return Ok(());
+    }
+    if sent.insert(id.clone()) {
+        out.push(Obj { id, bytes });
+    }
+    Ok(())
 }
 
 fn find_cqrs_object_by_envelope(
@@ -788,7 +862,7 @@ fn append_overlays(
     subject: &SubjectId,
     base_id: &AssertionId,
     out: &mut Vec<Obj>,
-    sent: &mut HashSet<EnvelopeId>,
+    sent: &mut HashSet<ObjectRef>,
 ) -> Result<(), DharmaError> {
     for bytes in overlays_for_ref(store.env(), subject, base_id)? {
         let overlay_assertion = match AssertionPlaintext::from_cbor(&bytes) {
@@ -803,8 +877,9 @@ fn append_overlays(
             Some(payload) => payload,
             None => bytes,
         };
-        if sent.insert(env_id) {
-            out.push(Obj { id: env_id, bytes: payload });
+        let ref_id = ObjectRef::Assertion(overlay_id);
+        if sent.insert(ref_id.clone()) {
+            out.push(Obj { id: ref_id, bytes: payload });
         }
     }
     Ok(())
@@ -955,7 +1030,7 @@ mod tests {
         let mut index = FrontierIndex::default();
         let subject = SubjectId::from_bytes([1u8; 32]);
         let base = AssertionId::from_bytes([2u8; 32]);
-        let overlay = EnvelopeId::from_bytes([3u8; 32]);
+        let overlay = AssertionId::from_bytes([3u8; 32]);
         index.mark_known(base);
 
         let policy = OverlayPolicy::from_str(&format!(
@@ -973,7 +1048,7 @@ mod tests {
         let mut pending = HashSet::new();
         let missing =
             handle_inv(&inv, &store, &index, &mut pending, &access, &Subscriptions::all());
-        assert_eq!(missing, vec![overlay]);
+        assert_eq!(missing, vec![ObjectRef::Assertion(overlay)]);
     }
 
     #[test]
@@ -982,7 +1057,7 @@ mod tests {
         let store = Store::from_root(temp.path());
         let mut index = FrontierIndex::default();
         let subject = SubjectId::from_bytes([4u8; 32]);
-        let overlay = EnvelopeId::from_bytes([5u8; 32]);
+        let overlay = AssertionId::from_bytes([5u8; 32]);
         index.mark_known(AssertionId::from_bytes([6u8; 32]));
 
         let policy = OverlayPolicy::from_str("default deny\n");
@@ -1043,8 +1118,8 @@ mod tests {
             ..header1.clone()
         };
         let id2 = AssertionId::from_bytes([7u8; 32]);
-        index.update(id1, &header1).unwrap();
-        index.update(id2, &header2).unwrap();
+        index.update(id1, EnvelopeId::from_bytes(*id1.as_bytes()), &header1).unwrap();
+        index.update(id2, EnvelopeId::from_bytes(*id2.as_bytes()), &header2).unwrap();
 
         let policy = OverlayPolicy::from_str("default deny\n");
         let claims = crate::net::policy::PeerClaims::default();
@@ -1061,8 +1136,7 @@ mod tests {
         match delta {
             Inventory::Subjects(subjects) => {
                 assert_eq!(subjects.len(), 1);
-                let expected = EnvelopeId::from_bytes(*id2.as_bytes());
-                assert_eq!(subjects[0].frontier, vec![expected]);
+                assert_eq!(subjects[0].frontier, vec![id2]);
                 assert_eq!(subjects[0].since_seq, Some(2));
             }
             _ => panic!("expected subjects inventory"),
@@ -1122,19 +1196,33 @@ mod tests {
         ));
         let claims = crate::net::policy::PeerClaims::default();
         let access = OverlayAccess::new(&policy, None, false, &claims);
-        let get = Get { ids: vec![base_env] };
+        let get = Get { ids: vec![ObjectRef::Assertion(base_id)] };
         let out = handle_get(&store, get, &access, &Subscriptions::all()).unwrap();
-        let ids = out.iter().map(|o| o.id).collect::<HashSet<_>>();
-        assert!(ids.contains(&base_env));
-        assert!(ids.contains(&overlay_env));
+        let ids = out.iter().map(|o| o.id.clone()).collect::<HashSet<_>>();
+        assert!(ids.contains(&ObjectRef::Assertion(base_id)));
+        assert!(ids.contains(&ObjectRef::Assertion(overlay_id)));
 
-        let note_bytes = note_assertion_bytes(subject, &signing_key);
+        let note_subject = SubjectId::from_bytes([9u8; 32]);
+        let note_bytes = note_assertion_bytes(note_subject, &signing_key);
+        let note_assertion = AssertionPlaintext::from_cbor(&note_bytes).unwrap();
+        let note_id = note_assertion.assertion_id().unwrap();
         let note_env = crypto::envelope_id(&note_bytes);
-        store.put_assertion(&subject, &note_env, &note_bytes).unwrap();
+        store.put_assertion(&note_subject, &note_env, &note_bytes).unwrap();
+        append_assertion(
+            store.env(),
+            &note_subject,
+            1,
+            note_id,
+            note_env,
+            "note.text",
+            &note_bytes,
+        )
+        .unwrap();
+        store.record_semantic(&note_id, &note_env).unwrap();
 
-        let get = Get { ids: vec![note_env] };
+        let get = Get { ids: vec![ObjectRef::Assertion(note_id)] };
         let out = handle_get(&store, get, &access, &Subscriptions::all()).unwrap();
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].id, note_env);
+        assert_eq!(out[0].id, ObjectRef::Assertion(note_id));
     }
 }

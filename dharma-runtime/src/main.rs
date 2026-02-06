@@ -3,6 +3,8 @@ use dharma_core::env::StdEnv;
 use dharma_core::envelope;
 use dharma_core::identity::IdentityState;
 use dharma_core::identity_store;
+#[cfg(feature = "server")]
+use dharma_core::metrics;
 use dharma_core::net;
 use dharma_core::store::state::list_assertions;
 use dharma_core::store::Store;
@@ -10,6 +12,10 @@ use dharma_core::DharmaError;
 use dharma_core::config::Config;
 use std::fs;
 use std::io::{self, Write};
+#[cfg(feature = "server")]
+use std::io::Read;
+#[cfg(feature = "server")]
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 
 const APP_BANNER: &str = r#"       ____                              
@@ -41,12 +47,68 @@ fn run() -> Result<(), DharmaError> {
     let head = mount_self(&env, &identity)?;
     println!("Identity Unlocked. Head seq: {head}");
     let store = Store::new(&env);
+    #[cfg(feature = "server")]
+    {
+        if let Err(err) = start_metrics_server(config.network.listen_port, store.clone()) {
+            eprintln!("metrics disabled: {err}");
+        }
+    }
     let addr = format!("0.0.0.0:{}", config.network.listen_port);
     let options = net::server::ServerOptions {
         relay,
         ..Default::default()
     };
     net::server::listen_with_options(&addr, identity, store, options)?;
+    Ok(())
+}
+
+#[cfg(feature = "server")]
+fn start_metrics_server(listen_port: u16, store: Store) -> Result<(), DharmaError> {
+    let Some(metrics_port) = listen_port.checked_add(1) else {
+        return Ok(());
+    };
+    let addr = format!("0.0.0.0:{metrics_port}");
+    let listener = TcpListener::bind(&addr)?;
+    println!("Metrics listening on {addr}");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            if let Ok(stream) = stream {
+                let _ = handle_metrics(stream, &store);
+            }
+        }
+    });
+    Ok(())
+}
+
+#[cfg(feature = "server")]
+fn handle_metrics(mut stream: TcpStream, store: &Store) -> Result<(), DharmaError> {
+    let mut buf = [0u8; 1024];
+    let n = stream.read(&mut buf)?;
+    if n == 0 {
+        return Ok(());
+    }
+    let req = String::from_utf8_lossy(&buf[..n]);
+    let mut parts = req.lines().next().unwrap_or("").split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let path = parts.next().unwrap_or("");
+    if method != "GET" || path != "/metrics" {
+        let body = "Not Found\n";
+        let resp = format!(
+            "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(resp.as_bytes())?;
+        return Ok(());
+    }
+    let subject_count = store.list_subjects().map(|s| s.len()).unwrap_or(0) as u64;
+    let body = metrics::render_prometheus(subject_count);
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(resp.as_bytes())?;
     Ok(())
 }
 

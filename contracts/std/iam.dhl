@@ -1,6 +1,8 @@
 ---
 namespace: std.iam
 version: 1.1.0
+implements:
+  - std.protocol.iam@1
 ---
 
 # Identity Contract

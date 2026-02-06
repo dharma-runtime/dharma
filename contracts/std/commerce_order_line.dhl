@@ -1,0 +1,717 @@
+---
+namespace: std.commerce.order.line
+version: 1.1.0
+---
+
+# Commerce Order Line (Contract + Execution Unit)
+
+This subject is the **single source of truth** for a PO line. It captures the commercial promise and the operational reality of fulfillment.
+
+## Business meaning
+- The line is the **contract**. It locks a Variant Snapshot (immutable promise at order time).
+- Allocations and fulfillments are **facts**; they never rewrite history.
+- The line becomes **execution locked** when reality begins (reserve, pick, ship, fulfillment, or supplier commitment).
+
+## What is locked
+- `variant_snapshot_id` never changes once created.
+- Pricing snapshot and offer spec never change after execution begins.
+- `remaining_qty` never goes below zero.
+
+## Allocation lifecycle (line‑centric)
+- **Plan**: records intent; does not lock the line.
+- **Reserve**: pins the sellable snapshot and locks the line.
+- **Pick / Ship**: must use the pinned sellable; they represent execution progress.
+- **Release**: records a release of capacity.
+
+## Sellable matching
+- Matching uses the sellable subject, not caller‑supplied data.
+- The sellable must satisfy the offer spec constraints (designation, origin, format, temp chain, aging).
+
+## Allergen safety
+- If `forbidden_allergens` is non‑empty, the sellable must declare allergens.
+- Missing allergen data is unsafe unless an explicit, auditable override exists.
+
+## Time integrity
+- `fulfilled_at` is required and validated against policy skew and line creation time.
+- If a batch is referenced, fulfillment time cannot be earlier than `batch.dispatched_at - skew`.
+
+## Split semantics
+- Split reduces remaining quantity and records the new line reference.
+- **New line creation must happen in the same transaction boundary** (currently handled by the caller).
+
+## Queries
+
+### Public queries
+#### ListMyPOLines(po_id)
+Parameters: `$1 = customer_id`, `$2 = po_id`
+```dhl
+query ListMyPOLines(customer_id: Ref<std.iam.Identity>, po_id: Ref<std.commerce.order.po>)
+    public
+    dhlq
+    std.commerce.order.line
+    | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+    | where std.commerce.order.po.customer_id == $1, std.commerce.order.line.po_id == $2
+```
+
+#### GetMyLine(line_id)
+Parameters: `$1 = customer_id`, `$2 = line_id`
+```dhl
+query GetMyLine(customer_id: Ref<std.iam.Identity>, line_id: Ref<std.commerce.order.line>)
+    public
+    dhlq
+    std.commerce.order.line
+    | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+    | where std.commerce.order.line.subject == $2, std.commerce.order.po.customer_id == $1
+    | take 1
+```
+
+#### SearchMyLines(q, date_range?, status?, page)
+Parameters: `$1 = q`, `$2 = offset`, `$3 = limit`
+```dhl
+query SearchMyLines(q: Text, offset: Int, limit: Int)
+    public
+    dhlq
+    search $1 in std.commerce.order.line.human_ref,std.commerce.order.line.external_id fuzz=1
+    | lj std.commerce.order.line on oid=std.commerce.order.line.oid
+    | sort -score
+    | drop $2
+    | take $3
+```
+
+#### MyDeliveriesTimeline(date_range)
+Parameters: `$1 = customer_id`, `$2 = date_from`, `$3 = date_to`
+```dhl
+query MyDeliveriesTimeline(customer_id: Ref<std.iam.Identity>, date_from: Timestamp, date_to: Timestamp)
+    public
+    dhlq
+    std.commerce.logistics.batch_line
+    | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+    | lj std.commerce.logistics.batch on batch_id=std.commerce.logistics.batch.subject
+    | where std.commerce.order.po.customer_id == $1,
+            std.commerce.logistics.batch.scheduled_for between ($2,$3)
+    | sort std.commerce.logistics.batch.scheduled_for
+```
+
+### Private queries
+#### GetLine(line_id)
+Parameters: `$1 = line_id`
+```dhl
+query GetLine(line_id: Ref<std.commerce.order.line>)
+    private
+    dhlq
+    std.commerce.order.line
+    | where subject == $1
+    | take 1
+```
+
+#### ListLinesByPO(po_id)
+Parameters: `$1 = po_id`
+```dhl
+query ListLinesByPO(po_id: Ref<std.commerce.order.po>)
+    private
+    dhlq
+    std.commerce.order.line
+    | where po_id == $1
+```
+
+#### ListLinesByVariantSnapshot(variant_snapshot_id)
+Parameters: `$1 = variant_snapshot_id`
+```dhl
+query ListLinesByVariantSnapshot(variant_snapshot_id: Ref<std.commerce.catalog.variant_snapshot>)
+    private
+    dhlq
+    std.commerce.order.line
+    | where variant_snapshot_id == $1
+```
+
+#### SearchLines(q, customer_id?, state?, scheduled_date_range?, unallocated_only?, partially_fulfilled?, page)
+Parameters: `$1 = q`, `$2 = offset`, `$3 = limit`
+```dhl
+query SearchLines(q: Text, offset: Int, limit: Int)
+    private
+    dhlq
+    search $1 in std.commerce.order.line.human_ref,std.commerce.order.line.external_id fuzz=1
+    | lj std.commerce.order.line on oid=std.commerce.order.line.oid
+    | sort -score
+    | drop $2
+    | take $3
+```
+
+#### LinesNeedingAllocation(date_range?, warehouse_id?, page)
+Parameters: `$1 = date_from`, `$2 = date_to`, `$3 = offset`, `$4 = limit`
+```dhl
+query LinesNeedingAllocation(date_from: Timestamp, date_to: Timestamp, offset: Int, limit: Int)
+    private
+    dhlq
+    std.commerce.order.line
+    | where remaining_qty > 0, created_at between ($1,$2)
+    | sort -created_at
+    | drop $3
+    | take $4
+```
+
+#### LinesNeedingProcurement(date_range?, supplier_id?, page)
+Parameters: `$1 = supplier_id`, `$2 = offset`, `$3 = limit`
+```dhl
+query LinesNeedingProcurement(supplier_id: Ref<std.commerce.inventory.supplier>, offset: Int, limit: Int)
+    private
+    dhlq
+    std.commerce.order.line
+    | where remaining_qty > 0
+    | sort created_at
+    | drop $2
+    | take $3
+```
+
+#### LinesEligibleForInvoicing(batch_id? / delivered_only?)
+Parameters: `$1 = batch_id`
+```dhl
+query LinesEligibleForInvoicing(batch_id: Ref<std.commerce.logistics.batch>?)
+    private
+    dhlq
+    std.commerce.order.line
+    | where remaining_qty == 0
+```
+
+_Some analytics use projection tables (e.g., `std.commerce.order.line_stats`) for derived metrics._
+
+#### FillRateReport(date_from, date_to, by=variant|category|supplier)
+Parameters: `$1 = date_from`, `$2 = date_to`
+```dhl
+query FillRateReport(date_from: Timestamp, date_to: Timestamp)
+    private
+    dhlq
+    std.commerce.order.line
+    | where created_at between ($1,$2)
+    | agg count()
+```
+
+#### BackorderAgingReport()
+```dhl
+query BackorderAgingReport
+    private
+    dhlq
+    std.commerce.order.line
+    | where remaining_qty > 0
+    | sort requested_delivery_window.start
+```
+
+#### SplitDeliveryFrequency()
+```dhl
+query SplitDeliveryFrequency
+    private
+    dhlq
+    std.commerce.order.line_stats
+    | agg avg(split_count)
+```
+
+#### SubstitutionRate()
+```dhl
+query SubstitutionRate
+    private
+    dhlq
+    std.commerce.order.line_stats
+    | agg avg(substitution_count)
+```
+
+## Code
+
+### Types and records
+```dhl
+
+
+
+
+
+
+
+struct OfferConstraints
+    public designation: Text(len=128)?
+    public origin: Text(len=64)?
+    public aging_min_months: Int?
+    public format: Text(len=64)?
+    public temp_chain: Text(len=16)?
+    public forbidden_allergens: List<Text(len=64)>
+    public allow_equivalent: Bool?
+    public allow_substitution: Bool?
+
+struct OfferSpec
+    public kind: Enum(PhysicalFood, PhysicalGeneric)
+    public constraints: OfferConstraints
+    public extra: Map<Text(len=64), Text(len=256)>?
+
+
+struct DeliveryWindow
+    public start: Timestamp?
+    public end: Timestamp?
+
+struct AllocationRecord
+    public allocation_id: Text(len=64)
+    public sellable_ref: SubjectRef<std.commerce.inventory.sellable>
+    public sellable_id: Ref<std.commerce.inventory.sellable>
+    public qty_allocated: Decimal(scale=6)
+    public status: Enum(Planned, Reserved, Picked, Shipped, Released)
+    public planned_at: Timestamp?
+    public reserved_at: Timestamp?
+    public picked_at: Timestamp?
+    public shipped_at: Timestamp?
+    public reason: Text(len=256)?
+
+struct FulfillmentRecord
+    public fulfillment_id: Text(len=64)
+    public allocation_id: Text(len=64)
+    public sellable_ref: SubjectRef<std.commerce.inventory.sellable>
+    public qty_fulfilled: Decimal(scale=6)
+    public weight_actual: Decimal(scale=6)?
+    public lot_snapshot: Text(len=512)?
+    public batch_ref: SubjectRef<std.commerce.logistics.batch>?
+    public fulfilled_at: Timestamp
+
+struct SupplierCommitment
+    public commitment_id: Text(len=64)
+    public supplier_id: Ref<std.commerce.inventory.supplier>?
+    public qty_committed: Decimal(scale=6)
+    public expected_date: Timestamp?
+    public ref: Text(len=128)?
+
+struct SplitRecord
+    public new_line_id: Ref<std.commerce.order.line>
+    public qty_split: Decimal(scale=6)
+    public created_at: Timestamp
+
+struct AllergenOverride
+    public allocation_id: Text(len=64)
+    public reason: Text(len=256)?
+    public approved_by: Identity
+    public approved_at: Timestamp
+```
+
+### Aggregate state
+```dhl
+aggregate Line
+    state
+        public external_id: Text(len=64)?
+        public human_ref: Text(len=64)?
+        public policy_ref: SubjectRef<std.commerce.policy>
+        public po_id: Ref<std.commerce.order.po>
+        public variant_id: Ref<std.commerce.catalog.variant>
+        public variant_snapshot_id: Ref<std.commerce.catalog.variant_snapshot>
+        public uom: Text(len=16)
+        public offer_spec: OfferSpec
+        public ordered_qty: Decimal(scale=6)
+        public unit_price_minor: Int
+        public currency: Currency
+        public price_includes_tax: Bool
+        public tax_class: Text(len=64)?
+        public discount_amount_minor: Int?
+        public pricing_basis: Enum(Catalog, Manual, Contract, Promo)
+        public pricing_extra: Map<Text(len=64), Text(len=256)>?
+        public requested_delivery_window: DeliveryWindow?
+        public line_state: Enum(Open, Locked, Completed, Cancelled) = 'Open
+        public editable: Bool = true
+        public execution_locked: Bool = false
+        public completed: Bool = false
+        public cancelled: Bool = false
+        public cancelled_qty: Decimal(scale=6)?
+        public cancelled_at: Timestamp?
+        public remaining_qty: Decimal(scale=6)
+        public allocations: List<AllocationRecord>
+        public allocation_sellable_refs: Map<Text, SubjectRef<std.commerce.inventory.sellable>>
+        public fulfillments: List<FulfillmentRecord>
+        public commitments: List<SupplierCommitment>
+        public splits: List<SplitRecord>
+        public allergen_overrides: Map<Text, AllergenOverride>
+        public created_at: Timestamp
+```
+
+### Actions: creation and edits
+```dhl
+action CreateFromSnapshot(
+    policy_ref: SubjectRef<std.commerce.policy>,
+    po_id: Ref<std.commerce.order.po>,
+    variant_id: Ref<std.commerce.catalog.variant>,
+    variant_snapshot_id: Ref<std.commerce.catalog.variant_snapshot>,
+    uom: Text(len=16),
+    offer_spec: OfferSpec,
+    ordered_qty: Decimal(scale=6),
+    unit_price_minor: Int,
+    currency: Currency,
+    price_includes_tax: Bool,
+    tax_class: Text(len=64)?,
+    discount_amount_minor: Int?,
+    pricing_basis: Enum(Catalog, Manual, Contract, Promo),
+    pricing_extra: Map<Text(len=64), Text(len=256)>?,
+    requested_delivery_window: DeliveryWindow?,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.created_at == 0
+        ordered_qty > 0
+        unit_price_minor >= 0
+    apply
+        state.policy_ref = policy_ref
+        state.po_id = po_id
+        state.variant_id = variant_id
+        state.variant_snapshot_id = variant_snapshot_id
+        state.uom = uom
+        state.offer_spec = offer_spec
+        state.offer_spec.constraints.forbidden_allergens.normalize()
+        state.ordered_qty = ordered_qty
+        state.unit_price_minor = unit_price_minor
+        state.currency = currency
+        state.price_includes_tax = price_includes_tax
+        state.tax_class = tax_class
+        state.discount_amount_minor = discount_amount_minor
+        state.pricing_basis = pricing_basis
+        state.pricing_extra = pricing_extra
+        state.requested_delivery_window = requested_delivery_window
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.remaining_qty = ordered_qty
+        state.editable = true
+        state.execution_locked = false
+        state.line_state = 'Open
+        state.created_at = context.timestamp
+
+action UpdateLineQty(new_qty: Decimal(scale=6))
+    validate
+        state.editable == true
+        state.execution_locked == false
+        new_qty >= 0
+        state.remaining_qty + (new_qty - state.ordered_qty) >= 0
+    apply
+        state.remaining_qty = state.remaining_qty + (new_qty - state.ordered_qty)
+        state.ordered_qty = new_qty
+
+action UpdateDeliveryWindow(window: DeliveryWindow)
+    validate
+        state.editable == true
+        state.execution_locked == false
+    apply
+        state.requested_delivery_window = window
+
+action CancelRemainingLineQty(cancel_qty: Decimal(scale=6))
+    validate
+        state.cancelled == false
+        cancel_qty > 0
+        cancel_qty == state.remaining_qty
+    apply
+        state.remaining_qty = 0
+        state.cancelled = true
+        state.cancelled_qty = cancel_qty
+        state.cancelled_at = context.timestamp
+        state.editable = false
+        state.execution_locked = true
+        state.line_state = 'Cancelled
+```
+
+## Reservation enforcement
+
+When a line is cancelled, release any **reserved** allocations so the inventory ledger
+can unwind the hold/final reservation.
+
+```dhl
+projection ReleaseReservedAllocationsOnCancel
+    trigger std.commerce.order.line.CancelRemainingLineQty
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.order.line
+        | explode allocations as allocation
+        | where std.commerce.order.line.cancelled == true,
+                allocation.status == 'Reserved
+        | sel subject as line_id,
+              allocation.allocation_id as allocation_id,
+              allocation.sellable_ref as sellable_ref,
+              allocation.qty_allocated as qty_allocated
+    emit ReleaseAllocation std.commerce.order.line
+        id = line_id
+        allocation_id = allocation_id
+        sellable_ref = sellable_ref
+        qty_allocated = qty_allocated
+```
+
+```dhl
+action SplitLine(new_line_id: Ref<std.commerce.order.line>, split_qty: Decimal(scale=6))
+    validate
+        state.cancelled == false
+        split_qty > 0
+        split_qty < state.remaining_qty
+    apply
+        state.remaining_qty = state.remaining_qty - split_qty
+        state.splits.push(SplitRecord { new_line_id: new_line_id, qty_split: split_qty, created_at: context.timestamp })
+
+action OverrideAllergenUnknownForAllocation(allocation_id: Text(len=64), reason: Text(len=256)?)
+    validate
+        not contains(state.allergen_overrides, allocation_id)
+    apply
+        state.allergen_overrides.set(allocation_id, AllergenOverride { allocation_id: allocation_id, reason: reason, approved_by: context.signer, approved_at: context.timestamp })
+```
+
+### Actions: allocation and execution
+```dhl
+action PlanAllocation(
+    allocation_id: Text(len=64),
+    sellable_ref: SubjectRef<std.commerce.inventory.sellable>,
+    qty_allocated: Decimal(scale=6),
+    reason: Text(len=256)?
+)
+    validate
+        state.cancelled == false
+        qty_allocated > 0
+        qty_allocated <= state.remaining_qty
+        not contains(state.allocation_sellable_refs, allocation_id) || (sellable_ref == index(state.allocation_sellable_refs, allocation_id))
+        (state.offer_spec.constraints.designation == null) || (read_text(sellable_ref, "designation") == state.offer_spec.constraints.designation)
+        (state.offer_spec.constraints.origin == null) || (read_text(sellable_ref, "origin") == state.offer_spec.constraints.origin)
+        (state.offer_spec.constraints.format == null) || (read_text(sellable_ref, "format") == state.offer_spec.constraints.format)
+        (state.offer_spec.constraints.temp_chain == null) || (read_text(sellable_ref, "temp_chain") == state.offer_spec.constraints.temp_chain)
+        (state.offer_spec.constraints.aging_min_months == null) || (read_int(sellable_ref, "aging_actual_months") >= state.offer_spec.constraints.aging_min_months)
+        contains(state.allergen_overrides, allocation_id) || (len(state.offer_spec.constraints.forbidden_allergens) == 0) || (
+            (read_bool(sellable_ref, "allergens_declared") == true) &&
+            (not remote_intersects(sellable_ref, "allergens", state.offer_spec.constraints.forbidden_allergens))
+        )
+    apply
+        state.allocations.push(AllocationRecord { allocation_id: allocation_id, sellable_ref: sellable_ref, sellable_id: subject_id(sellable_ref), qty_allocated: qty_allocated, status: 'Planned, planned_at: context.timestamp, reserved_at: null, picked_at: null, shipped_at: null, reason: reason })
+
+action ReserveAllocation(
+    allocation_id: Text(len=64),
+    sellable_ref: SubjectRef<std.commerce.inventory.sellable>,
+    qty_allocated: Decimal(scale=6)
+)
+    validate
+        state.cancelled == false
+        qty_allocated > 0
+        qty_allocated <= state.remaining_qty
+        not contains(state.allocation_sellable_refs, allocation_id) || (sellable_ref == index(state.allocation_sellable_refs, allocation_id))
+        (state.offer_spec.constraints.designation == null) || (read_text(sellable_ref, "designation") == state.offer_spec.constraints.designation)
+        (state.offer_spec.constraints.origin == null) || (read_text(sellable_ref, "origin") == state.offer_spec.constraints.origin)
+        (state.offer_spec.constraints.format == null) || (read_text(sellable_ref, "format") == state.offer_spec.constraints.format)
+        (state.offer_spec.constraints.temp_chain == null) || (read_text(sellable_ref, "temp_chain") == state.offer_spec.constraints.temp_chain)
+        (state.offer_spec.constraints.aging_min_months == null) || (read_int(sellable_ref, "aging_actual_months") >= state.offer_spec.constraints.aging_min_months)
+        contains(state.allergen_overrides, allocation_id) || (len(state.offer_spec.constraints.forbidden_allergens) == 0) || (
+            (read_bool(sellable_ref, "allergens_declared") == true) &&
+            (not remote_intersects(sellable_ref, "allergens", state.offer_spec.constraints.forbidden_allergens))
+        )
+    apply
+        state.allocations.push(AllocationRecord { allocation_id: allocation_id, sellable_ref: sellable_ref, sellable_id: subject_id(sellable_ref), qty_allocated: qty_allocated, status: 'Reserved, planned_at: null, reserved_at: context.timestamp, picked_at: null, shipped_at: null, reason: null })
+        state.allocation_sellable_refs.set(allocation_id, sellable_ref)
+        state.execution_locked = true
+        state.editable = false
+        state.line_state = 'Locked
+
+action PickAllocation(
+    allocation_id: Text(len=64),
+    sellable_ref: SubjectRef<std.commerce.inventory.sellable>,
+    qty_allocated: Decimal(scale=6)
+)
+    validate
+        state.cancelled == false
+        qty_allocated > 0
+        qty_allocated <= state.remaining_qty
+        contains(state.allocation_sellable_refs, allocation_id)
+        sellable_ref == index(state.allocation_sellable_refs, allocation_id)
+        (state.offer_spec.constraints.designation == null) || (read_text(sellable_ref, "designation") == state.offer_spec.constraints.designation)
+        (state.offer_spec.constraints.origin == null) || (read_text(sellable_ref, "origin") == state.offer_spec.constraints.origin)
+        (state.offer_spec.constraints.format == null) || (read_text(sellable_ref, "format") == state.offer_spec.constraints.format)
+        (state.offer_spec.constraints.temp_chain == null) || (read_text(sellable_ref, "temp_chain") == state.offer_spec.constraints.temp_chain)
+        (state.offer_spec.constraints.aging_min_months == null) || (read_int(sellable_ref, "aging_actual_months") >= state.offer_spec.constraints.aging_min_months)
+        contains(state.allergen_overrides, allocation_id) || (len(state.offer_spec.constraints.forbidden_allergens) == 0) || (
+            (read_bool(sellable_ref, "allergens_declared") == true) &&
+            (not remote_intersects(sellable_ref, "allergens", state.offer_spec.constraints.forbidden_allergens))
+        )
+    apply
+        state.allocations.push(AllocationRecord { allocation_id: allocation_id, sellable_ref: sellable_ref, sellable_id: subject_id(sellable_ref), qty_allocated: qty_allocated, status: 'Picked, planned_at: null, reserved_at: null, picked_at: context.timestamp, shipped_at: null, reason: null })
+        state.execution_locked = true
+        state.editable = false
+        state.line_state = 'Locked
+
+action ShipAllocation(
+    allocation_id: Text(len=64),
+    sellable_ref: SubjectRef<std.commerce.inventory.sellable>,
+    qty_allocated: Decimal(scale=6)
+)
+    validate
+        state.cancelled == false
+        qty_allocated > 0
+        qty_allocated <= state.remaining_qty
+        contains(state.allocation_sellable_refs, allocation_id)
+        sellable_ref == index(state.allocation_sellable_refs, allocation_id)
+        (state.offer_spec.constraints.designation == null) || (read_text(sellable_ref, "designation") == state.offer_spec.constraints.designation)
+        (state.offer_spec.constraints.origin == null) || (read_text(sellable_ref, "origin") == state.offer_spec.constraints.origin)
+        (state.offer_spec.constraints.format == null) || (read_text(sellable_ref, "format") == state.offer_spec.constraints.format)
+        (state.offer_spec.constraints.temp_chain == null) || (read_text(sellable_ref, "temp_chain") == state.offer_spec.constraints.temp_chain)
+        (state.offer_spec.constraints.aging_min_months == null) || (read_int(sellable_ref, "aging_actual_months") >= state.offer_spec.constraints.aging_min_months)
+        contains(state.allergen_overrides, allocation_id) || (len(state.offer_spec.constraints.forbidden_allergens) == 0) || (
+            (read_bool(sellable_ref, "allergens_declared") == true) &&
+            (not remote_intersects(sellable_ref, "allergens", state.offer_spec.constraints.forbidden_allergens))
+        )
+    apply
+        state.allocations.push(AllocationRecord { allocation_id: allocation_id, sellable_ref: sellable_ref, sellable_id: subject_id(sellable_ref), qty_allocated: qty_allocated, status: 'Shipped, planned_at: null, reserved_at: null, picked_at: null, shipped_at: context.timestamp, reason: null })
+        state.execution_locked = true
+        state.editable = false
+        state.line_state = 'Locked
+
+action ReleaseAllocation(
+    allocation_id: Text(len=64),
+    sellable_ref: SubjectRef<std.commerce.inventory.sellable>,
+    qty_allocated: Decimal(scale=6)
+)
+    validate
+        qty_allocated > 0
+        not contains(state.allocation_sellable_refs, allocation_id) || (sellable_ref == index(state.allocation_sellable_refs, allocation_id))
+    apply
+        state.allocations.push(AllocationRecord { allocation_id: allocation_id, sellable_ref: sellable_ref, sellable_id: subject_id(sellable_ref), qty_allocated: qty_allocated, status: 'Released, planned_at: null, reserved_at: null, picked_at: null, shipped_at: null, reason: null })
+
+action RecordSupplierCommitment(
+    commitment_id: Text(len=64),
+    supplier_id: Ref<std.commerce.inventory.supplier>?,
+    qty_committed: Decimal(scale=6),
+    expected_date: Timestamp?,
+    ref: Text(len=128)?
+)
+    validate
+        state.cancelled == false
+        qty_committed > 0
+    apply
+        state.commitments.push(SupplierCommitment { commitment_id: commitment_id, supplier_id: supplier_id, qty_committed: qty_committed, expected_date: expected_date, ref: ref })
+        state.execution_locked = true
+        state.editable = false
+        state.line_state = 'Locked
+
+action RecordFulfillment(
+    fulfillment_id: Text(len=64),
+    allocation_id: Text(len=64),
+    sellable_ref: SubjectRef<std.commerce.inventory.sellable>,
+    qty_fulfilled: Decimal(scale=6),
+    weight_actual: Decimal(scale=6)?,
+    lot_snapshot: Text(len=512)?,
+    batch_ref: SubjectRef<std.commerce.logistics.batch>?,
+    fulfilled_at: Timestamp,
+    final_state: Enum(Open, Locked, Completed, Cancelled),
+    completed: Bool
+)
+    validate
+        state.cancelled == false
+        qty_fulfilled > 0
+        qty_fulfilled <= state.remaining_qty
+        contains(state.allocation_sellable_refs, allocation_id)
+        sellable_ref == index(state.allocation_sellable_refs, allocation_id)
+        (state.offer_spec.constraints.designation == null) || (read_text(sellable_ref, "designation") == state.offer_spec.constraints.designation)
+        (state.offer_spec.constraints.origin == null) || (read_text(sellable_ref, "origin") == state.offer_spec.constraints.origin)
+        (state.offer_spec.constraints.format == null) || (read_text(sellable_ref, "format") == state.offer_spec.constraints.format)
+        (state.offer_spec.constraints.temp_chain == null) || (read_text(sellable_ref, "temp_chain") == state.offer_spec.constraints.temp_chain)
+        (state.offer_spec.constraints.aging_min_months == null) || (read_int(sellable_ref, "aging_actual_months") >= state.offer_spec.constraints.aging_min_months)
+        contains(state.allergen_overrides, allocation_id) || (len(state.offer_spec.constraints.forbidden_allergens) == 0) || (
+            (read_bool(sellable_ref, "allergens_declared") == true) &&
+            (not remote_intersects(sellable_ref, "allergens", state.offer_spec.constraints.forbidden_allergens))
+        )
+        fulfilled_at <= context.timestamp + (read_int(state.policy_ref, "fulfillment_time_skew_minutes") * 60)
+        fulfilled_at >= state.created_at
+        (batch_ref == null) || (fulfilled_at >= (read_int(batch_ref, "dispatched_at") - (read_int(state.policy_ref, "fulfillment_time_skew_minutes") * 60)))
+        (
+            (state.remaining_qty - qty_fulfilled == 0) && (completed == true) && (final_state == 'Completed)
+        ) || (
+            (state.remaining_qty - qty_fulfilled > 0) && (completed == false) && (final_state == 'Locked)
+        )
+    apply
+        state.fulfillments.push(FulfillmentRecord { fulfillment_id: fulfillment_id, allocation_id: allocation_id, sellable_ref: sellable_ref, qty_fulfilled: qty_fulfilled, weight_actual: weight_actual, lot_snapshot: lot_snapshot, batch_ref: batch_ref, fulfilled_at: fulfilled_at })
+        state.remaining_qty = state.remaining_qty - qty_fulfilled
+        state.completed = completed
+        state.line_state = final_state
+        state.execution_locked = true
+        state.editable = false
+
+## Post‑capture adjustments
+
+When a prepaid order is reduced **after capture**, we emit either:
+- a refund (payment adjustment), or
+- a credit note (fiscal adjustment),
+depending on the client group policy.
+
+### Refund policy (payment adjustment)
+```dhl
+projection PostCaptureRefundFullOnCancelRemaining
+    trigger std.commerce.order.line.CancelRemainingLineQty
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.order.line
+        | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+        | lj std.commerce.payment on std.commerce.order.po.payment_ref=std.commerce.payment.subject
+        | where std.commerce.order.line.cancelled == true,
+                std.commerce.order.line.cancelled_qty > 0,
+                std.commerce.order.po.captured_at != null,
+                std.commerce.order.po.post_capture_adjustment == 'Refund,
+                std.commerce.order.po.payment_ref != null,
+                std.commerce.payment.state == 'Captured,
+                std.commerce.payment.refunded_amount_minor + ((std.commerce.order.line.cancelled_qty * std.commerce.order.line.unit_price_minor) / 1000000) == std.commerce.payment.captured_amount_minor
+        | sel std.commerce.order.po.payment_ref as payment_ref,
+              std.commerce.order.line.cancelled_qty as cancelled_qty,
+              std.commerce.order.line.unit_price_minor as unit_price_minor
+    emit RefundPayment std.commerce.payment
+        id = payment_ref
+        refund_amount_minor = (cancelled_qty * unit_price_minor) / 1000000
+        final_state = 'Refunded
+
+projection PostCaptureRefundPartialOnCancelRemaining
+    trigger std.commerce.order.line.CancelRemainingLineQty
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.order.line
+        | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+        | lj std.commerce.payment on std.commerce.order.po.payment_ref=std.commerce.payment.subject
+        | where std.commerce.order.line.cancelled == true,
+                std.commerce.order.line.cancelled_qty > 0,
+                std.commerce.order.po.captured_at != null,
+                std.commerce.order.po.post_capture_adjustment == 'Refund,
+                std.commerce.order.po.payment_ref != null,
+                std.commerce.payment.state == 'Captured,
+                std.commerce.payment.refunded_amount_minor + ((std.commerce.order.line.cancelled_qty * std.commerce.order.line.unit_price_minor) / 1000000) < std.commerce.payment.captured_amount_minor
+        | sel std.commerce.order.po.payment_ref as payment_ref,
+              std.commerce.order.line.cancelled_qty as cancelled_qty,
+              std.commerce.order.line.unit_price_minor as unit_price_minor
+    emit RefundPayment std.commerce.payment
+        id = payment_ref
+        refund_amount_minor = (cancelled_qty * unit_price_minor) / 1000000
+        final_state = 'Captured
+```
+
+### Credit note policy (fiscal adjustment)
+```dhl
+projection PostCaptureCreditNoteOnCancelRemaining
+    trigger std.commerce.order.line.CancelRemainingLineQty
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.order.line
+        | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+        | lj std.commerce.invoice_line on subject=std.commerce.invoice_line.line_id
+        | lj std.commerce.invoice on std.commerce.invoice_line.invoice_id=std.commerce.invoice.subject
+        | where std.commerce.order.line.cancelled == true,
+                std.commerce.order.line.cancelled_qty > 0,
+                std.commerce.order.po.captured_at != null,
+                std.commerce.order.po.post_capture_adjustment == 'CreditNote,
+                std.commerce.invoice.state == 'Posted
+        | sel std.commerce.invoice.subject as invoice_id,
+              subject as line_id,
+              std.commerce.order.line.cancelled_qty as cancelled_qty,
+              std.commerce.order.line.unit_price_minor as unit_price_minor,
+              std.commerce.order.line.currency as currency
+    emit IssueCreditNoteForLine std.commerce.credit_note
+        id = proj_id("credit_note_cancel", line_id)
+        invoice_id = invoice_id
+        currency = currency
+        credit_line_id = proj_id("credit_line_cancel", line_id)
+        line_id = line_id
+        fulfillment_id = null
+        description = "Auto‑credit for post‑capture cancellation"
+        qty = cancelled_qty
+        unit_price_minor = unit_price_minor
+```
+```

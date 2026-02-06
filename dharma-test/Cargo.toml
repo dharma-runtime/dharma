@@ -14,3 +14,6 @@ ciborium = { version = "0.2", default-features = false, features = ["std"] }
 ratatui = { version = "0.26", default-features = false, features = ["crossterm"] }
 crossterm = "0.27"
 tempfile = "3"
+
+[features]
+external = ["dharma-core/vault-s3", "dharma-core/vault-arweave"]

@@ -2,8 +2,10 @@ use crate::cbor;
 use crate::error::DharmaError;
 use crate::identity;
 use crate::runtime::vm::VmLimits;
+use crate::types::hex_encode;
 use crate::types::SubjectId;
 use ciborium::value::Value;
+use blake3;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use wasmi::{
@@ -380,6 +382,28 @@ fn eval_call(name: &str, args: &[Expr], ctx: &EvalContext) -> Result<Value, Dhar
                 .unwrap_or(0);
             Ok(Value::Integer(ts.into()))
         }
+        "days_between" => {
+            if args.len() != 2 {
+                return Err(DharmaError::Validation(
+                    "days_between expects two args".to_string(),
+                ));
+            }
+            let start = eval_expr(&args[0], ctx)?;
+            let end = eval_expr(&args[1], ctx)?;
+            let days = days_between_i64(as_i64(&start)?, as_i64(&end)?);
+            Ok(Value::Integer(days.into()))
+        }
+        "days_until" => {
+            if args.len() != 2 {
+                return Err(DharmaError::Validation(
+                    "days_until expects two args".to_string(),
+                ));
+            }
+            let expiry = eval_expr(&args[0], ctx)?;
+            let at = eval_expr(&args[1], ctx)?;
+            let days = days_between_i64(as_i64(&at)?, as_i64(&expiry)?);
+            Ok(Value::Integer(days.into()))
+        }
         "has_role" => Ok(Value::Bool(false)),
         "distance" => {
             if args.len() != 2 {
@@ -408,7 +432,29 @@ fn eval_call(name: &str, args: &[Expr], ctx: &EvalContext) -> Result<Value, Dhar
             }
             Ok(Value::Integer(total.into()))
         }
+        "proj_id" => {
+            if args.is_empty() {
+                return Err(DharmaError::Validation("proj_id expects at least one arg".to_string()));
+            }
+            let mut items = Vec::new();
+            for arg in args {
+                items.push(eval_expr(arg, ctx)?);
+            }
+            let list = Value::Array(items);
+            let bytes = cbor::encode_canonical_value(&list)?;
+            let hash = *blake3::hash(&bytes).as_bytes();
+            Ok(Value::Text(hex_encode(hash)))
+        }
         _ => Err(DharmaError::Validation("unknown call".to_string())),
+    }
+}
+
+fn days_between_i64(start: i64, end: i64) -> i64 {
+    let diff = end - start;
+    if diff >= 0 {
+        diff / 86_400
+    } else {
+        (diff - 86_399) / 86_400
     }
 }
 

@@ -2,6 +2,7 @@ use ciborium::value::Value;
 use dharma::assertion::{add_signer_meta, AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION};
 use dharma::crypto;
 use dharma::envelope;
+use dharma::keys::Keyring;
 use dharma::net::ingest::{ingest_object, IngestError};
 use dharma::store::index::FrontierIndex;
 use dharma::store::Store;
@@ -18,15 +19,17 @@ pub fn write_cmd(subject_hex: Option<&str>, body: &str) -> Result<(), DharmaErro
     let _head = crate::mount_self(&env, &identity)?;
 
     let store = Store::new(&env);
-    let mut keys = HashMap::new();
-    keys.insert(identity.subject_id, identity.subject_key);
+    let mut legacy_keys = HashMap::new();
+    legacy_keys.insert(identity.subject_id, identity.subject_key);
+    let mut keys = Keyring::from_subject_keys(&legacy_keys);
+    keys.insert_hpke_secret(identity.public_key, identity.noise_sk);
     let mut index = FrontierIndex::build(&store, &keys)?;
 
     let (subject, subject_key, _defaulted) = match subject_hex {
         None => (identity.subject_id, identity.subject_key, false),
         Some(hex) => {
             let requested = SubjectId::from_hex(hex)?;
-            let (subject, key, defaulted) = resolve_subject(requested, &identity, &keys)?;
+            let (subject, key, defaulted) = resolve_subject(requested, &identity, &legacy_keys)?;
             if defaulted {
                 eprintln!(
                     "Warning: no subject key for {}, defaulting to identity {}",
@@ -37,6 +40,9 @@ pub fn write_cmd(subject_hex: Option<&str>, body: &str) -> Result<(), DharmaErro
             (subject, key, defaulted)
         }
     };
+
+    let epoch = dharma::store::state::load_epoch(store.env(), &subject)?.unwrap_or(0);
+    keys.insert_sdk(subject, epoch, subject_key);
 
     let (prev_id, prev_seq) = select_tip(&subject, &index)?;
 
@@ -64,15 +70,16 @@ pub fn write_cmd(subject_hex: Option<&str>, body: &str) -> Result<(), DharmaErro
     let plaintext = assertion.to_cbor()?;
 
     let kid = crypto::key_id_from_key(&subject_key);
-    let envelope = envelope::encrypt_assertion(
+    let envelope = envelope::encrypt_assertion_with_epoch(
         &plaintext,
         kid,
         &subject_key,
         Nonce12::random(&mut OsRng),
+        epoch,
     )?;
     let bytes = envelope.to_cbor()?;
 
-    match ingest_object(&store, &mut index, &bytes, &keys) {
+    match ingest_object(&store, &mut index, &bytes, &mut keys) {
         Ok(dharma::net::ingest::IngestStatus::Accepted(_)) => {}
         Ok(dharma::net::ingest::IngestStatus::Pending(_, reason)) => {
             return Err(DharmaError::Validation(format!("pending: {reason}")));
@@ -93,6 +100,15 @@ pub fn write_cmd(subject_hex: Option<&str>, body: &str) -> Result<(), DharmaErro
     }
 
     println!("Wrote {} {}", subject.to_hex(), assertion_id.to_hex());
+    if subject == identity.subject_id {
+        let _ = crate::vault::maybe_archive_after_write(
+            &store,
+            subject,
+            DEFAULT_DATA_VERSION,
+            identity.schema,
+            identity.contract,
+        );
+    }
     Ok(())
 }
 
@@ -222,8 +238,8 @@ mod tests {
             Some(first),
         );
 
-        let mut keys = HashMap::new();
-        keys.insert(subject, subject_key);
+        let mut keys = Keyring::new();
+        keys.insert_sdk(subject, 0, subject_key);
         let index = FrontierIndex::build(&store, &keys).unwrap();
 
         let (tip, seq) = select_tip(&subject, &index).unwrap();

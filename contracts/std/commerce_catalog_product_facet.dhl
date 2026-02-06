@@ -1,0 +1,92 @@
+---
+namespace: std.commerce.catalog.product_facet
+version: 1.0.0
+---
+
+# Commerce Catalog Product Facet (Projection)
+
+This projection materializes **category facets** for fast browsing.
+It is **derived data** built by a pipeline and can be rebuilt at any time.
+
+## Scope
+- One subject per facet bucket (category + facet key + facet value + optional query scope).
+- Used by `GetProductFacets` in the catalog queries.
+
+## Access control
+Only projection writers may update this subject.
+
+```dhl
+external
+    roles: [projection.writer]
+```
+
+## Code
+
+```dhl
+aggregate ProductFacet
+    state
+        public category_id: Text(len=64)?
+        public status: Enum(Published, Draft, Archived)
+        public facet_key: Text(len=64)
+        public facet_value: Text(len=256)
+        public count: Int
+        public q_hash: Text(len=64)?
+        public updated_at: Timestamp?
+
+action Upsert(
+    category_id: Text(len=64)?,
+    status: Enum(Published, Draft, Archived),
+    facet_key: Text(len=64),
+    facet_value: Text(len=256),
+    count: Int,
+    q_hash: Text(len=64)?
+)
+    validate
+        has_role(context.signer, "projection.writer")
+        count >= 0
+    apply
+        state.category_id = category_id
+        state.status = status
+        state.facet_key = facet_key
+        state.facet_value = facet_value
+        state.count = count
+        state.q_hash = q_hash
+        state.updated_at = context.timestamp
+
+action Deactivate()
+    validate
+        has_role(context.signer, "projection.writer")
+    apply
+        state.count = 0
+        state.updated_at = context.timestamp
+```
+
+## Projection
+
+```dhl
+projection ProductFacetByCategory
+    trigger std.commerce.catalog.product.Create
+    trigger std.commerce.catalog.product.Update
+    trigger std.commerce.catalog.product.Publish
+    trigger std.commerce.catalog.product.Archive
+    scope category_id = state.category_id
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.catalog.product
+        | where status == 'Published
+        | explode taxonomy as (facet_key, facet_value)
+        | by category_id, facet_key, facet_value
+        | agg count() as count
+    emit upsert std.commerce.catalog.product_facet
+        id = proj_id(category_id, facet_key, facet_value, q_hash)
+        category_id = category_id
+        status = 'Published
+        facet_key = facet_key
+        facet_value = facet_value
+        count = count
+        q_hash = null
+    prune
+        by (category_id, facet_key, facet_value, q_hash)
+```
