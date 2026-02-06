@@ -13,6 +13,7 @@ use ciborium::value::Value;
 use fs2::{available_space, total_space};
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 #[cfg(feature = "vault-arweave")]
 use crate::vault::drivers::ArweaveDriver;
@@ -61,7 +62,10 @@ pub fn drain_archive_queue(
     for job in queue.jobs {
         processed = processed.saturating_add(1);
         if job.subject != identity.subject_id {
-            eprintln!("[vault] skipping unsupported subject {}", job.subject.to_hex());
+            warn!(
+                subject_id = %job.subject.to_hex(),
+                "vault archive skipping unsupported subject"
+            );
             continue;
         }
         match maybe_archive_subject_with_config(
@@ -76,7 +80,7 @@ pub fn drain_archive_queue(
         ) {
             Ok(VaultArchiveOutcome::Archived(_)) => {}
             Ok(VaultArchiveOutcome::Alert(msg)) => {
-                eprintln!("[vault] {msg}");
+                warn!(message = %msg, "vault archive alert");
                 remaining.push(job);
             }
             Ok(VaultArchiveOutcome::Deferred) => {
@@ -84,7 +88,7 @@ pub fn drain_archive_queue(
             }
             Ok(VaultArchiveOutcome::Skipped) => {}
             Err(err) => {
-                eprintln!("[vault] archive failed: {err}");
+                warn!(error = %err, "vault archive failed");
                 remaining.push(job);
             }
         }

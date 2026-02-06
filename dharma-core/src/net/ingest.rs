@@ -27,6 +27,7 @@ use crate::validation::{structural_validate, StructuralStatus};
 use crate::value::{expect_array, expect_bytes, expect_int, expect_map, expect_text, expect_uint, map_get};
 use crate::vault::DHBOX_VERSION_V1;
 use ciborium::value::Value;
+use tracing::{debug, warn};
 
 #[derive(Debug)]
 pub enum IngestError {
@@ -80,7 +81,13 @@ pub fn ingest_object(
     }
 
     if env_is_verbose() {
-        eprintln!("ingest_object: processing {} ({} seq={} sub={})", assertion_id.to_hex(), assertion.header.typ, assertion.header.seq, subject.to_hex());
+        debug!(
+            assertion_id = %assertion_id.to_hex(),
+            assertion_type = %assertion.header.typ,
+            seq = assertion.header.seq,
+            subject_id = %subject.to_hex(),
+            "ingest processing assertion"
+        );
     }
 
     store.put_assertion(&subject, &envelope_id, bytes)?;
@@ -124,7 +131,11 @@ pub fn ingest_object(
         };
         match structural_validate(&assertion, prev_assertion.as_ref())? {
             StructuralStatus::Reject(reason) => {
-                eprintln!("ingest_object: structural reject for {}: {}", assertion_id.to_hex(), reason);
+                warn!(
+                    assertion_id = %assertion_id.to_hex(),
+                    reason = %reason,
+                    "ingest structural reject"
+                );
                 return Err(IngestError::Validation(reason));
             }
             StructuralStatus::Pending(reason) => {
@@ -152,7 +163,11 @@ pub fn ingest_object(
                 return Ok(IngestStatus::Pending(assertion_id, reason));
             }
             Err(err) => {
-                eprintln!("ingest_object: contract validation err for {}: {:?}", assertion_id.to_hex(), err);
+                warn!(
+                    assertion_id = %assertion_id.to_hex(),
+                    error = ?err,
+                    "ingest contract validation error"
+                );
                 return Err(err);
             }
         }
@@ -194,7 +209,11 @@ pub fn ingest_object(
         };
         match structural_validate(&assertion, prev_assertion.as_ref())? {
             StructuralStatus::Reject(reason) => {
-                eprintln!("ingest_object: action structural reject for {}: {}", assertion_id.to_hex(), reason);
+                warn!(
+                    assertion_id = %assertion_id.to_hex(),
+                    reason = %reason,
+                    "ingest action structural reject"
+                );
                 return Err(IngestError::Validation(reason));
             }
             StructuralStatus::Pending(reason) => {
@@ -222,7 +241,11 @@ pub fn ingest_object(
                 return Ok(IngestStatus::Pending(assertion_id, reason));
             }
             Err(err) => {
-                eprintln!("ingest_object: action contract validation err for {}: {:?}", assertion_id.to_hex(), err);
+                warn!(
+                    assertion_id = %assertion_id.to_hex(),
+                    error = ?err,
+                    "ingest action contract validation error"
+                );
                 return Err(err);
             }
         }
@@ -249,7 +272,10 @@ pub fn ingest_object(
         index.update(assertion_id, envelope_id, &assertion.header)?;
         index.clear_pending(&assertion_id);
         if env_is_verbose() {
-            eprintln!("ingest_object: accepted action {}", assertion_id.to_hex());
+            debug!(
+                assertion_id = %assertion_id.to_hex(),
+                "ingest accepted action"
+            );
         }
         metrics::assertions_ingested_inc();
         return Ok(IngestStatus::Accepted(assertion_id));
@@ -278,7 +304,11 @@ pub fn ingest_object(
 
     match structural_validate(&assertion, prev_assertion.as_ref())? {
         StructuralStatus::Reject(reason) => {
-            eprintln!("ingest_object: generic structural reject for {}: {}", assertion_id.to_hex(), reason);
+            warn!(
+                assertion_id = %assertion_id.to_hex(),
+                reason = %reason,
+                "ingest generic structural reject"
+            );
             return Err(IngestError::Validation(reason));
         }
         StructuralStatus::Pending(reason) => {
@@ -329,7 +359,11 @@ pub fn ingest_object(
             return Ok(IngestStatus::Pending(assertion_id, reason));
         }
         Err(err) => {
-            eprintln!("ingest_object: generic contract validation err for {}: {:?}", assertion_id.to_hex(), err);
+            warn!(
+                assertion_id = %assertion_id.to_hex(),
+                error = ?err,
+                "ingest generic contract validation error"
+            );
             return Err(err);
         }
     }
@@ -358,7 +392,10 @@ pub fn ingest_object(
     index.update(assertion_id, envelope_id, &assertion.header)?;
     index.clear_pending(&assertion_id);
     if env_is_verbose() {
-        eprintln!("ingest_object: accepted assertion {}", assertion_id.to_hex());
+        debug!(
+            assertion_id = %assertion_id.to_hex(),
+            "ingest accepted assertion"
+        );
     }
     metrics::assertions_ingested_inc();
     Ok(IngestStatus::Accepted(assertion_id))
@@ -727,10 +764,14 @@ pub fn ingest_object_relay(
         }
         let assertion_id = assertion.assertion_id()?;
         let subject = assertion.header.sub;
+        let mut seeded_ownership = false;
         if is_new_object {
             if crate::store::state::load_ownership(store.env(), &subject)?.is_none() {
                 if let Ok(record) = derive_ownership_record(store.env(), &assertion) {
-                    let _ = crate::store::state::save_ownership(store.env(), &subject, &record);
+                    if crate::store::state::save_ownership(store.env(), &subject, &record).is_ok()
+                    {
+                        seeded_ownership = true;
+                    }
                 }
             }
         }
@@ -745,7 +786,12 @@ pub fn ingest_object_relay(
             None
         };
         if is_new_object {
-            enforce_relay_quota(store, identity, &subject, bytes.len() as u64)?;
+            if let Err(err) = enforce_relay_quota(store, identity, &subject, bytes.len() as u64) {
+                if seeded_ownership {
+                    rollback_relay_seeded_ownership(store, &subject);
+                }
+                return Err(err);
+            }
         }
         store.put_object(&envelope_id, bytes)?;
         store.record_semantic(&assertion_id, &envelope_id)?;
@@ -883,6 +929,32 @@ fn enforce_relay_quota(
         }
     }
     Ok(())
+}
+
+fn rollback_relay_seeded_ownership(store: &Store, subject: &SubjectId) {
+    let env = store.env();
+    let ownership_path = crate::store::state::ownership_path(env, subject);
+    if env.exists(&ownership_path) {
+        let _ = env.remove_file(&ownership_path);
+    }
+    let indexes_dir = crate::store::state::indexes_dir(env, subject);
+    if env.exists(&indexes_dir)
+        && env
+            .list_dir(&indexes_dir)
+            .map(|entries| entries.is_empty())
+            .unwrap_or(false)
+    {
+        let _ = env.remove_dir_all(&indexes_dir);
+    }
+    let subject_dir = crate::store::state::subject_dir(env, subject);
+    if env.exists(&subject_dir)
+        && env
+            .list_dir(&subject_dir)
+            .map(|entries| entries.is_empty())
+            .unwrap_or(false)
+    {
+        let _ = env.remove_dir_all(&subject_dir);
+    }
 }
 
 fn subject_domain_name(store: &Store, subject: &SubjectId) -> Result<String, IngestError> {
@@ -1410,7 +1482,10 @@ fn validate_generic_contract(store: &Store, assertion: &AssertionPlaintext) -> R
             result.reason.unwrap_or_else(|| "contract pending".to_string()),
         )),
         _ => {
-            eprintln!("validate_generic_contract: rejected: {:?}", result.reason);
+            warn!(
+                reason = ?result.reason,
+                "generic contract rejected"
+            );
             Err(IngestError::Validation(
                 result.reason.unwrap_or_else(|| "contract rejected".to_string()),
             ))
@@ -1851,6 +1926,65 @@ mod tests {
         )
         .unwrap();
         assert_eq!(status, RelayIngestStatus::Opaque(envelope_id));
+    }
+
+    #[test]
+    fn relay_ingest_policy_reject_rolls_back_seeded_subject() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::from_root(temp.path());
+        let mut index = FrontierIndex::default();
+        let mut rng = StdRng::seed_from_u64(79);
+        let (signing_key, _) = crypto::generate_identity_keypair(&mut rng);
+        let relay_identity = crate::identity::IdentityState {
+            subject_id: SubjectId::from_bytes([18u8; 32]),
+            signing_key: signing_key.clone(),
+            public_key: crate::types::IdentityKey::from_bytes(signing_key.verifying_key().to_bytes()),
+            root_signing_key: signing_key.clone(),
+            root_public_key: crate::types::IdentityKey::from_bytes(signing_key.verifying_key().to_bytes()),
+            subject_key: [0u8; 32],
+            noise_sk: [1u8; 32],
+            schema: SchemaId::from_bytes([1u8; 32]),
+            contract: ContractId::from_bytes([2u8; 32]),
+        };
+        let subject = SubjectId::from_bytes([19u8; 32]);
+        let header = AssertionHeader {
+            v: crypto::PROTOCOL_VERSION,
+            ver: DEFAULT_DATA_VERSION,
+            sub: subject,
+            typ: "note.text".to_string(),
+            auth: crate::types::IdentityKey::from_bytes(signing_key.verifying_key().to_bytes()),
+            seq: 1,
+            prev: None,
+            refs: Vec::new(),
+            ts: None,
+            schema: SchemaId::from_bytes([1u8; 32]),
+            contract: ContractId::from_bytes([2u8; 32]),
+            note: None,
+            meta: None,
+        };
+        let assertion = AssertionPlaintext::sign(header, Value::Null, &signing_key).unwrap();
+        let bytes = assertion.to_cbor().unwrap();
+        let envelope_id = crypto::envelope_id(&bytes);
+        let err = ingest_object_relay(
+            &store,
+            &mut index,
+            &relay_identity,
+            envelope_id,
+            &bytes,
+            None,
+        )
+        .unwrap_err();
+        match err {
+            IngestError::Validation(reason) => {
+                assert!(reason.contains("missing domain ownership"));
+            }
+            other => panic!("expected relay policy validation error, got {other:?}"),
+        }
+        let subjects = store.list_subjects().unwrap();
+        assert!(!subjects.contains(&subject));
+        assert!(crate::store::state::load_ownership(store.env(), &subject)
+            .unwrap()
+            .is_none());
     }
 
     fn simple_contract_bytes() -> Vec<u8> {
