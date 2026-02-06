@@ -131,10 +131,10 @@ fn handle_connection(
             cfg.apply_timeouts(&stream);
         }
     }
-    let (session, peer) = handshake::server_handshake(&mut stream, &identity)?;
+    let (session, mut peer) = handshake::server_handshake(&mut stream, &identity)?;
     let claims = verify_peer_identity(store.env(), &peer.subject, &peer.public_key)?;
-    let identity_verified = claims.is_some();
-    if peer.verified && identity_verified {
+    peer.verified = claims.is_some();
+    if peer.verified {
         println!("Handshake complete. Auth verified.");
     } else {
         println!("Handshake complete. Auth unverified.");
@@ -153,7 +153,7 @@ fn handle_connection(
     let access = OverlayAccess::new(
         &policy,
         Some(peer.subject),
-        peer.verified && identity_verified,
+        peer.verified,
         &claims,
     );
     if options.relay {

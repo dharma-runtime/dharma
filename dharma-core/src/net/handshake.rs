@@ -153,7 +153,7 @@ pub fn server_handshake(
         PeerAuth {
             subject,
             public_key,
-            verified: true,
+            verified: false,
         },
     ))
 }
@@ -278,6 +278,7 @@ mod tests {
             let (mut server_stream, _) = listener.accept().unwrap();
             let (mut session, peer) = server_handshake(&mut server_stream, &server_id).unwrap();
             assert_eq!(peer.subject, expected_client);
+            assert!(!peer.verified);
             let frame = crate::net::codec::read_frame(&mut server_stream).unwrap();
             let (_t, payload) = session.decrypt(&frame).unwrap();
             assert_eq!(payload, b"ping");
