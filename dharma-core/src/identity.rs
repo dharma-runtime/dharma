@@ -1,11 +1,24 @@
 use crate::assertion::AssertionPlaintext;
+use crate::domain::DomainState;
 use crate::env::Env;
 use crate::error::DharmaError;
 use crate::keystore::KeystoreData;
+use crate::protocols::atlas_identity as atlas_proto;
+use crate::store::Store;
 use crate::store::state::list_assertions;
-use crate::types::{ContractId, IdentityKey, SchemaId, SubjectId};
+use crate::types::{ContractId, HpkePublicKey, IdentityKey, SchemaId, SubjectId};
 use crate::value::{expect_array, expect_bytes, expect_int, expect_map, expect_text, map_get};
 use ed25519_dalek::SigningKey;
+
+pub const CORE_GENESIS: &str = "core.genesis";
+pub const ATLAS_IDENTITY_GENESIS: &str = atlas_proto::ASSERTION_GENESIS;
+pub const ATLAS_IDENTITY_ACTIVATE: &str = atlas_proto::ASSERTION_ACTIVATE;
+pub const ATLAS_IDENTITY_SUSPEND: &str = atlas_proto::ASSERTION_SUSPEND;
+pub const ATLAS_IDENTITY_REVOKE: &str = atlas_proto::ASSERTION_REVOKE;
+pub const IDENTITY_PROFILE: &str = "identity.profile";
+pub const IAM_DELEGATE: &str = "iam.delegate";
+pub const IAM_REVOKE: &str = "iam.revoke";
+pub const IAM_DELEGATE_REVOKE: &str = "iam.delegate.revoke";
 
 #[derive(Clone)]
 pub struct IdentityState {
@@ -46,6 +59,13 @@ pub struct DelegateInfo {
     pub signer: IdentityKey,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentityStatus {
+    Active,
+    Suspended,
+    Revoked,
+}
+
 pub fn root_key_for_identity(env: &dyn Env, subject: &SubjectId) -> Result<Option<IdentityKey>, DharmaError> {
     let records = list_assertions(env, subject)?;
     if records.is_empty() {
@@ -55,12 +75,17 @@ pub fn root_key_for_identity(env: &dyn Env, subject: &SubjectId) -> Result<Optio
     for record in records {
         let assertion = match AssertionPlaintext::from_cbor(&record.bytes) {
             Ok(a) => a,
-            Err(_) => continue,
+            Err(_) => {
+                continue;
+            }
         };
         if assertion.header.sub != *subject {
             continue;
         }
-        if assertion.header.seq == 1 || assertion.header.typ == "core.genesis" {
+        if assertion.header.typ == ATLAS_IDENTITY_GENESIS || assertion.header.typ == CORE_GENESIS {
+            return Ok(Some(assertion.header.auth));
+        }
+        if assertion.header.seq == 1 {
             return Ok(Some(assertion.header.auth));
         }
         if best.map(|(seq, _)| assertion.header.seq < seq).unwrap_or(true) {
@@ -68,6 +93,82 @@ pub fn root_key_for_identity(env: &dyn Env, subject: &SubjectId) -> Result<Optio
         }
     }
     Ok(best.map(|(_, key)| key))
+}
+
+pub fn identity_status(env: &dyn Env, subject: &SubjectId) -> Result<IdentityStatus, DharmaError> {
+    let Some(root_key) = root_key_for_identity(env, subject)? else {
+        return Ok(IdentityStatus::Active);
+    };
+    identity_status_with_root(env, subject, &root_key)
+}
+
+pub fn is_verified_identity(env: &dyn Env, subject: &SubjectId) -> Result<bool, DharmaError> {
+    let mut root_key = None;
+    for record in list_assertions(env, subject)? {
+        let assertion = match AssertionPlaintext::from_cbor(&record.bytes) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        if assertion.header.sub != *subject {
+            continue;
+        }
+        if assertion.header.typ != ATLAS_IDENTITY_GENESIS {
+            continue;
+        }
+        if assertion.header.seq != 1 {
+            continue;
+        }
+        if !assertion.verify_signature()? {
+            continue;
+        }
+        root_key = Some(assertion.header.auth);
+        break;
+    }
+    let Some(root_key) = root_key else {
+        return Ok(false);
+    };
+    let status = identity_status_with_root(env, subject, &root_key)?;
+    Ok(status == IdentityStatus::Active)
+}
+
+fn identity_status_with_root(
+    env: &dyn Env,
+    subject: &SubjectId,
+    root_key: &IdentityKey,
+) -> Result<IdentityStatus, DharmaError> {
+    let mut status = IdentityStatus::Active;
+    for record in list_assertions(env, subject)? {
+        let assertion = match AssertionPlaintext::from_cbor(&record.bytes) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        if assertion.header.sub != *subject {
+            continue;
+        }
+        if assertion.header.auth.as_bytes() != root_key.as_bytes() {
+            continue;
+        }
+        if !assertion.verify_signature()? {
+            continue;
+        }
+        match assertion.header.typ.as_str() {
+            ATLAS_IDENTITY_SUSPEND => {
+                if status != IdentityStatus::Revoked {
+                    status = IdentityStatus::Suspended;
+                }
+            }
+            ATLAS_IDENTITY_ACTIVATE => {
+                if status != IdentityStatus::Revoked {
+                    status = IdentityStatus::Active;
+                }
+            }
+            ATLAS_IDENTITY_REVOKE => {
+                status = IdentityStatus::Revoked;
+            }
+            _ => {}
+        }
+    }
+    Ok(status)
 }
 
 pub fn load_delegates(env: &dyn Env, subject: &SubjectId) -> Result<Vec<DelegateInfo>, DharmaError> {
@@ -90,7 +191,7 @@ pub fn load_delegates(env: &dyn Env, subject: &SubjectId) -> Result<Vec<Delegate
         if !assertion.verify_signature()? {
             continue;
         }
-        if assertion.header.typ == "iam.revoke" || assertion.header.typ == "iam.delegate.revoke" {
+        if assertion.header.typ == IAM_REVOKE || assertion.header.typ == IAM_DELEGATE_REVOKE {
             let map = expect_map(&assertion.body)?;
             let delegate_bytes = expect_bytes(
                 map_get(map, "delegate")
@@ -100,7 +201,7 @@ pub fn load_delegates(env: &dyn Env, subject: &SubjectId) -> Result<Vec<Delegate
             out.retain(|entry| entry.key.as_bytes() != delegate_bytes.as_slice());
             continue;
         }
-        if assertion.header.typ != "iam.delegate" {
+        if assertion.header.typ != IAM_DELEGATE {
             continue;
         }
         let map = expect_map(&assertion.body)?;
@@ -169,6 +270,69 @@ pub fn delegate_allows(
     Ok(false)
 }
 
+pub fn device_key_revoked(
+    env: &dyn Env,
+    subject: &SubjectId,
+    signer_key: &IdentityKey,
+) -> Result<bool, DharmaError> {
+    let Some(root_key) = root_key_for_identity(env, subject)? else {
+        return Ok(false);
+    };
+    if signer_key.as_bytes() == root_key.as_bytes() {
+        return Ok(false);
+    }
+    let mut revoked = false;
+    for record in list_assertions(env, subject)? {
+        let assertion = match AssertionPlaintext::from_cbor(&record.bytes) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        if assertion.header.sub != *subject {
+            continue;
+        }
+        if assertion.header.auth.as_bytes() != root_key.as_bytes() {
+            continue;
+        }
+        if !assertion.verify_signature()? {
+            continue;
+        }
+        match assertion.header.typ.as_str() {
+            IAM_REVOKE | IAM_DELEGATE_REVOKE => {
+                let map = expect_map(&assertion.body)?;
+                let delegate_bytes = expect_bytes(
+                    map_get(map, "delegate")
+                        .ok_or_else(|| DharmaError::Validation("missing delegate".to_string()))?,
+                )?;
+                if delegate_bytes.as_slice() == signer_key.as_bytes() {
+                    revoked = true;
+                }
+            }
+            IAM_DELEGATE => {
+                let map = expect_map(&assertion.body)?;
+                let delegate_bytes = expect_bytes(
+                    map_get(map, "delegate")
+                        .ok_or_else(|| DharmaError::Validation("missing delegate".to_string()))?,
+                )?;
+                if delegate_bytes.as_slice() == signer_key.as_bytes() {
+                    revoked = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(revoked)
+}
+
+pub fn is_member_of_domain(
+    store: &Store,
+    domain_subject: &SubjectId,
+    identity: &IdentityKey,
+    now: i64,
+) -> Result<bool, DharmaError> {
+    let state = DomainState::load(store, domain_subject)?;
+    Ok(state.is_member(identity, now))
+}
+
 pub fn roles_for_identity(env: &dyn Env, subject: &SubjectId) -> Result<Vec<String>, DharmaError> {
     let Some(root_key) = root_key_for_identity(env, subject)? else {
         return Ok(Vec::new());
@@ -189,12 +353,54 @@ pub fn roles_for_identity(env: &dyn Env, subject: &SubjectId) -> Result<Vec<Stri
         if !assertion.verify_signature()? {
             continue;
         }
-        if assertion.header.typ == "identity.profile" && assertion.header.seq >= best_seq {
+        if assertion.header.typ == IDENTITY_PROFILE && assertion.header.seq >= best_seq {
             best_seq = assertion.header.seq;
             roles = parse_roles(&assertion.body);
         }
     }
     Ok(roles)
+}
+
+pub fn hpke_public_key_for_identity(
+    env: &dyn Env,
+    subject: &SubjectId,
+) -> Result<Option<HpkePublicKey>, DharmaError> {
+    let Some(root_key) = root_key_for_identity(env, subject)? else {
+        return Ok(None);
+    };
+    let mut best_seq = 0u64;
+    let mut hpke_key: Option<HpkePublicKey> = None;
+    for record in list_assertions(env, subject)? {
+        let assertion = match AssertionPlaintext::from_cbor(&record.bytes) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        if assertion.header.sub != *subject {
+            continue;
+        }
+        if assertion.header.auth.as_bytes() != root_key.as_bytes() {
+            continue;
+        }
+        if !assertion.verify_signature()? {
+            continue;
+        }
+        if assertion.header.typ == IDENTITY_PROFILE && assertion.header.seq >= best_seq {
+            best_seq = assertion.header.seq;
+            let map = match expect_map(&assertion.body) {
+                Ok(map) => map,
+                Err(_) => continue,
+            };
+            let Some(val) = map_get(map, "hpke_pk") else { continue };
+            let bytes = match expect_bytes(val) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+            if let Ok(key) = HpkePublicKey::from_slice(&bytes) {
+                hpke_key = Some(key);
+            }
+        }
+    }
+    Ok(hpke_key)
 }
 
 pub fn has_role(env: &dyn Env, subject: &SubjectId, role: &str) -> Result<bool, DharmaError> {
@@ -561,5 +767,265 @@ mod tests {
         .unwrap();
 
         assert!(has_role(&env, &subject, "finance.viewer").unwrap());
+    }
+
+    #[test]
+    fn atlas_status_transitions() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = crate::env::StdEnv::new(temp.path());
+        let mut rng = StdRng::seed_from_u64(12);
+        let (root_sk, root_id) = crypto::generate_identity_keypair(&mut rng);
+        let subject = SubjectId::from_bytes([11u8; 32]);
+        let schema = SchemaId::from_bytes([3u8; 32]);
+        let contract = ContractId::from_bytes([4u8; 32]);
+
+        let genesis_header = AssertionHeader {
+            v: crypto::PROTOCOL_VERSION,
+            ver: DEFAULT_DATA_VERSION,
+            sub: subject,
+            typ: ATLAS_IDENTITY_GENESIS.to_string(),
+            auth: root_id,
+            seq: 1,
+            prev: None,
+            refs: vec![],
+            ts: None,
+            schema,
+            contract,
+            note: None,
+            meta: None,
+        };
+        let genesis_body = Value::Map(vec![
+            (
+                Value::Text("atlas_name".to_string()),
+                Value::Text("person.local.alice_abcd".to_string()),
+            ),
+            (
+                Value::Text("owner_key".to_string()),
+                Value::Bytes(root_id.as_bytes().to_vec()),
+            ),
+        ]);
+        let genesis = AssertionPlaintext::sign(genesis_header, genesis_body, &root_sk).unwrap();
+        let genesis_bytes = genesis.to_cbor().unwrap();
+        let genesis_id = genesis.assertion_id().unwrap();
+        let genesis_env = crypto::envelope_id(&genesis_bytes);
+        append_assertion(
+            &env,
+            &subject,
+            1,
+            genesis_id,
+            genesis_env,
+            ATLAS_IDENTITY_GENESIS,
+            &genesis_bytes,
+        )
+        .unwrap();
+
+        assert_eq!(identity_status(&env, &subject).unwrap(), IdentityStatus::Active);
+
+        let suspend_header = AssertionHeader {
+            v: crypto::PROTOCOL_VERSION,
+            ver: DEFAULT_DATA_VERSION,
+            sub: subject,
+            typ: ATLAS_IDENTITY_SUSPEND.to_string(),
+            auth: root_id,
+            seq: 2,
+            prev: Some(genesis_id),
+            refs: vec![genesis_id],
+            ts: None,
+            schema,
+            contract,
+            note: None,
+            meta: None,
+        };
+        let suspend = AssertionPlaintext::sign(suspend_header, Value::Map(vec![]), &root_sk).unwrap();
+        let suspend_bytes = suspend.to_cbor().unwrap();
+        let suspend_id = suspend.assertion_id().unwrap();
+        let suspend_env = crypto::envelope_id(&suspend_bytes);
+        append_assertion(
+            &env,
+            &subject,
+            2,
+            suspend_id,
+            suspend_env,
+            ATLAS_IDENTITY_SUSPEND,
+            &suspend_bytes,
+        )
+        .unwrap();
+        assert_eq!(identity_status(&env, &subject).unwrap(), IdentityStatus::Suspended);
+
+        let activate_header = AssertionHeader {
+            v: crypto::PROTOCOL_VERSION,
+            ver: DEFAULT_DATA_VERSION,
+            sub: subject,
+            typ: ATLAS_IDENTITY_ACTIVATE.to_string(),
+            auth: root_id,
+            seq: 3,
+            prev: Some(suspend_id),
+            refs: vec![suspend_id],
+            ts: None,
+            schema,
+            contract,
+            note: None,
+            meta: None,
+        };
+        let activate = AssertionPlaintext::sign(activate_header, Value::Map(vec![]), &root_sk).unwrap();
+        let activate_bytes = activate.to_cbor().unwrap();
+        let activate_id = activate.assertion_id().unwrap();
+        let activate_env = crypto::envelope_id(&activate_bytes);
+        append_assertion(
+            &env,
+            &subject,
+            3,
+            activate_id,
+            activate_env,
+            ATLAS_IDENTITY_ACTIVATE,
+            &activate_bytes,
+        )
+        .unwrap();
+        assert_eq!(identity_status(&env, &subject).unwrap(), IdentityStatus::Active);
+
+        let revoke_header = AssertionHeader {
+            v: crypto::PROTOCOL_VERSION,
+            ver: DEFAULT_DATA_VERSION,
+            sub: subject,
+            typ: ATLAS_IDENTITY_REVOKE.to_string(),
+            auth: root_id,
+            seq: 4,
+            prev: Some(activate_id),
+            refs: vec![activate_id],
+            ts: None,
+            schema,
+            contract,
+            note: None,
+            meta: None,
+        };
+        let revoke = AssertionPlaintext::sign(revoke_header, Value::Map(vec![]), &root_sk).unwrap();
+        let revoke_bytes = revoke.to_cbor().unwrap();
+        let revoke_id = revoke.assertion_id().unwrap();
+        let revoke_env = crypto::envelope_id(&revoke_bytes);
+        append_assertion(
+            &env,
+            &subject,
+            4,
+            revoke_id,
+            revoke_env,
+            ATLAS_IDENTITY_REVOKE,
+            &revoke_bytes,
+        )
+        .unwrap();
+        assert_eq!(identity_status(&env, &subject).unwrap(), IdentityStatus::Revoked);
+
+        let reactivate_header = AssertionHeader {
+            v: crypto::PROTOCOL_VERSION,
+            ver: DEFAULT_DATA_VERSION,
+            sub: subject,
+            typ: ATLAS_IDENTITY_ACTIVATE.to_string(),
+            auth: root_id,
+            seq: 5,
+            prev: Some(revoke_id),
+            refs: vec![revoke_id],
+            ts: None,
+            schema,
+            contract,
+            note: None,
+            meta: None,
+        };
+        let reactivate = AssertionPlaintext::sign(reactivate_header, Value::Map(vec![]), &root_sk).unwrap();
+        let reactivate_bytes = reactivate.to_cbor().unwrap();
+        let reactivate_id = reactivate.assertion_id().unwrap();
+        let reactivate_env = crypto::envelope_id(&reactivate_bytes);
+        append_assertion(
+            &env,
+            &subject,
+            5,
+            reactivate_id,
+            reactivate_env,
+            ATLAS_IDENTITY_ACTIVATE,
+            &reactivate_bytes,
+        )
+        .unwrap();
+        assert_eq!(identity_status(&env, &subject).unwrap(), IdentityStatus::Revoked);
+    }
+
+    #[test]
+    fn atlas_verified_only_if_active() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = crate::env::StdEnv::new(temp.path());
+        let mut rng = StdRng::seed_from_u64(13);
+        let (root_sk, root_id) = crypto::generate_identity_keypair(&mut rng);
+        let subject = SubjectId::from_bytes([12u8; 32]);
+        let schema = SchemaId::from_bytes([3u8; 32]);
+        let contract = ContractId::from_bytes([4u8; 32]);
+
+        let genesis_header = AssertionHeader {
+            v: crypto::PROTOCOL_VERSION,
+            ver: DEFAULT_DATA_VERSION,
+            sub: subject,
+            typ: ATLAS_IDENTITY_GENESIS.to_string(),
+            auth: root_id,
+            seq: 1,
+            prev: None,
+            refs: vec![],
+            ts: None,
+            schema,
+            contract,
+            note: None,
+            meta: None,
+        };
+        let genesis_body = Value::Map(vec![
+            (
+                Value::Text("atlas_name".to_string()),
+                Value::Text("person.local.bob_abcd".to_string()),
+            ),
+            (
+                Value::Text("owner_key".to_string()),
+                Value::Bytes(root_id.as_bytes().to_vec()),
+            ),
+        ]);
+        let genesis = AssertionPlaintext::sign(genesis_header, genesis_body, &root_sk).unwrap();
+        let genesis_bytes = genesis.to_cbor().unwrap();
+        let genesis_id = genesis.assertion_id().unwrap();
+        let genesis_env = crypto::envelope_id(&genesis_bytes);
+        append_assertion(
+            &env,
+            &subject,
+            1,
+            genesis_id,
+            genesis_env,
+            ATLAS_IDENTITY_GENESIS,
+            &genesis_bytes,
+        )
+        .unwrap();
+        assert!(is_verified_identity(&env, &subject).unwrap());
+
+        let suspend_header = AssertionHeader {
+            v: crypto::PROTOCOL_VERSION,
+            ver: DEFAULT_DATA_VERSION,
+            sub: subject,
+            typ: ATLAS_IDENTITY_SUSPEND.to_string(),
+            auth: root_id,
+            seq: 2,
+            prev: Some(genesis_id),
+            refs: vec![genesis_id],
+            ts: None,
+            schema,
+            contract,
+            note: None,
+            meta: None,
+        };
+        let suspend = AssertionPlaintext::sign(suspend_header, Value::Map(vec![]), &root_sk).unwrap();
+        let suspend_bytes = suspend.to_cbor().unwrap();
+        let suspend_id = suspend.assertion_id().unwrap();
+        let suspend_env = crypto::envelope_id(&suspend_bytes);
+        append_assertion(
+            &env,
+            &subject,
+            2,
+            suspend_id,
+            suspend_env,
+            ATLAS_IDENTITY_SUSPEND,
+            &suspend_bytes,
+        )
+        .unwrap();
+        assert!(!is_verified_identity(&env, &subject).unwrap());
     }
 }

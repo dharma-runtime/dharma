@@ -1,0 +1,80 @@
+---
+namespace: std.commerce.procurement.supplier
+version: 1.0.0
+---
+
+# Commerce Procurement Supplier
+
+Suppliers provide items under negotiated terms.
+
+## Queries
+
+### Private queries
+#### GetSupplier(supplier_id)
+Parameters: `$1 = supplier_id`
+```dhl
+query GetSupplier(supplier_id: Ref<std.commerce.procurement.supplier>)
+    private
+    dhlq
+    std.commerce.procurement.supplier
+    | where subject == $1
+    | take 1
+```
+
+#### ListSuppliers(status?, page)
+Parameters: `$1 = status`, `$2 = offset`, `$3 = limit`
+```dhl
+query ListSuppliers(status: Enum(Active, Archived), offset: Int, limit: Int)
+    private
+    dhlq
+    std.commerce.procurement.supplier
+    | where status == $1
+    | sort -updated_at
+    | drop $2
+    | take $3
+```
+
+## Code
+
+```dhl
+aggregate Supplier
+    state
+        public external_id: Text(len=64)?
+        public human_ref: Text(len=64)?
+        public name: Text(len=128)
+        public lead_time_default_days: Int?
+        public status: Enum(Active, Archived) = 'Active
+        public created_at: Timestamp?
+        public updated_at: Timestamp?
+
+action Create(
+    name: Text(len=128),
+    lead_time_default_days: Int?,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.created_at == null
+    apply
+        state.name = name
+        state.lead_time_default_days = lead_time_default_days
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.status = 'Active
+        state.created_at = context.timestamp
+        state.updated_at = context.timestamp
+
+action UpdateTerms(lead_time_default_days: Int?)
+    validate
+        state.status == 'Active
+    apply
+        state.lead_time_default_days = lead_time_default_days
+        state.updated_at = context.timestamp
+
+action Archive()
+    validate
+        state.status != 'Archived
+    apply
+        state.status = 'Archived
+        state.updated_at = context.timestamp
+```

@@ -1,7 +1,7 @@
 use crate::assertion::AssertionPlaintext;
 use crate::env::Env;
 use crate::error::DharmaError;
-use crate::identity::{delegate_allows, root_key_for_identity};
+use crate::identity::{delegate_allows, is_verified_identity, root_key_for_identity, IDENTITY_PROFILE};
 use crate::net::policy::PeerClaims;
 use crate::store::state::list_assertions;
 use crate::types::{IdentityKey, SubjectId};
@@ -13,7 +13,6 @@ pub fn verify_peer_identity(
     public_key: &IdentityKey,
 ) -> Result<Option<PeerClaims>, DharmaError> {
     let mut claims = PeerClaims::default();
-    let mut verified = false;
     let mut best_profile_seq = 0u64;
     let root_key = match root_key_for_identity(env, subject)? {
         Some(key) => key,
@@ -33,25 +32,22 @@ pub fn verify_peer_identity(
         if !assertion.verify_signature()? {
             continue;
         }
-        if assertion.header.typ == "core.genesis" || assertion.header.typ.starts_with("identity.") {
-            verified = true;
-        }
-        if assertion.header.typ == "identity.profile" && assertion.header.seq >= best_profile_seq {
+        if assertion.header.typ == IDENTITY_PROFILE && assertion.header.seq >= best_profile_seq {
             best_profile_seq = assertion.header.seq;
             claims = parse_claims(&assertion.body);
         }
     }
+    if !is_verified_identity(env, subject)? {
+        return Ok(None);
+    }
     if public_key.as_bytes() != root_key.as_bytes() {
         let now = 0i64;
         if delegate_allows(env, subject, public_key, "sync", now)? {
-            verified = true;
+            return Ok(Some(claims));
         }
+        return Ok(None);
     }
-    if verified {
-        Ok(Some(claims))
-    } else {
-        Ok(None)
-    }
+    Ok(Some(claims))
 }
 
 fn parse_claims(body: &Value) -> PeerClaims {
@@ -82,6 +78,7 @@ mod tests {
     use super::*;
     use crate::assertion::{AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION};
     use crate::crypto;
+    use crate::identity::ATLAS_IDENTITY_GENESIS;
     use crate::store::state::append_assertion;
     use crate::types::{ContractId, SchemaId};
     use ciborium::value::Value;
@@ -95,18 +92,59 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(9);
         let (signing_key, _) = crypto::generate_identity_keypair(&mut rng);
         let subject = SubjectId::from_bytes([1u8; 32]);
+        let schema = SchemaId::from_bytes([2u8; 32]);
+        let contract = ContractId::from_bytes([3u8; 32]);
+        let genesis_header = AssertionHeader {
+            v: crypto::PROTOCOL_VERSION,
+            ver: DEFAULT_DATA_VERSION,
+            sub: subject,
+            typ: ATLAS_IDENTITY_GENESIS.to_string(),
+            auth: crate::types::IdentityKey::from_bytes(signing_key.verifying_key().to_bytes()),
+            seq: 1,
+            prev: None,
+            refs: Vec::new(),
+            ts: None,
+            schema,
+            contract,
+            note: None,
+            meta: None,
+        };
+        let genesis_body = Value::Map(vec![
+            (
+                Value::Text("atlas_name".to_string()),
+                Value::Text("person.local.alice_abcd".to_string()),
+            ),
+            (
+                Value::Text("owner_key".to_string()),
+                Value::Bytes(signing_key.verifying_key().to_bytes().to_vec()),
+            ),
+        ]);
+        let genesis = AssertionPlaintext::sign(genesis_header, genesis_body, &signing_key).unwrap();
+        let genesis_bytes = genesis.to_cbor().unwrap();
+        let genesis_id = genesis.assertion_id().unwrap();
+        let genesis_env = crypto::envelope_id(&genesis_bytes);
+        append_assertion(
+            &env,
+            &subject,
+            1,
+            genesis_id,
+            genesis_env,
+            ATLAS_IDENTITY_GENESIS,
+            &genesis_bytes,
+        )
+        .unwrap();
         let header = AssertionHeader {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
             sub: subject,
             typ: "identity.profile".to_string(),
             auth: crate::types::IdentityKey::from_bytes(signing_key.verifying_key().to_bytes()),
-            seq: 1,
-            prev: None,
-            refs: Vec::new(),
+            seq: 2,
+            prev: Some(genesis_id),
+            refs: vec![genesis_id],
             ts: None,
-            schema: SchemaId::from_bytes([2u8; 32]),
-            contract: ContractId::from_bytes([3u8; 32]),
+            schema,
+            contract,
             note: None,
             meta: None,
         };
@@ -124,7 +162,7 @@ mod tests {
         append_assertion(
             &env,
             &subject,
-            1,
+            2,
             assertion_id,
             envelope_id,
             "identity.profile",

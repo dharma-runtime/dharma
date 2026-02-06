@@ -1,0 +1,46 @@
+---
+namespace: std.commerce.policy
+version: 1.0.0
+---
+
+# Commerce Policy (Execution Rules)
+
+Policies provide **domain‑level execution rules** used by lines at validation time.
+
+## Business meaning
+- Lines reference a policy for time skew enforcement.
+- Policies are domain‑configurable and managed by administrators.
+
+## Time skew
+- Skew applies symmetrically to device time drift and batch dispatch ordering.
+
+## Code
+
+### Aggregate state
+```dhl
+aggregate Policy
+    state
+        public fulfillment_time_skew_minutes: Int = 15
+        public created_at: Timestamp?
+        public updated_at: Timestamp?
+```
+
+### Actions
+```dhl
+action Create(fulfillment_time_skew_minutes: Int)
+    validate
+        state.created_at == null
+        fulfillment_time_skew_minutes >= 0
+    apply
+        state.fulfillment_time_skew_minutes = fulfillment_time_skew_minutes
+        state.created_at = context.timestamp
+        state.updated_at = context.timestamp
+
+action UpdateFulfillmentSkew(fulfillment_time_skew_minutes: Int)
+    validate
+        state.created_at != null
+        fulfillment_time_skew_minutes >= 0
+    apply
+        state.fulfillment_time_skew_minutes = fulfillment_time_skew_minutes
+        state.updated_at = context.timestamp
+```

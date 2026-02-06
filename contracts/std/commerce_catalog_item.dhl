@@ -1,0 +1,130 @@
+---
+namespace: std.commerce.catalog.item
+version: 1.0.0
+---
+
+# Commerce Catalog Item (Core Entity)
+
+Items represent the **fundamental, immutable concept** that variants sell.
+They carry compliance and classification data that must not drift across variants.
+
+## Business meaning
+- Items are the source of truth for HS code, constraints, and canonical attributes.
+- Variants reference items to define sellable packaging and branding.
+
+## Shelf-life guarantees
+- `min_remaining_shelf_life_days` is an optional **customer guarantee**.
+- If set, availability must ensure remaining shelf life at delivery meets the guarantee.
+
+## Queries
+
+### Public queries
+#### GetItem(item_id)
+Parameters: `$1 = item_id`
+```dhl
+query GetItem(item_id: Ref<std.commerce.catalog.item>)
+    public
+    dhlq
+    std.commerce.catalog.item
+    | where subject == $1
+    | take 1
+```
+
+### Private queries
+#### ListItems(status?, page)
+Parameters: `$1 = status`, `$2 = offset`, `$3 = limit`
+```dhl
+query ListItems(status: Enum(Active, Archived), offset: Int, limit: Int)
+    private
+    dhlq
+    std.commerce.catalog.item
+    | where status == $1
+    | sort -updated_at
+    | drop $2
+    | take $3
+```
+
+## Code
+
+### Types
+```dhl
+
+struct ItemConstraints
+    public temp_chain: Text(len=16)?
+    public allergens: List<Text(len=64)>
+    public hazardous: Bool?
+```
+
+### Aggregate state
+```dhl
+aggregate Item
+    state
+        public external_id: Text(len=64)?
+        public human_ref: Text(len=64)?
+        public hs_code: Text(len=16)?
+        public classifications: Map<Text(len=64), Text(len=128)>
+        public attributes: Map<Text(len=64), Text(len=256)>
+        public constraints: ItemConstraints
+        public min_remaining_shelf_life_days: Int?
+        public status: Enum(Active, Archived) = 'Active
+        public created_at: Timestamp?
+        public updated_at: Timestamp?
+```
+
+### Actions
+```dhl
+action Create(
+    hs_code: Text(len=16)?,
+    classifications: Map<Text(len=64), Text(len=128)>,
+    attributes: Map<Text(len=64), Text(len=256)>,
+    constraints: ItemConstraints,
+    min_remaining_shelf_life_days: Int?,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.created_at == null
+    apply
+        state.hs_code = hs_code
+        state.classifications = classifications
+        state.attributes = attributes
+        state.constraints = constraints
+        state.constraints.allergens.normalize()
+        state.min_remaining_shelf_life_days = min_remaining_shelf_life_days
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.status = 'Active
+        state.created_at = context.timestamp
+        state.updated_at = context.timestamp
+
+action UpdateDetails(
+    hs_code: Text(len=16)?,
+    classifications: Map<Text(len=64), Text(len=128)>,
+    attributes: Map<Text(len=64), Text(len=256)>,
+    constraints: ItemConstraints
+)
+    validate
+        state.status == 'Active
+    apply
+        state.hs_code = hs_code
+        state.classifications = classifications
+        state.attributes = attributes
+        state.constraints = constraints
+        state.constraints.allergens.normalize()
+        state.updated_at = context.timestamp
+
+action SetShelfLifeGuarantee(min_remaining_shelf_life_days: Int?)
+    validate
+        state.status == 'Active
+        (min_remaining_shelf_life_days == null) || (min_remaining_shelf_life_days >= 0)
+    apply
+        state.min_remaining_shelf_life_days = min_remaining_shelf_life_days
+        state.updated_at = context.timestamp
+
+action Archive()
+    validate
+        state.status != 'Archived
+    apply
+        state.status = 'Archived
+        state.updated_at = context.timestamp
+```

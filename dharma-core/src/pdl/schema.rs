@@ -21,8 +21,12 @@ pub struct CqrsSchema {
     pub version: String,
     pub aggregate: String,
     pub extends: Option<String>,
+    pub implements: Vec<String>,
+    pub structs: BTreeMap<String, StructSchema>,
     pub fields: BTreeMap<String, FieldSchema>,
     pub actions: BTreeMap<String, ActionSchema>,
+    pub queries: BTreeMap<String, QuerySchema>,
+    pub projections: BTreeMap<String, ProjectionSchema>,
     pub concurrency: ConcurrencyMode,
 }
 
@@ -38,6 +42,27 @@ pub struct ActionSchema {
     pub args: BTreeMap<String, TypeSpec>,
     pub arg_vis: BTreeMap<String, Visibility>,
     pub doc: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuerySchema {
+    pub args: BTreeMap<String, TypeSpec>,
+    pub visibility: Visibility,
+    pub query: String,
+    pub plan: Option<Vec<u8>>,
+    pub doc: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectionSchema {
+    pub dsl: String,
+    pub plan: Vec<u8>,
+    pub doc: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructSchema {
+    pub fields: BTreeMap<String, FieldSchema>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,7 +89,9 @@ pub enum TypeSpec {
     Bool,
     Enum(Vec<String>),
     Identity,
+    SubjectRef(Option<String>),
     Ref(String),
+    Struct(String),
     GeoPoint,
     List(Box<TypeSpec>),
     Map(Box<TypeSpec>, Box<TypeSpec>),
@@ -97,6 +124,19 @@ impl CqrsSchema {
             fields.push((Value::Text(name.clone()), Value::Map(entry)));
         }
 
+        let mut structs = Vec::new();
+        for (name, struct_def) in &self.structs {
+            let mut struct_fields = Vec::new();
+            for (field_name, field) in &struct_def.fields {
+                let mut entry = vec![(Value::Text("type".to_string()), field.typ.to_value())];
+                if let Some(default) = &field.default {
+                    entry.push((Value::Text("default".to_string()), default.clone()));
+                }
+                struct_fields.push((Value::Text(field_name.clone()), Value::Map(entry)));
+            }
+            structs.push((Value::Text(name.clone()), Value::Map(struct_fields)));
+        }
+
         let mut actions = Vec::new();
         for (name, action) in &self.actions {
             let mut args_map = Vec::new();
@@ -123,7 +163,45 @@ impl CqrsSchema {
             actions.push((Value::Text(name.clone()), Value::Map(action_entries)));
         }
 
-        Value::Map(vec![
+        let mut queries = Vec::new();
+        for (name, query) in &self.queries {
+            let mut args_map = Vec::new();
+            for (arg, typ) in &query.args {
+                args_map.push((Value::Text(arg.clone()), typ.to_value()));
+            }
+            let mut query_entries = vec![
+                (Value::Text("args".to_string()), Value::Map(args_map)),
+                (
+                    Value::Text("vis".to_string()),
+                    Value::Text(query.visibility.as_str().to_string()),
+                ),
+                (
+                    Value::Text("query".to_string()),
+                    Value::Text(query.query.clone()),
+                ),
+            ];
+            if let Some(plan) = &query.plan {
+                query_entries.push((Value::Text("plan".to_string()), Value::Bytes(plan.clone())));
+            }
+            if let Some(doc) = &query.doc {
+                query_entries.push((Value::Text("doc".to_string()), Value::Text(doc.clone())));
+            }
+            queries.push((Value::Text(name.clone()), Value::Map(query_entries)));
+        }
+
+        let mut projections = Vec::new();
+        for (name, proj) in &self.projections {
+            let mut proj_entries = vec![
+                (Value::Text("dsl".to_string()), Value::Text(proj.dsl.clone())),
+                (Value::Text("plan".to_string()), Value::Bytes(proj.plan.clone())),
+            ];
+            if let Some(doc) = &proj.doc {
+                proj_entries.push((Value::Text("doc".to_string()), Value::Text(doc.clone())));
+            }
+            projections.push((Value::Text(name.clone()), Value::Map(proj_entries)));
+        }
+
+        let mut entries = vec![
             (
                 Value::Text("type".to_string()),
                 Value::Text("core.schema.cqrs".to_string()),
@@ -156,7 +234,27 @@ impl CqrsSchema {
                 Value::Text("actions".to_string()),
                 Value::Map(actions),
             ),
-        ])
+            (
+                Value::Text("queries".to_string()),
+                Value::Map(queries),
+            ),
+            (
+                Value::Text("projections".to_string()),
+                Value::Map(projections),
+            ),
+        ];
+        if !structs.is_empty() {
+            entries.push((Value::Text("structs".to_string()), Value::Map(structs)));
+        }
+        if !self.implements.is_empty() {
+            let list = self
+                .implements
+                .iter()
+                .map(|name| Value::Text(name.clone()))
+                .collect();
+            entries.push((Value::Text("implements".to_string()), Value::Array(list)));
+        }
+        Value::Map(entries)
     }
 
     pub fn from_value(value: &Value) -> Result<Self, DharmaError> {
@@ -187,9 +285,18 @@ impl CqrsSchema {
             Some(value) => ConcurrencyMode::from_value(value)?,
             None => ConcurrencyMode::Strict,
         };
-        let fields_val = map_get(map, "fields").ok_or_else(|| DharmaError::Schema("missing fields".to_string()))?;
-        let actions_val =
-            map_get(map, "actions").ok_or_else(|| DharmaError::Schema("missing actions".to_string()))?;
+        let mut implements = Vec::new();
+        if let Some(value) = map_get(map, "implements") {
+            let list = expect_array(value)?;
+            for item in list {
+                implements.push(expect_text(item)?);
+            }
+        }
+        let fields_val = map_get(map, "fields")
+            .ok_or_else(|| DharmaError::Schema("missing fields".to_string()))?;
+        let actions_val = map_get(map, "actions")
+            .ok_or_else(|| DharmaError::Schema("missing actions".to_string()))?;
+        let structs_val = map_get(map, "structs");
 
         let mut fields = BTreeMap::new();
         for (k, v) in expect_map(fields_val)? {
@@ -210,6 +317,31 @@ impl CqrsSchema {
                     visibility,
                 },
             );
+        }
+
+        let mut structs = BTreeMap::new();
+        if let Some(value) = structs_val {
+            for (k, v) in expect_map(value)? {
+                let struct_name = expect_text(k)?;
+                let mut struct_fields = BTreeMap::new();
+                for (field_k, field_v) in expect_map(v)? {
+                    let field_name = expect_text(field_k)?;
+                    let field_map = expect_map(field_v)?;
+                    let typ_val = map_get(field_map, "type")
+                        .ok_or_else(|| DharmaError::Schema("missing struct field type".to_string()))?;
+                    let typ = TypeSpec::from_value(typ_val)?;
+                    let default = map_get(field_map, "default").cloned();
+                    struct_fields.insert(
+                        field_name,
+                        FieldSchema {
+                            typ,
+                            default,
+                            visibility: Visibility::Public,
+                        },
+                    );
+                }
+                structs.insert(struct_name, StructSchema { fields: struct_fields });
+            }
         }
 
         let mut actions = BTreeMap::new();
@@ -245,13 +377,84 @@ impl CqrsSchema {
             );
         }
 
+        let mut queries = BTreeMap::new();
+        if let Some(queries_val) = map_get(map, "queries") {
+            if let Ok(entries) = expect_map(queries_val) {
+                for (k, v) in entries {
+                    let name = expect_text(k)?;
+                    let query_map = expect_map(v)?;
+                    let args_val = map_get(query_map, "args")
+                        .ok_or_else(|| DharmaError::Schema("missing query args".to_string()))?;
+                    let mut args = BTreeMap::new();
+                    for (arg_k, arg_v) in expect_map(args_val)? {
+                        let arg_name = expect_text(arg_k)?;
+                        let arg_typ = TypeSpec::from_value(arg_v)?;
+                        args.insert(arg_name, arg_typ);
+                    }
+                    let visibility = map_get(query_map, "vis")
+                        .map(|v| Visibility::from_value(v))
+                        .transpose()?
+                        .unwrap_or(Visibility::Private);
+                    let query = map_get(query_map, "query")
+                        .map(|v| expect_text(v))
+                        .transpose()?
+                        .unwrap_or_default();
+                    let plan = map_get(query_map, "plan")
+                        .map(|v| crate::value::expect_bytes(v))
+                        .transpose()?;
+                    let doc = map_get(query_map, "doc").map(|v| expect_text(v)).transpose()?;
+                    queries.insert(
+                        name,
+                        QuerySchema {
+                            args,
+                            visibility,
+                            query,
+                            plan,
+                            doc,
+                        },
+                    );
+                }
+            }
+        }
+
+        let mut projections = BTreeMap::new();
+        if let Some(proj_val) = map_get(map, "projections") {
+            if let Ok(entries) = expect_map(proj_val) {
+                for (k, v) in entries {
+                    let name = expect_text(k)?;
+                    let proj_map = expect_map(v)?;
+                    let dsl = map_get(proj_map, "dsl")
+                        .map(|v| expect_text(v))
+                        .transpose()?
+                        .unwrap_or_default();
+                    let plan = map_get(proj_map, "plan")
+                        .map(|v| crate::value::expect_bytes(v))
+                        .transpose()?
+                        .unwrap_or_default();
+                    let doc = map_get(proj_map, "doc").map(|v| expect_text(v)).transpose()?;
+                    projections.insert(
+                        name,
+                        ProjectionSchema {
+                            dsl,
+                            plan,
+                            doc,
+                        },
+                    );
+                }
+            }
+        }
+
         Ok(CqrsSchema {
             namespace,
             version,
             aggregate,
             extends,
+            implements,
+            structs,
             fields,
             actions,
+            queries,
+            projections,
             concurrency,
         })
     }
@@ -278,6 +481,13 @@ impl TypeSpec {
             TypeSpec::Currency => Value::Text("currency".to_string()),
             TypeSpec::Bool => Value::Text("bool".to_string()),
             TypeSpec::Identity => Value::Text("identity".to_string()),
+            TypeSpec::SubjectRef(name) => match name {
+                Some(name) => Value::Map(vec![(
+                    Value::Text("subject_ref".to_string()),
+                    Value::Text(name.clone()),
+                )]),
+                None => Value::Text("subject_ref".to_string()),
+            },
             TypeSpec::Text(len) => match len {
                 Some(len) => Value::Map(vec![(
                     Value::Text("text".to_string()),
@@ -291,6 +501,10 @@ impl TypeSpec {
             )]),
             TypeSpec::Ref(name) => Value::Map(vec![(
                 Value::Text("ref".to_string()),
+                Value::Text(name.clone()),
+            )]),
+            TypeSpec::Struct(name) => Value::Map(vec![(
+                Value::Text("struct".to_string()),
                 Value::Text(name.clone()),
             )]),
             TypeSpec::GeoPoint => Value::Text("geopoint".to_string()),
@@ -319,6 +533,7 @@ impl TypeSpec {
                 "bool" => Ok(TypeSpec::Bool),
                 "text" => Ok(TypeSpec::Text(None)),
                 "identity" => Ok(TypeSpec::Identity),
+                "subject_ref" => Ok(TypeSpec::SubjectRef(None)),
                 "geopoint" => Ok(TypeSpec::GeoPoint),
                 _ => Err(DharmaError::Schema("unknown type".to_string())),
             },
@@ -347,6 +562,12 @@ impl TypeSpec {
                 }
                 if let Some(ref_val) = map_get(map, "ref") {
                     return Ok(TypeSpec::Ref(expect_text(ref_val)?));
+                }
+                if let Some(ref_val) = map_get(map, "subject_ref") {
+                    return Ok(TypeSpec::SubjectRef(Some(expect_text(ref_val)?)));
+                }
+                if let Some(struct_val) = map_get(map, "struct") {
+                    return Ok(TypeSpec::Struct(expect_text(struct_val)?));
                 }
                 if let Some(list_val) = map_get(map, "list") {
                     let inner = TypeSpec::from_value(list_val)?;
@@ -418,40 +639,58 @@ impl ConcurrencyMode {
     }
 }
 
-pub fn type_size(typ: &TypeSpec) -> usize {
+pub fn type_size(typ: &TypeSpec, structs: &BTreeMap<String, StructSchema>) -> usize {
     match typ {
         TypeSpec::Int | TypeSpec::Decimal(_) | TypeSpec::Duration | TypeSpec::Timestamp => 8,
         TypeSpec::Ratio => 16,
         TypeSpec::Bool => 1,
         TypeSpec::Enum(_) => 4,
         TypeSpec::Identity | TypeSpec::Ref(_) => 32,
+        TypeSpec::SubjectRef(_) => 40,
+        TypeSpec::Struct(name) => structs
+            .get(name)
+            .map(|def| {
+                def.fields
+                    .values()
+                    .map(|field| type_size(&field.typ, structs))
+                    .sum()
+            })
+            .unwrap_or(0),
         TypeSpec::Text(len) => 4 + len.unwrap_or(DEFAULT_TEXT_LEN),
         TypeSpec::Currency => 4 + DEFAULT_TEXT_LEN,
         TypeSpec::GeoPoint => 8,
-        TypeSpec::List(inner) => list_storage_size(inner),
-        TypeSpec::Map(key, value) => map_storage_size(key, value),
-        TypeSpec::Optional(inner) => 1 + type_size(inner),
+        TypeSpec::List(inner) => list_storage_size(inner, structs),
+        TypeSpec::Map(key, value) => map_storage_size(key, value, structs),
+        TypeSpec::Optional(inner) => 1 + type_size(inner, structs),
     }
 }
 
-pub fn list_capacity(inner: &TypeSpec) -> usize {
-    let item_size = type_size(inner);
+pub fn list_capacity(inner: &TypeSpec, structs: &BTreeMap<String, StructSchema>) -> usize {
+    let item_size = type_size(inner, structs);
     collection_capacity(item_size)
 }
 
-pub fn map_capacity(key: &TypeSpec, value: &TypeSpec) -> usize {
-    let entry_size = type_size(key) + type_size(value);
+pub fn map_capacity(
+    key: &TypeSpec,
+    value: &TypeSpec,
+    structs: &BTreeMap<String, StructSchema>,
+) -> usize {
+    let entry_size = type_size(key, structs) + type_size(value, structs);
     collection_capacity(entry_size)
 }
 
-pub fn list_storage_size(inner: &TypeSpec) -> usize {
-    let item_size = type_size(inner);
+pub fn list_storage_size(inner: &TypeSpec, structs: &BTreeMap<String, StructSchema>) -> usize {
+    let item_size = type_size(inner, structs);
     let cap = collection_capacity(item_size);
     4 + cap * item_size
 }
 
-pub fn map_storage_size(key: &TypeSpec, value: &TypeSpec) -> usize {
-    let entry_size = type_size(key) + type_size(value);
+pub fn map_storage_size(
+    key: &TypeSpec,
+    value: &TypeSpec,
+    structs: &BTreeMap<String, StructSchema>,
+) -> usize {
+    let entry_size = type_size(key, structs) + type_size(value, structs);
     let cap = collection_capacity(entry_size);
     4 + cap * entry_size
 }
@@ -468,7 +707,7 @@ pub fn layout_state(schema: &CqrsSchema) -> Vec<LayoutEntry> {
     let mut offset = 0usize;
     let mut out = Vec::new();
     for (name, field) in &schema.fields {
-        let size = type_size(&field.typ);
+        let size = type_size(&field.typ, &schema.structs);
         out.push(LayoutEntry {
             name: name.clone(),
             offset,
@@ -495,7 +734,7 @@ fn layout_by_visibility(schema: &CqrsSchema, visibility: Visibility) -> Vec<Layo
         if field.visibility != visibility {
             continue;
         }
-        let size = type_size(&field.typ);
+        let size = type_size(&field.typ, &schema.structs);
         out.push(LayoutEntry {
             name: name.clone(),
             offset,
@@ -507,11 +746,14 @@ fn layout_by_visibility(schema: &CqrsSchema, visibility: Visibility) -> Vec<Layo
     out
 }
 
-pub fn layout_action(action: &ActionSchema) -> Vec<LayoutEntry> {
+pub fn layout_action(
+    action: &ActionSchema,
+    structs: &BTreeMap<String, StructSchema>,
+) -> Vec<LayoutEntry> {
     let mut offset = 4usize;
     let mut out = Vec::new();
     for (name, typ) in &action.args {
-        let size = type_size(typ);
+        let size = type_size(typ, structs);
         out.push(LayoutEntry {
             name: name.clone(),
             offset,
@@ -587,6 +829,39 @@ fn validate_type(typ: &TypeSpec, value: &Value) -> Result<(), DharmaError> {
         TypeSpec::Identity | TypeSpec::Ref(_) => match value {
             Value::Bytes(bytes) if bytes.len() == 32 => Ok(()),
             _ => Err(DharmaError::Schema("expected 32-byte".to_string())),
+        },
+        TypeSpec::SubjectRef(_) => match value {
+            Value::Map(entries) => {
+                let mut id_ok = false;
+                let mut seq_ok = false;
+                for (k, v) in entries {
+                    if let Value::Text(name) = k {
+                        if name == "id" {
+                            if let Value::Bytes(bytes) = v {
+                                if bytes.len() == 32 {
+                                    id_ok = true;
+                                }
+                            }
+                        } else if name == "seq" {
+                            if let Value::Integer(int) = v {
+                                if u64::try_from(*int).is_ok() {
+                                    seq_ok = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if id_ok && seq_ok {
+                    Ok(())
+                } else {
+                    Err(DharmaError::Schema("expected subject_ref".to_string()))
+                }
+            }
+            _ => Err(DharmaError::Schema("expected subject_ref".to_string())),
+        },
+        TypeSpec::Struct(_) => match value {
+            Value::Map(_) => Ok(()),
+            _ => Err(DharmaError::Schema("expected struct".to_string())),
         },
         TypeSpec::GeoPoint => match value {
             Value::Map(entries) => {
@@ -730,8 +1005,12 @@ mod tests {
             version: "1.0.0".to_string(),
             aggregate: "Ticket".to_string(),
             extends: None,
+            implements: Vec::new(),
+            structs: BTreeMap::new(),
             fields,
             actions,
+            queries: BTreeMap::new(),
+            projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Strict,
         };
         let bytes = schema.to_cbor().unwrap();

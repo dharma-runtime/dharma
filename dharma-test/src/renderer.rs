@@ -17,6 +17,7 @@ pub enum Phase {
     Properties,
     Vectors,
     Simulation,
+    External,
     Done,
 }
 
@@ -27,6 +28,7 @@ impl std::fmt::Display for Phase {
             Phase::Properties => "properties",
             Phase::Vectors => "vectors",
             Phase::Simulation => "simulation",
+            Phase::External => "external",
             Phase::Done => "done",
         };
         write!(f, "{name}")

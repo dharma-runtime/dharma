@@ -1,0 +1,365 @@
+---
+namespace: std.commerce.inventory.ledger
+version: 1.0.0
+---
+
+# Commerce Inventory Ledger (Append-Only)
+
+Each subject represents a single inventory event.
+This contract provides the immutable audit trail used by availability projections.
+
+## Queries
+
+### Private queries
+#### ListLedgerByBatch(batch_id, page)
+Parameters: `$1 = batch_id`, `$2 = offset`, `$3 = limit`
+```dhl
+query ListLedgerByBatch(batch_id: Ref<std.commerce.inventory.batch>, offset: Int, limit: Int)
+    private
+    dhlq
+    std.commerce.inventory.ledger
+    | where batch_id == $1
+    | sort -created_at
+    | drop $2
+    | take $3
+```
+
+## Code
+
+```dhl
+aggregate InventoryLedger
+    state
+        public batch_id: Ref<std.commerce.inventory.batch>?
+        public item_id: Ref<std.commerce.catalog.item>
+        public warehouse_id: Ref<std.commerce.logistics.warehouse>
+        public entry_type: Enum(Receive, ReserveHold, ReserveFinal, Release, ExpireHold, Ship, Adjust, TransferIn, TransferOut)
+        public qty: Decimal(scale=6)
+        public expires_at: Timestamp?
+        public ref_line_id: Ref<std.commerce.order.line>?
+        public ref_event_id: Text(len=64)?
+        public reason: Text(len=128)?
+        public created_at: Timestamp?
+
+action Record(
+    batch_id: Ref<std.commerce.inventory.batch>?,
+    item_id: Ref<std.commerce.catalog.item>,
+    warehouse_id: Ref<std.commerce.logistics.warehouse>,
+    entry_type: Enum(Receive, ReserveHold, ReserveFinal, Release, ExpireHold, Ship, Adjust, TransferIn, TransferOut),
+    qty: Decimal(scale=6),
+    expires_at: Timestamp?,
+    ref_line_id: Ref<std.commerce.order.line>?,
+    ref_event_id: Text(len=64)?,
+    reason: Text(len=128)?
+)
+    validate
+        state.created_at == null
+        ((entry_type == 'Release) || (entry_type == 'ExpireHold)) || (qty >= 0)
+        ((entry_type != 'Release) && (entry_type != 'ExpireHold)) || (qty <= 0)
+        (entry_type != 'ReserveHold) || (expires_at != null)
+    apply
+        state.batch_id = batch_id
+        state.item_id = item_id
+        state.warehouse_id = warehouse_id
+        state.entry_type = entry_type
+        state.qty = qty
+        state.expires_at = expires_at
+        state.ref_line_id = ref_line_id
+        state.ref_event_id = ref_event_id
+        state.reason = reason
+        state.created_at = context.timestamp
+
+action Upsert(
+    batch_id: Ref<std.commerce.inventory.batch>?,
+    item_id: Ref<std.commerce.catalog.item>,
+    warehouse_id: Ref<std.commerce.logistics.warehouse>,
+    entry_type: Enum(Receive, ReserveHold, ReserveFinal, Release, ExpireHold, Ship, Adjust, TransferIn, TransferOut),
+    qty: Decimal(scale=6),
+    expires_at: Timestamp?,
+    ref_line_id: Ref<std.commerce.order.line>?,
+    ref_event_id: Text(len=64)?,
+    reason: Text(len=128)?
+)
+    validate
+        ((entry_type == 'Release) || (entry_type == 'ExpireHold)) || (qty >= 0)
+        ((entry_type != 'Release) && (entry_type != 'ExpireHold)) || (qty <= 0)
+        (entry_type != 'ReserveHold) || (expires_at != null)
+    apply
+        state.batch_id = batch_id
+        state.item_id = item_id
+        state.warehouse_id = warehouse_id
+        state.entry_type = entry_type
+        state.qty = qty
+        state.expires_at = expires_at
+        state.ref_line_id = ref_line_id
+        state.ref_event_id = ref_event_id
+        state.reason = reason
+        state.created_at = context.timestamp
+```
+
+## Reservation projections
+
+```dhl
+projection LedgerReserveHoldAcceptedFromAllocation
+    trigger std.commerce.order.line.ReserveAllocation
+    trigger std.commerce.order.po.Accept
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.order.line
+        | explode allocations as allocation
+        | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+        | lj std.commerce.inventory.sellable on allocation.sellable_id=std.commerce.inventory.sellable.subject
+        | lj std.commerce.catalog.variant on std.commerce.inventory.sellable.variant_id=std.commerce.catalog.variant.subject
+        | where allocation.status == 'Reserved,
+                std.commerce.order.po.status == 'Accepted,
+                std.commerce.order.po.authorized_at == null,
+                std.commerce.order.po.captured_at == null,
+                std.commerce.order.po.reserve_on_accepted == true,
+                std.commerce.order.po.reserve_timeout_accepted_hours > 0
+        | sel subject as line_id, allocation.allocation_id as allocation_id, allocation.qty_allocated as qty_allocated, std.commerce.inventory.sellable.batch_id as batch_id, std.commerce.catalog.variant.item_id as item_id, std.commerce.inventory.sellable.warehouse_id as warehouse_id, std.commerce.order.po.accepted_at as accepted_at, std.commerce.order.po.reserve_timeout_accepted_hours as timeout_hours
+    emit upsert std.commerce.inventory.ledger
+        id = proj_id("reserve_hold_accepted", line_id, allocation_id)
+        batch_id = batch_id
+        item_id = item_id
+        warehouse_id = warehouse_id
+        entry_type = 'ReserveHold
+        qty = qty_allocated
+        expires_at = accepted_at + (timeout_hours * 3600)
+        ref_line_id = line_id
+        ref_event_id = allocation_id
+        reason = "reserve_hold_accepted"
+
+projection LedgerReserveFinalAcceptedFromAllocation
+    trigger std.commerce.order.line.ReserveAllocation
+    trigger std.commerce.order.po.Accept
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.order.line
+        | explode allocations as allocation
+        | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+        | lj std.commerce.inventory.sellable on allocation.sellable_id=std.commerce.inventory.sellable.subject
+        | lj std.commerce.catalog.variant on std.commerce.inventory.sellable.variant_id=std.commerce.catalog.variant.subject
+        | where allocation.status == 'Reserved,
+                std.commerce.order.po.status == 'Accepted,
+                std.commerce.order.po.authorized_at == null,
+                std.commerce.order.po.captured_at == null,
+                std.commerce.order.po.reserve_on_accepted == true,
+                std.commerce.order.po.reserve_timeout_accepted_hours == 0
+        | sel subject as line_id, allocation.allocation_id as allocation_id, allocation.qty_allocated as qty_allocated, std.commerce.inventory.sellable.batch_id as batch_id, std.commerce.catalog.variant.item_id as item_id, std.commerce.inventory.sellable.warehouse_id as warehouse_id
+    emit upsert std.commerce.inventory.ledger
+        id = proj_id("reserve_final_accepted", line_id, allocation_id)
+        batch_id = batch_id
+        item_id = item_id
+        warehouse_id = warehouse_id
+        entry_type = 'ReserveFinal
+        qty = qty_allocated
+        expires_at = null
+        ref_line_id = line_id
+        ref_event_id = allocation_id
+        reason = "reserve_final_accepted"
+
+projection LedgerReserveHoldAuthorizedFromAllocation
+    trigger std.commerce.order.line.ReserveAllocation
+    trigger std.commerce.order.po.MarkAuthorized
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.order.line
+        | explode allocations as allocation
+        | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+        | lj std.commerce.inventory.sellable on allocation.sellable_id=std.commerce.inventory.sellable.subject
+        | lj std.commerce.catalog.variant on std.commerce.inventory.sellable.variant_id=std.commerce.catalog.variant.subject
+        | where allocation.status == 'Reserved,
+                std.commerce.order.po.authorized_at != null,
+                std.commerce.order.po.captured_at == null,
+                std.commerce.order.po.reserve_on_authorized == true,
+                std.commerce.order.po.reserve_timeout_authorized_hours > 0
+        | sel subject as line_id, allocation.allocation_id as allocation_id, allocation.qty_allocated as qty_allocated, std.commerce.inventory.sellable.batch_id as batch_id, std.commerce.catalog.variant.item_id as item_id, std.commerce.inventory.sellable.warehouse_id as warehouse_id, std.commerce.order.po.authorized_at as authorized_at, std.commerce.order.po.reserve_timeout_authorized_hours as timeout_hours
+    emit upsert std.commerce.inventory.ledger
+        id = proj_id("reserve_hold_authorized", line_id, allocation_id)
+        batch_id = batch_id
+        item_id = item_id
+        warehouse_id = warehouse_id
+        entry_type = 'ReserveHold
+        qty = qty_allocated
+        expires_at = authorized_at + (timeout_hours * 3600)
+        ref_line_id = line_id
+        ref_event_id = allocation_id
+        reason = "reserve_hold_authorized"
+
+projection LedgerReserveFinalAuthorizedFromAllocation
+    trigger std.commerce.order.line.ReserveAllocation
+    trigger std.commerce.order.po.MarkAuthorized
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.order.line
+        | explode allocations as allocation
+        | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+        | lj std.commerce.inventory.sellable on allocation.sellable_id=std.commerce.inventory.sellable.subject
+        | lj std.commerce.catalog.variant on std.commerce.inventory.sellable.variant_id=std.commerce.catalog.variant.subject
+        | where allocation.status == 'Reserved,
+                std.commerce.order.po.authorized_at != null,
+                std.commerce.order.po.captured_at == null,
+                std.commerce.order.po.reserve_on_authorized == true,
+                std.commerce.order.po.reserve_timeout_authorized_hours == 0
+        | sel subject as line_id, allocation.allocation_id as allocation_id, allocation.qty_allocated as qty_allocated, std.commerce.inventory.sellable.batch_id as batch_id, std.commerce.catalog.variant.item_id as item_id, std.commerce.inventory.sellable.warehouse_id as warehouse_id
+    emit upsert std.commerce.inventory.ledger
+        id = proj_id("reserve_final_authorized", line_id, allocation_id)
+        batch_id = batch_id
+        item_id = item_id
+        warehouse_id = warehouse_id
+        entry_type = 'ReserveFinal
+        qty = qty_allocated
+        expires_at = null
+        ref_line_id = line_id
+        ref_event_id = allocation_id
+        reason = "reserve_final_authorized"
+
+projection LedgerReserveFinalCapturedFromAllocation
+    trigger std.commerce.order.line.ReserveAllocation
+    trigger std.commerce.order.po.MarkCaptured
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.order.line
+        | explode allocations as allocation
+        | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+        | lj std.commerce.inventory.sellable on allocation.sellable_id=std.commerce.inventory.sellable.subject
+        | lj std.commerce.catalog.variant on std.commerce.inventory.sellable.variant_id=std.commerce.catalog.variant.subject
+        | where allocation.status == 'Reserved,
+                std.commerce.order.po.captured_at != null,
+                std.commerce.order.po.reserve_on_captured == true
+        | sel subject as line_id, allocation.allocation_id as allocation_id, allocation.qty_allocated as qty_allocated, std.commerce.inventory.sellable.batch_id as batch_id, std.commerce.catalog.variant.item_id as item_id, std.commerce.inventory.sellable.warehouse_id as warehouse_id
+    emit upsert std.commerce.inventory.ledger
+        id = proj_id("reserve_final_captured", line_id, allocation_id)
+        batch_id = batch_id
+        item_id = item_id
+        warehouse_id = warehouse_id
+        entry_type = 'ReserveFinal
+        qty = qty_allocated
+        expires_at = null
+        ref_line_id = line_id
+        ref_event_id = allocation_id
+        reason = "reserve_final_captured"
+
+projection LedgerReleaseFromAllocation
+    trigger std.commerce.order.line.ReleaseAllocation
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.order.line
+        | explode allocations as allocation
+        | lj std.commerce.inventory.sellable on allocation.sellable_id=std.commerce.inventory.sellable.subject
+        | lj std.commerce.catalog.variant on std.commerce.inventory.sellable.variant_id=std.commerce.catalog.variant.subject
+        | where allocation.status == 'Released
+        | sel subject as line_id, allocation.allocation_id as allocation_id, allocation.qty_allocated as qty_allocated, std.commerce.inventory.sellable.batch_id as batch_id, std.commerce.catalog.variant.item_id as item_id, std.commerce.inventory.sellable.warehouse_id as warehouse_id
+    emit upsert std.commerce.inventory.ledger
+        id = proj_id("release_allocation", line_id, allocation_id)
+        batch_id = batch_id
+        item_id = item_id
+        warehouse_id = warehouse_id
+        entry_type = 'Release
+        qty = 0 - qty_allocated
+        expires_at = null
+        ref_line_id = line_id
+        ref_event_id = allocation_id
+        reason = "release_allocation"
+
+projection LedgerReleaseHoldAcceptedOnAuthorized
+    trigger std.commerce.order.po.MarkAuthorized
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.order.line
+        | explode allocations as allocation
+        | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+        | lj std.commerce.inventory.sellable on allocation.sellable_id=std.commerce.inventory.sellable.subject
+        | lj std.commerce.catalog.variant on std.commerce.inventory.sellable.variant_id=std.commerce.catalog.variant.subject
+        | where allocation.status == 'Reserved,
+                std.commerce.order.po.reserve_on_accepted == true,
+                std.commerce.order.po.reserve_timeout_accepted_hours > 0,
+                std.commerce.order.po.authorized_at != null,
+                std.commerce.order.po.captured_at == null,
+                std.commerce.order.po.authorized_at <= (std.commerce.order.po.accepted_at + (std.commerce.order.po.reserve_timeout_accepted_hours * 3600))
+        | sel subject as line_id, allocation.allocation_id as allocation_id, allocation.qty_allocated as qty_allocated, std.commerce.inventory.sellable.batch_id as batch_id, std.commerce.catalog.variant.item_id as item_id, std.commerce.inventory.sellable.warehouse_id as warehouse_id
+    emit upsert std.commerce.inventory.ledger
+        id = proj_id("release_hold_accepted_authorized", line_id, allocation_id)
+        batch_id = batch_id
+        item_id = item_id
+        warehouse_id = warehouse_id
+        entry_type = 'Release
+        qty = 0 - qty_allocated
+        expires_at = null
+        ref_line_id = line_id
+        ref_event_id = allocation_id
+        reason = "release_hold_accepted_authorized"
+
+projection LedgerReleaseHoldAcceptedOnCaptured
+    trigger std.commerce.order.po.MarkCaptured
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.order.line
+        | explode allocations as allocation
+        | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+        | lj std.commerce.inventory.sellable on allocation.sellable_id=std.commerce.inventory.sellable.subject
+        | lj std.commerce.catalog.variant on std.commerce.inventory.sellable.variant_id=std.commerce.catalog.variant.subject
+        | where allocation.status == 'Reserved,
+                std.commerce.order.po.reserve_on_accepted == true,
+                std.commerce.order.po.reserve_timeout_accepted_hours > 0,
+                std.commerce.order.po.authorized_at == null,
+                std.commerce.order.po.captured_at != null,
+                std.commerce.order.po.captured_at <= (std.commerce.order.po.accepted_at + (std.commerce.order.po.reserve_timeout_accepted_hours * 3600))
+        | sel subject as line_id, allocation.allocation_id as allocation_id, allocation.qty_allocated as qty_allocated, std.commerce.inventory.sellable.batch_id as batch_id, std.commerce.catalog.variant.item_id as item_id, std.commerce.inventory.sellable.warehouse_id as warehouse_id
+    emit upsert std.commerce.inventory.ledger
+        id = proj_id("release_hold_accepted_captured", line_id, allocation_id)
+        batch_id = batch_id
+        item_id = item_id
+        warehouse_id = warehouse_id
+        entry_type = 'Release
+        qty = 0 - qty_allocated
+        expires_at = null
+        ref_line_id = line_id
+        ref_event_id = allocation_id
+        reason = "release_hold_accepted_captured"
+
+projection LedgerReleaseHoldAuthorizedOnCaptured
+    trigger std.commerce.order.po.MarkCaptured
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.order.line
+        | explode allocations as allocation
+        | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+        | lj std.commerce.inventory.sellable on allocation.sellable_id=std.commerce.inventory.sellable.subject
+        | lj std.commerce.catalog.variant on std.commerce.inventory.sellable.variant_id=std.commerce.catalog.variant.subject
+        | where allocation.status == 'Reserved,
+                std.commerce.order.po.reserve_on_authorized == true,
+                std.commerce.order.po.reserve_timeout_authorized_hours > 0,
+                std.commerce.order.po.authorized_at != null,
+                std.commerce.order.po.captured_at != null,
+                std.commerce.order.po.captured_at <= (std.commerce.order.po.authorized_at + (std.commerce.order.po.reserve_timeout_authorized_hours * 3600))
+        | sel subject as line_id, allocation.allocation_id as allocation_id, allocation.qty_allocated as qty_allocated, std.commerce.inventory.sellable.batch_id as batch_id, std.commerce.catalog.variant.item_id as item_id, std.commerce.inventory.sellable.warehouse_id as warehouse_id
+    emit upsert std.commerce.inventory.ledger
+        id = proj_id("release_hold_authorized_captured", line_id, allocation_id)
+        batch_id = batch_id
+        item_id = item_id
+        warehouse_id = warehouse_id
+        entry_type = 'Release
+        qty = 0 - qty_allocated
+        expires_at = null
+        ref_line_id = line_id
+        ref_event_id = allocation_id
+        reason = "release_hold_authorized_captured"
+```

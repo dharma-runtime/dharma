@@ -1,6 +1,7 @@
 use crate::error::DharmaError;
 use crate::pdl::ast::{AstFile, Literal, TypeSpec, Visibility};
-use crate::pdl::schema::{ActionSchema, CqrsSchema, FieldSchema};
+use crate::{dhlp, dhlq};
+use crate::pdl::schema::{ActionSchema, CqrsSchema, FieldSchema, QuerySchema};
 use crate::pdl::schema::ConcurrencyMode as SchemaConcurrency;
 use ciborium::value::Value;
 use std::collections::BTreeMap;
@@ -10,6 +11,25 @@ pub fn compile_schema(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
         .aggregates
         .first()
         .ok_or_else(|| DharmaError::Validation("missing aggregate".to_string()))?;
+    let mut structs = BTreeMap::new();
+    for def in &ast.structs {
+        let mut fields = BTreeMap::new();
+        for field in &def.fields {
+            let default = match field.default.as_ref() {
+                Some(lit) => Some(literal_to_value(lit)?),
+                None => None,
+            };
+            fields.insert(
+                field.name.clone(),
+                FieldSchema {
+                    typ: type_to_schema(&field.typ),
+                    default,
+                    visibility: crate::pdl::schema::Visibility::Public,
+                },
+            );
+        }
+        structs.insert(def.name.clone(), crate::pdl::schema::StructSchema { fields });
+    }
     let mut fields = BTreeMap::new();
     let mut field_vis = BTreeMap::new();
     for field in &aggregate.fields {
@@ -60,6 +80,48 @@ pub fn compile_schema(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
         );
     }
 
+    let mut queries = BTreeMap::new();
+    for query in &ast.queries {
+        let mut args = BTreeMap::new();
+        for arg in &query.args {
+            args.insert(arg.name.clone(), type_to_schema(&arg.typ));
+        }
+        let query_text = query.body.join("\n");
+        let plan = if query_text.trim().is_empty() {
+            None
+        } else {
+            let plan = dhlq::parse_plan(&query_text, query.start_line)?;
+            Some(plan.to_cbor()?)
+        };
+        queries.insert(
+            query.name.clone(),
+            QuerySchema {
+                args,
+                visibility: match query.visibility {
+                    Visibility::Public => crate::pdl::schema::Visibility::Public,
+                    Visibility::Private => crate::pdl::schema::Visibility::Private,
+                },
+                query: query_text,
+                plan,
+                doc: query.doc.clone(),
+            },
+        );
+    }
+
+    let mut projections = BTreeMap::new();
+    for projection in &ast.projections {
+        let dsl = projection.body.join("\n");
+        let plan = dhlp::parse_plan(&projection.body, projection.start_line)?.to_cbor()?;
+        projections.insert(
+            projection.name.clone(),
+            crate::pdl::schema::ProjectionSchema {
+                dsl,
+                plan,
+                doc: projection.doc.clone(),
+            },
+        );
+    }
+
     let namespace = ast
         .package
         .clone()
@@ -69,8 +131,12 @@ pub fn compile_schema(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
         version: ast.header.version.clone(),
         aggregate: aggregate.name.clone(),
         extends: aggregate.extends.clone(),
+        implements: ast.header.implements.clone(),
+        structs,
         fields,
         actions,
+        queries,
+        projections,
         concurrency: match ast.header.concurrency {
             crate::pdl::ast::ConcurrencyMode::Strict => SchemaConcurrency::Strict,
             crate::pdl::ast::ConcurrencyMode::Allow => SchemaConcurrency::Allow,
@@ -89,9 +155,11 @@ fn type_to_schema(typ: &TypeSpec) -> crate::pdl::schema::TypeSpec {
         TypeSpec::Currency => crate::pdl::schema::TypeSpec::Currency,
         TypeSpec::Bool => crate::pdl::schema::TypeSpec::Bool,
         TypeSpec::Identity => crate::pdl::schema::TypeSpec::Identity,
+        TypeSpec::SubjectRef(name) => crate::pdl::schema::TypeSpec::SubjectRef(name.clone()),
         TypeSpec::Text(len) => crate::pdl::schema::TypeSpec::Text(*len),
         TypeSpec::Enum(variants) => crate::pdl::schema::TypeSpec::Enum(variants.clone()),
         TypeSpec::Ref(name) => crate::pdl::schema::TypeSpec::Ref(name.clone()),
+        TypeSpec::Struct(name) => crate::pdl::schema::TypeSpec::Struct(name.clone()),
         TypeSpec::GeoPoint => crate::pdl::schema::TypeSpec::GeoPoint,
         TypeSpec::List(inner) => crate::pdl::schema::TypeSpec::List(Box::new(type_to_schema(inner))),
         TypeSpec::Map(key, value) => crate::pdl::schema::TypeSpec::Map(
@@ -122,6 +190,13 @@ fn literal_to_value(lit: &Literal) -> Result<Value, DharmaError> {
             let mut out = Vec::new();
             for (k, v) in entries {
                 out.push((expr_to_value(k)?, expr_to_value(v)?));
+            }
+            Ok(Value::Map(out))
+        }
+        Literal::Struct(_, entries) => {
+            let mut out = Vec::new();
+            for (k, v) in entries {
+                out.push((Value::Text(k.clone()), expr_to_value(v)?));
             }
             Ok(Value::Map(out))
         }

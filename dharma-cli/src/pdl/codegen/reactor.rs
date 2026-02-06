@@ -113,6 +113,21 @@ fn convert_literal(lit: &Literal) -> Result<Value, DharmaError> {
             }
             Ok(Value::Map(out))
         }
+        Literal::Struct(_, entries) => {
+            let mut out = Vec::new();
+            for (k, v) in entries {
+                let val = match v {
+                    Expr::Literal(inner) => convert_literal(inner)?,
+                    _ => {
+                        return Err(DharmaError::Validation(
+                            "reactor struct values must be literal".to_string(),
+                        ))
+                    }
+                };
+                out.push((Value::Text(k.clone()), val));
+            }
+            Ok(Value::Map(out))
+        }
     }
 }
 

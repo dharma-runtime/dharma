@@ -1,0 +1,243 @@
+---
+namespace: std.commerce.credit_note
+version: 1.1.0
+---
+
+# Commerce Credit Note (Adjustments)
+
+Credit notes are **separate fiscal documents** used to adjust posted invoices.
+
+## Business meaning
+- Used for returns, shortages, and corrections.
+- Credits do not mutate invoices; they provide an audit trail.
+
+## Lifecycle rules
+- Draft → Posted is irreversible.
+- Void is allowed only before posting.
+
+## Queries
+
+### Public queries
+#### ListMyCreditNotes(invoice_id? or date_range, page)
+Parameters: `$1 = customer_id`, `$2 = date_from`, `$3 = date_to`, `$4 = offset`, `$5 = limit`
+```dhl
+query ListMyCreditNotes(
+    customer_id: Ref<std.iam.Identity>,
+    date_from: Timestamp,
+    date_to: Timestamp,
+    offset: Int,
+    limit: Int
+)
+    public
+    dhlq
+    std.commerce.credit_note
+    | lj std.commerce.invoice on invoice_id=std.commerce.invoice.subject
+    | lj std.commerce.order.po on std.commerce.invoice.po_id=std.commerce.order.po.subject
+    | where std.commerce.credit_note.state == 'Posted,
+            std.commerce.order.po.customer_id == $1,
+            std.commerce.credit_note.issued_at between ($2,$3)
+    | sort -issued_at
+    | drop $4
+    | take $5
+```
+
+#### GetMyCreditNote(credit_note_id)
+Parameters: `$1 = customer_id`, `$2 = credit_note_id`
+```dhl
+query GetMyCreditNote(customer_id: Ref<std.iam.Identity>, credit_note_id: Ref<std.commerce.credit_note>)
+    public
+    dhlq
+    std.commerce.credit_note
+    | lj std.commerce.invoice on invoice_id=std.commerce.invoice.subject
+    | lj std.commerce.order.po on std.commerce.invoice.po_id=std.commerce.order.po.subject
+    | where std.commerce.credit_note.subject == $2,
+            std.commerce.credit_note.state == 'Posted,
+            std.commerce.order.po.customer_id == $1
+    | take 1
+```
+
+#### SearchMyCreditNotes(q, date_range?, page)
+Parameters: `$1 = q`, `$2 = customer_id`, `$3 = date_from`, `$4 = date_to`, `$5 = offset`, `$6 = limit`
+```dhl
+query SearchMyCreditNotes(
+    q: Text,
+    customer_id: Ref<std.iam.Identity>,
+    date_from: Timestamp,
+    date_to: Timestamp,
+    offset: Int,
+    limit: Int
+)
+    public
+    dhlq
+    search $1 in std.commerce.credit_note.human_ref,std.commerce.credit_note.external_id fuzz=1
+    | lj std.commerce.credit_note on oid=std.commerce.credit_note.oid
+    | lj std.commerce.invoice on invoice_id=std.commerce.invoice.subject
+    | lj std.commerce.order.po on std.commerce.invoice.po_id=std.commerce.order.po.subject
+    | where std.commerce.credit_note.state == 'Posted,
+            std.commerce.order.po.customer_id == $2,
+            std.commerce.credit_note.issued_at between ($3,$4)
+    | sort -score
+    | drop $5
+    | take $6
+```
+
+### Private queries
+#### GetCreditNote(credit_note_id)
+Parameters: `$1 = credit_note_id`
+```dhl
+query GetCreditNote(credit_note_id: Ref<std.commerce.credit_note>)
+    private
+    dhlq
+    std.commerce.credit_note
+    | where subject == $1
+    | take 1
+```
+
+#### ListCreditNotes(date_range, state?, page)
+Parameters: `$1 = date_from`, `$2 = date_to`, `$3 = state`, `$4 = offset`, `$5 = limit`
+```dhl
+query ListCreditNotes(
+    date_from: Timestamp,
+    date_to: Timestamp,
+    state: Enum(Draft, Posted, Void),
+    offset: Int,
+    limit: Int
+)
+    private
+    dhlq
+    std.commerce.credit_note
+    | where issued_at between ($1,$2), state == $3
+    | sort -issued_at
+    | drop $4
+    | take $5
+```
+
+#### SearchCreditNotes(q, customer_id?, invoice_number?, reason?, date_range?, page)
+Parameters: `$1 = q`, `$2 = date_from`, `$3 = date_to`, `$4 = offset`, `$5 = limit`
+```dhl
+query SearchCreditNotes(q: Text, date_from: Timestamp, date_to: Timestamp, offset: Int, limit: Int)
+    private
+    dhlq
+    search $1 in std.commerce.credit_note.human_ref,std.commerce.credit_note.external_id fuzz=1
+    | lj std.commerce.credit_note on oid=std.commerce.credit_note.oid
+    | where std.commerce.credit_note.issued_at between ($2,$3)
+    | sort -score
+    | drop $4
+    | take $5
+```
+
+#### ReturnsAndCreditsSummary(date_from, date_to, by=reason|category|supplier)
+Parameters: `$1 = date_from`, `$2 = date_to`
+```dhl
+query ReturnsAndCreditsSummary(date_from: Timestamp, date_to: Timestamp)
+    private
+    dhlq
+    std.commerce.credit_note_line
+    | lj std.commerce.credit_note on credit_note_id=std.commerce.credit_note.subject
+    | where std.commerce.credit_note.state == 'Posted,
+            std.commerce.credit_note.issued_at between ($1,$2)
+    | agg sum(std.commerce.credit_note_line.gross_amount_minor)
+```
+
+#### CreditRate()
+```dhl
+query CreditRate
+    private
+    dhlq
+    std.commerce.credit_note_line
+    | lj std.commerce.credit_note on credit_note_id=std.commerce.credit_note.subject
+    | where std.commerce.credit_note.state == 'Posted
+    | agg sum(std.commerce.credit_note_line.gross_amount_minor)
+```
+
+## Code
+
+### Types
+```dhl
+
+
+struct CreditLine
+    public credit_line_id: Text(len=64)
+    public invoice_line_id: Text(len=64)?
+    public line_id: Ref<std.commerce.order.line>?
+    public fulfillment_id: Text(len=64)?
+    public description: Text(len=256)
+    public qty: Decimal(scale=6)
+    public unit_price_minor: Int
+    public tax_amount_minor: Int
+    public net_amount_minor: Int
+    public gross_amount_minor: Int
+```
+
+### Aggregate state
+```dhl
+aggregate CreditNote
+    state
+        public external_id: Text(len=64)?
+        public human_ref: Text(len=64)?
+        public invoice_id: Ref<std.commerce.invoice>
+        public issued_at: Timestamp?
+        public posted_at: Timestamp?
+        public state: Enum(Draft, Posted, Void) = 'Draft
+        public currency: Currency
+        public lines: List<CreditLine>
+```
+
+### Actions
+```dhl
+action IssueCreditNote(
+    invoice_id: Ref<std.commerce.invoice>,
+    currency: Currency,
+    lines: List<CreditLine>,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.issued_at == null
+    apply
+        state.invoice_id = invoice_id
+        state.currency = currency
+        state.lines = lines
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.issued_at = context.timestamp
+        state.state = 'Draft
+
+action IssueCreditNoteForLine(
+    invoice_id: Ref<std.commerce.invoice>,
+    currency: Currency,
+    credit_line_id: Text(len=64),
+    line_id: Ref<std.commerce.order.line>,
+    fulfillment_id: Text(len=64)?,
+    description: Text(len=256),
+    qty: Decimal(scale=6),
+    unit_price_minor: Int,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.issued_at == null
+        qty > 0
+        unit_price_minor >= 0
+    apply
+        state.invoice_id = invoice_id
+        state.currency = currency
+        state.lines.push(CreditLine { credit_line_id: args.credit_line_id, invoice_line_id: null, line_id: args.line_id, fulfillment_id: args.fulfillment_id, description: args.description, qty: args.qty, unit_price_minor: args.unit_price_minor, tax_amount_minor: 0, net_amount_minor: (args.qty * args.unit_price_minor) / 1000000, gross_amount_minor: (args.qty * args.unit_price_minor) / 1000000 })
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.issued_at = context.timestamp
+        state.state = 'Draft
+
+action PostCreditNote()
+    validate
+        state.state == 'Draft
+    apply
+        state.state = 'Posted
+        state.posted_at = context.timestamp
+
+action VoidCreditNote()
+    validate
+        state.state == 'Draft
+    apply
+        state.state = 'Void
+```

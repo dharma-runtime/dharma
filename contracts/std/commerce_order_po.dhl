@@ -1,0 +1,448 @@
+---
+namespace: std.commerce.order.po
+version: 1.1.0
+---
+
+# Commerce Purchase Order (Envelope)
+
+The PO is a **coordination envelope**, not the contract itself.
+
+## Business meaning
+- PO lines hold the real commercial promises.
+- The PO provides shared context: customer, currency, channel, status.
+
+## Lifecycle rules
+- Status is coarse‑grained: draft → submitted → accepted → closed.
+- Cancel is allowed only before acceptance.
+
+## Queries
+
+### Public queries
+#### GetMyPO(po_id)
+Parameters: `$1 = customer_id`, `$2 = po_id`
+```dhl
+query GetMyPO(customer_id: Ref<std.iam.Identity>, po_id: Ref<std.commerce.order.po>)
+    public
+    dhlq
+    std.commerce.order.po
+    | where customer_id == $1, subject == $2
+    | take 1
+```
+
+#### ListMyPOs(status?, date_range?, page)
+Parameters: `$1 = customer_id`, `$2 = status`, `$3 = date_from`, `$4 = date_to`, `$5 = offset`, `$6 = limit`
+```dhl
+query ListMyPOs(
+    customer_id: Ref<std.iam.Identity>,
+    status: Enum(Draft, Submitted, Accepted, Cancelled, Closed),
+    date_from: Timestamp,
+    date_to: Timestamp,
+    offset: Int,
+    limit: Int
+)
+    public
+    dhlq
+    std.commerce.order.po
+    | where customer_id == $1, status == $2, created_at between ($3,$4)
+    | sort -created_at
+    | drop $5
+    | take $6
+```
+
+#### SearchMyPOs(q, status?, date_range?, page)
+Parameters: `$1 = q`, `$2 = customer_id`, `$3 = status`, `$4 = date_from`, `$5 = date_to`, `$6 = offset`, `$7 = limit`
+```dhl
+query SearchMyPOs(
+    q: Text,
+    customer_id: Ref<std.iam.Identity>,
+    status: Enum(Draft, Submitted, Accepted, Cancelled, Closed),
+    date_from: Timestamp,
+    date_to: Timestamp,
+    offset: Int,
+    limit: Int
+)
+    public
+    dhlq
+    search $1 in std.commerce.order.po.human_ref,std.commerce.order.po.external_id fuzz=1
+    | lj std.commerce.order.po on oid=std.commerce.order.po.oid
+    | where std.commerce.order.po.customer_id == $2,
+            std.commerce.order.po.status == $3,
+            std.commerce.order.po.created_at between ($4,$5)
+    | sort -score
+    | drop $6
+    | take $7
+```
+
+#### MyOrderSummary(date_range)
+Parameters: `$1 = customer_id`, `$2 = date_from`, `$3 = date_to`
+```dhl
+query MyOrderSummary(customer_id: Ref<std.iam.Identity>, date_from: Timestamp, date_to: Timestamp)
+    public
+    dhlq
+    std.commerce.order.po
+    | where customer_id == $1, created_at between ($2,$3)
+    | agg count()
+```
+
+### Private queries
+#### GetPO(po_id)
+Parameters: `$1 = po_id`
+```dhl
+query GetPO(po_id: Ref<std.commerce.order.po>)
+    private
+    dhlq
+    std.commerce.order.po
+    | where subject == $1
+    | take 1
+```
+
+#### GetPOByHumanRef(human_ref)
+Parameters: `$1 = human_ref`
+```dhl
+query GetPOByHumanRef(human_ref: Text(len=64))
+    private
+    dhlq
+    std.commerce.order.po
+    | where human_ref == $1
+    | take 1
+```
+
+#### ListPOs(status, date_range, page)
+Parameters: `$1 = status`, `$2 = date_from`, `$3 = date_to`, `$4 = offset`, `$5 = limit`
+```dhl
+query ListPOs(
+    status: Enum(Draft, Submitted, Accepted, Cancelled, Closed),
+    date_from: Timestamp,
+    date_to: Timestamp,
+    offset: Int,
+    limit: Int
+)
+    private
+    dhlq
+    std.commerce.order.po
+    | where status == $1, created_at between ($2,$3)
+    | sort -created_at
+    | drop $4
+    | take $5
+```
+
+#### SearchPOs(q, customer_id?, status?, delivery_date_range?, has_issues?, page)
+Parameters: `$1 = q`, `$2 = customer_id`, `$3 = status`, `$4 = date_from`, `$5 = date_to`, `$6 = offset`, `$7 = limit`
+```dhl
+query SearchPOs(
+    q: Text,
+    customer_id: Ref<std.iam.Identity>,
+    status: Enum(Draft, Submitted, Accepted, Cancelled, Closed),
+    date_from: Timestamp,
+    date_to: Timestamp,
+    offset: Int,
+    limit: Int
+)
+    private
+    dhlq
+    search $1 in std.commerce.order.po.human_ref,std.commerce.order.po.external_id fuzz=1
+    | lj std.commerce.order.po on oid=std.commerce.order.po.oid
+    | where std.commerce.order.po.customer_id == $2,
+            std.commerce.order.po.status == $3,
+            std.commerce.order.po.created_at between ($4,$5)
+    | sort -score
+    | drop $6
+    | take $7
+```
+
+#### FindPOsNeedingAction(type=payment_missing|allocation_needed|invoice_due|delivery_due, date_range?, page)
+Parameters: `$1 = action_type`, `$2 = date_from`, `$3 = date_to`, `$4 = offset`, `$5 = limit`  
+Uses a projection table of open action queues.
+```dhl
+query FindPOsNeedingAction(
+    action_type: Enum(PaymentMissing, AllocationNeeded, InvoiceDue, DeliveryDue),
+    date_from: Timestamp,
+    date_to: Timestamp,
+    offset: Int,
+    limit: Int
+)
+    private
+    dhlq
+    std.commerce.order.po_action_queue
+    | where action_type == $1, due_at between ($2,$3)
+    | sort due_at
+    | drop $4
+    | take $5
+```
+
+#### SalesSummary(date_from, date_to, by=day|week|channel)
+Parameters: `$1 = date_from`, `$2 = date_to`
+```dhl
+query SalesSummary(date_from: Timestamp, date_to: Timestamp)
+    private
+    dhlq
+    std.commerce.invoice
+    | where state == 'Posted, posted_at between ($1,$2)
+    | bucket posted_at 1d
+    | by bucket
+    | agg sum(gross_amount_minor)
+```
+
+#### POCycleTimeReport(date_from, date_to)
+Parameters: `$1 = date_from`, `$2 = date_to`
+```dhl
+query POCycleTimeReport(date_from: Timestamp, date_to: Timestamp)
+    private
+    dhlq
+    std.commerce.order.po
+    | where created_at between ($1,$2)
+    | sel subject, created_at, status
+```
+
+#### CancellationReasons(date_from, date_to)
+Parameters: `$1 = date_from`, `$2 = date_to`
+```dhl
+query CancellationReasons(date_from: Timestamp, date_to: Timestamp)
+    private
+    dhlq
+    std.commerce.order.po
+    | where status == 'Cancelled, created_at between ($1,$2)
+    | agg count()
+```
+
+## Composed queries (cross-subject)
+
+### Public composed queries
+#### GetMyOrderView(po_id)
+Assembled from these DHARMA‑Q queries:
+```dhl
+query GetMyOrderView_PO(customer_id: Ref<std.iam.Identity>, po_id: Ref<std.commerce.order.po>)
+    private
+    dhlq
+    std.commerce.order.po
+    | where subject == $2, customer_id == $1
+    | take 1
+```
+```dhl
+query GetMyOrderView_Lines(po_id: Ref<std.commerce.order.po>)
+    private
+    dhlq
+    std.commerce.order.line
+    | where po_id == $1
+```
+```dhl
+query GetMyOrderView_Invoices(po_id: Ref<std.commerce.order.po>)
+    private
+    dhlq
+    std.commerce.invoice
+    | where po_id == $1, state == 'Posted
+```
+
+#### TrackMyDelivery(batch_id)
+```dhl
+query TrackMyDelivery(batch_id: Ref<std.commerce.logistics.batch>)
+    private
+    dhlq
+    std.commerce.logistics.batch
+    | where subject == $1
+    | take 1
+```
+
+#### DownloadInvoicePDF(invoice_id)
+```dhl
+query DownloadInvoicePDF(invoice_id: Ref<std.commerce.invoice>)
+    private
+    dhlq
+    std.commerce.invoice
+    | where subject == $1, state == 'Posted
+    | take 1
+```
+
+#### DownloadCreditNotePDF(credit_note_id)
+```dhl
+query DownloadCreditNotePDF(credit_note_id: Ref<std.commerce.credit_note>)
+    private
+    dhlq
+    std.commerce.credit_note
+    | where subject == $1, state == 'Posted
+    | take 1
+```
+
+### Private composed queries
+#### Customer360(customer_id)
+```dhl
+query Customer360_OpenPOs(customer_id: Ref<std.iam.Identity>)
+    private
+    dhlq
+    std.commerce.order.po
+    | where customer_id == $1, status != 'Closed
+```
+```dhl
+query Customer360_Invoices(customer_id: Ref<std.iam.Identity>)
+    private
+    dhlq
+    std.commerce.invoice
+    | lj std.commerce.order.po on po_id=std.commerce.order.po.subject
+    | where std.commerce.invoice.state == 'Posted, std.commerce.order.po.customer_id == $1
+```
+
+#### OpsDashboard(date_from, date_to)
+```dhl
+query OpsDashboard_Lines(date_from: Timestamp, date_to: Timestamp)
+    private
+    dhlq
+    std.commerce.order.line
+    | where remaining_qty > 0, created_at between ($1,$2)
+```
+```dhl
+query OpsDashboard_Batches(date_from: Timestamp, date_to: Timestamp)
+    private
+    dhlq
+    std.commerce.logistics.batch
+    | where scheduled_for between ($1,$2)
+```
+
+#### FinanceDashboard(date_from, date_to)
+```dhl
+query FinanceDashboard_Invoices(date_from: Timestamp, date_to: Timestamp)
+    private
+    dhlq
+    std.commerce.invoice
+    | where state == 'Posted, posted_at between ($1,$2)
+```
+```dhl
+query FinanceDashboard_Payments(date_from: Timestamp, date_to: Timestamp)
+    private
+    dhlq
+    std.commerce.payment
+    | where state == 'Captured, created_at between ($1,$2)
+```
+
+#### VariantFillability(variant_id, qty, delivery_area?, bucket_date?)
+```dhl
+query VariantFillability(
+    variant_id: Ref<std.commerce.catalog.variant>,
+    qty: Decimal(scale=6),
+    delivery_area: Text(len=64)?,
+    bucket_date: Timestamp?
+)
+    private
+    dhlq
+    std.commerce.catalog.variant_availability
+    | where variant_id == $1, bucket_date == $4
+    | take 1
+```
+
+## Public vs private rule (summary)
+- Public: customer browsing, tracking, and fiscal documents only. No lots, suppliers, warehouses, internal notes, matcher internals.
+- Private: ops + finance + admin, including allocations, fulfillments, lot/expiry/supplier, diagnostics, and analytics.
+
+## Code
+
+### Types
+```dhl
+
+
+```
+
+### Aggregate state
+```dhl
+aggregate PurchaseOrder
+    state
+        public external_id: Text(len=64)?
+        public human_ref: Text(len=64)?
+        public client_ref: SubjectRef<std.commerce.client>
+        public client_group_ref: SubjectRef<std.commerce.client_group>
+        public customer_id: Ref<std.iam.Identity>
+        public channel_id: Text(len=64)?
+        public currency: Currency
+        public payment_ref: Ref<std.commerce.payment>?
+        public payment_terms: Text(len=16)
+        public reserve_on_accepted: Bool
+        public reserve_timeout_accepted_hours: Int
+        public reserve_on_authorized: Bool
+        public reserve_timeout_authorized_hours: Int
+        public reserve_on_captured: Bool
+        public reserve_timeout_captured_hours: Int
+        public post_capture_adjustment: Text(len=32)
+        public status: Enum(Draft, Submitted, Accepted, Cancelled, Closed) = 'Draft
+        public accepted_at: Timestamp?
+        public authorized_at: Timestamp?
+        public captured_at: Timestamp?
+        public created_at: Timestamp?
+        public created_by: Identity?
+```
+
+### Actions
+```dhl
+action Create(
+    client_ref: SubjectRef<std.commerce.client>,
+    customer_id: Ref<std.iam.Identity>,
+    channel_id: Text(len=64)?,
+    currency: Currency,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.created_at == null
+        read_identity(client_ref, "identity_id") == customer_id
+    apply
+        state.client_ref = client_ref
+        state.client_group_ref = read_subject_ref(client_ref, "group_ref")
+        state.customer_id = customer_id
+        state.channel_id = channel_id
+        state.currency = currency
+        state.payment_terms = read_text(state.client_group_ref, "payment_terms")
+        state.reserve_on_accepted = read_bool(state.client_group_ref, "reserve_on_accepted")
+        state.reserve_timeout_accepted_hours = read_int(state.client_group_ref, "reserve_timeout_accepted_hours")
+        state.reserve_on_authorized = read_bool(state.client_group_ref, "reserve_on_authorized")
+        state.reserve_timeout_authorized_hours = read_int(state.client_group_ref, "reserve_timeout_authorized_hours")
+        state.reserve_on_captured = read_bool(state.client_group_ref, "reserve_on_captured")
+        state.reserve_timeout_captured_hours = read_int(state.client_group_ref, "reserve_timeout_captured_hours")
+        state.post_capture_adjustment = read_text(state.client_group_ref, "post_capture_adjustment")
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.status = 'Draft
+        state.created_at = context.timestamp
+        state.created_by = context.signer
+
+action Submit()
+    validate
+        state.status == 'Draft
+    apply
+        state.status = 'Submitted
+
+action Accept()
+    validate
+        state.status == 'Submitted
+    apply
+        state.status = 'Accepted
+        state.accepted_at = context.timestamp
+
+action MarkAuthorized()
+    validate
+        state.status == 'Accepted
+        state.authorized_at == null
+    apply
+        state.authorized_at = context.timestamp
+
+action MarkCaptured()
+    validate
+        state.status == 'Accepted
+        state.captured_at == null
+    apply
+        state.captured_at = context.timestamp
+
+action LinkPayment(payment_ref: Ref<std.commerce.payment>)
+    validate
+        state.payment_ref == null
+    apply
+        state.payment_ref = payment_ref
+
+action Cancel()
+    validate
+        (state.status == 'Draft) || (state.status == 'Submitted)
+    apply
+        state.status = 'Cancelled
+
+action Close()
+    validate
+        state.status == 'Accepted
+    apply
+        state.status = 'Closed
+```

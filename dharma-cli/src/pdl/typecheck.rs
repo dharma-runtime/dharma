@@ -1,6 +1,7 @@
 use crate::error::DharmaError;
 use crate::pdl::ast::{ActionDef, Assignment, AstFile, Expr, Literal, Op, SourceSpan, TypeSpec};
-use std::collections::HashMap;
+use dharma_core::protocols::{self, ProtocolId};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, PartialEq)]
 enum ExprType {
@@ -10,6 +11,8 @@ enum ExprType {
     Enum(Vec<String>),
     EnumLit(String),
     Identity,
+    SubjectRef,
+    Struct(String),
     GeoPoint,
     Ratio,
     List(Box<ExprType>),
@@ -23,6 +26,7 @@ struct TypeEnv {
     state: HashMap<String, TypeSpec>,
     args: HashMap<String, TypeSpec>,
     context: HashMap<String, TypeSpec>,
+    structs: HashMap<String, HashMap<String, TypeSpec>>,
 }
 
 pub fn check_ast(ast: &AstFile) -> Result<(), DharmaError> {
@@ -37,10 +41,20 @@ pub fn check_ast(ast: &AstFile) -> Result<(), DharmaError> {
     let mut context = HashMap::new();
     context.insert("context.signer".to_string(), TypeSpec::Identity);
     context.insert("context.clock.time".to_string(), TypeSpec::Timestamp);
+    context.insert("context.timestamp".to_string(), TypeSpec::Timestamp);
+    let mut structs = HashMap::new();
+    for def in &ast.structs {
+        let mut fields = HashMap::new();
+        for field in &def.fields {
+            fields.insert(field.name.clone(), field.typ.clone());
+        }
+        structs.insert(def.name.clone(), fields);
+    }
     let base_env = TypeEnv {
         state,
         args: HashMap::new(),
         context,
+        structs,
     };
 
     for expr in &aggregate.invariants {
@@ -52,6 +66,7 @@ pub fn check_ast(ast: &AstFile) -> Result<(), DharmaError> {
         check_action(action, &base_env)?;
     }
     enforce_external(ast)?;
+    validate_protocol_implements(ast)?;
     Ok(())
 }
 
@@ -83,6 +98,80 @@ fn enforce_external(ast: &AstFile) -> Result<(), DharmaError> {
         for emit in &reactor.emits {
             for (_, expr) in &emit.args {
                 with_span(&expr.span, validate_external_expr(&expr.value, roles, time, datasets))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_protocol_implements(ast: &AstFile) -> Result<(), DharmaError> {
+    if ast.header.implements.is_empty() {
+        return Ok(());
+    }
+    let aggregate = ast
+        .aggregates
+        .first()
+        .ok_or_else(|| DharmaError::Validation("missing aggregate".to_string()))?;
+    let mut fields = HashMap::new();
+    for field in &aggregate.fields {
+        fields.insert(field.name.clone(), field.typ.clone());
+    }
+    let mut actions = HashSet::new();
+    for action in &ast.actions {
+        actions.insert(action.name.clone());
+    }
+    for raw in &ast.header.implements {
+        let id = ProtocolId::parse(raw).map_err(|err| {
+            DharmaError::Validation(format!("implements {raw}: {err}"))
+        })?;
+        let Some(interface) = protocols::lookup(&id) else {
+            return Err(DharmaError::Validation(format!(
+                "implements {raw}: unknown protocol"
+            )));
+        };
+        for &field in interface.required_state_fields {
+            if !fields.contains_key(field) {
+                return Err(DharmaError::Validation(format!(
+                    "implements {raw}: missing required field '{field}'"
+                )));
+            }
+        }
+        for &action in interface.required_actions {
+            if !actions.contains(action) {
+                return Err(DharmaError::Validation(format!(
+                    "implements {raw}: missing required action '{action}'"
+                )));
+            }
+        }
+        for enum_def in interface.required_enums {
+            let field_name = enum_def.name.to_ascii_lowercase();
+            let Some(typ) = fields.get(&field_name) else {
+                return Err(DharmaError::Validation(format!(
+                    "implements {raw}: missing required enum field '{field_name}'"
+                )));
+            };
+            let variants = match typ {
+                TypeSpec::Enum(variants) => variants,
+                TypeSpec::Optional(inner) => match inner.as_ref() {
+                    TypeSpec::Enum(variants) => variants,
+                    _ => {
+                        return Err(DharmaError::Validation(format!(
+                            "implements {raw}: field '{field_name}' must be enum"
+                        )))
+                    }
+                },
+                _ => {
+                    return Err(DharmaError::Validation(format!(
+                        "implements {raw}: field '{field_name}' must be enum"
+                    )))
+                }
+            };
+            for expected in enum_def.variants {
+                if !variants.iter().any(|item| item == expected) {
+                    return Err(DharmaError::Validation(format!(
+                        "implements {raw}: enum '{field_name}' missing variant '{expected}'"
+                    )));
+                }
             }
         }
     }
@@ -221,6 +310,7 @@ fn check_action(action: &ActionDef, base_env: &TypeEnv) -> Result<(), DharmaErro
         state: base_env.state.clone(),
         args,
         context: base_env.context.clone(),
+        structs: base_env.structs.clone(),
     };
     for expr in &action.validates {
         let typ = with_span(&expr.span, type_of(&expr.value, &env))?;
@@ -242,7 +332,7 @@ fn check_assignment(assign: &Assignment, env: &TypeEnv) -> Result<(), DharmaErro
     }
     if let Expr::Call(name, args) = &assign.value {
         match name.as_str() {
-            "push" | "remove" => {
+            "push" | "remove" | "normalize" => {
                 return check_list_call(name, args, &target, env);
             }
             "set" => {
@@ -299,10 +389,15 @@ fn resolve_target(assign: &Assignment, env: &TypeEnv) -> Result<TypeSpec, Dharma
         .target
         .get(1)
         .ok_or_else(|| DharmaError::Validation("assignment target missing field".to_string()))?;
-    env.state
+    let mut typ = env
+        .state
         .get(field)
         .cloned()
-        .ok_or_else(|| DharmaError::Validation("unknown state field".to_string()))
+        .ok_or_else(|| DharmaError::Validation("unknown state field".to_string()))?;
+    if assign.target.len() > 2 {
+        typ = resolve_nested(&assign.target, 2, typ, env)?;
+    }
+    Ok(typ)
 }
 
 fn check_list_call(
@@ -314,9 +409,6 @@ fn check_list_call(
     let TypeSpec::List(elem_type) = target else {
         return Err(DharmaError::Validation("list operation on non-list".to_string()));
     };
-    if args.len() != 2 {
-        return Err(DharmaError::Validation("list operation expects one arg".to_string()));
-    }
     let list_expr_type = type_of(&args[0], env)?;
     match strip_optional(&list_expr_type) {
         ExprType::List(_) => {}
@@ -326,10 +418,25 @@ fn check_list_call(
             ))
         }
     }
-    let item_type = type_of(&args[1], env)?;
-    ensure_assignable(elem_type, &item_type)
-        .map_err(|_| DharmaError::Validation(format!("list.{name} type mismatch")))?;
-    Ok(())
+    if name == "normalize" {
+        if args.len() != 1 {
+            return Err(DharmaError::Validation("list.normalize expects no args".to_string()));
+        }
+        match **elem_type {
+            TypeSpec::Text(_) | TypeSpec::Currency => Ok(()),
+            _ => Err(DharmaError::Validation(
+                "list.normalize supports text lists only".to_string(),
+            )),
+        }
+    } else {
+        if args.len() != 2 {
+            return Err(DharmaError::Validation("list operation expects one arg".to_string()));
+        }
+        let item_type = type_of(&args[1], env)?;
+        ensure_assignable(elem_type, &item_type)
+            .map_err(|_| DharmaError::Validation(format!("list.{name} type mismatch")))?;
+        Ok(())
+    }
 }
 
 fn check_map_call(args: &[Expr], target: &TypeSpec, env: &TypeEnv) -> Result<(), DharmaError> {
@@ -414,14 +521,53 @@ fn type_of(expr: &Expr, env: &TypeEnv) -> Result<ExprType, DharmaError> {
             "index" | "get" => check_index(args, env),
             "has_role" => check_has_role(args, env),
             "now" => Ok(ExprType::Numeric),
+            "subject_id" => check_subject_id(args, env),
+            "days_between" => check_days_between(args, env),
+            "days_until" => check_days_between(args, env),
             "distance" => check_distance(args, env),
             "sum" => check_sum(args, env),
+            "read_int" => check_read_scalar(args, env, ExprType::Numeric),
+            "read_bool" => check_read_scalar(args, env, ExprType::Bool),
+            "read_text" => check_read_text(args, env),
+            "read_identity" | "read_ref" => check_read_scalar(args, env, ExprType::Identity),
+            "read_subject_ref" => check_read_scalar(args, env, ExprType::SubjectRef),
+            "intersects" => check_intersects(args, env),
+            "subset" => check_subset(args, env),
+            "remote_intersects" => check_remote_intersects(args, env),
             "push" | "remove" | "set" => {
                 Err(DharmaError::Validation("mutation calls not allowed here".to_string()))
             }
             _ => Err(DharmaError::Validation("unknown function".to_string())),
         },
     }
+}
+
+fn check_days_between(args: &[Expr], env: &TypeEnv) -> Result<ExprType, DharmaError> {
+    if args.len() != 2 {
+        return Err(DharmaError::Validation(
+            "days_between expects two args".to_string(),
+        ));
+    }
+    let left_type = type_of(&args[0], env)?;
+    let right_type = type_of(&args[1], env)?;
+    ensure_numeric(&left_type)?;
+    ensure_numeric(&right_type)?;
+    Ok(ExprType::Numeric)
+}
+
+fn check_subject_id(args: &[Expr], env: &TypeEnv) -> Result<ExprType, DharmaError> {
+    if args.len() != 1 {
+        return Err(DharmaError::Validation(
+            "subject_id expects one arg".to_string(),
+        ));
+    }
+    let typ = type_of(&args[0], env)?;
+    if typ != ExprType::SubjectRef {
+        return Err(DharmaError::Validation(
+            "subject_id expects subject_ref".to_string(),
+        ));
+    }
+    Ok(ExprType::Identity)
 }
 
 fn type_of_literal(lit: &Literal, env: &TypeEnv) -> Result<ExprType, DharmaError> {
@@ -431,6 +577,41 @@ fn type_of_literal(lit: &Literal, env: &TypeEnv) -> Result<ExprType, DharmaError
         Literal::Text(_) => Ok(ExprType::Text),
         Literal::Enum(name) => Ok(ExprType::EnumLit(name.clone())),
         Literal::Null => Ok(ExprType::Null),
+        Literal::Struct(name, items) => {
+            let def = env
+                .structs
+                .get(name)
+                .ok_or_else(|| DharmaError::Validation(format!("unknown struct '{}'", name)))?;
+            let mut provided = HashSet::new();
+            for (field, value) in items {
+                if !def.contains_key(field) {
+                    return Err(DharmaError::Validation(format!(
+                        "unknown struct field '{}' for '{}'",
+                        field, name
+                    )));
+                }
+                let field_type = def
+                    .get(field)
+                    .ok_or_else(|| DharmaError::Validation("unknown struct field".to_string()))?;
+                let value_type = type_of(value, env)?;
+                ensure_assignable(field_type, &value_type).map_err(|_| {
+                    DharmaError::Validation(format!(
+                        "struct field '{}' type mismatch for '{}'",
+                        field, name
+                    ))
+                })?;
+                provided.insert(field.as_str());
+            }
+            for (field, typ) in def {
+                if !provided.contains(field.as_str()) && !matches!(typ, TypeSpec::Optional(_)) {
+                    return Err(DharmaError::Validation(format!(
+                        "missing struct field '{}' for '{}'",
+                        field, name
+                    )));
+                }
+            }
+            Ok(ExprType::Struct(name.clone()))
+        }
         Literal::List(items) => {
             if items.is_empty() {
                 return Ok(ExprType::List(Box::new(ExprType::Unknown)));
@@ -451,11 +632,22 @@ fn type_of_literal(lit: &Literal, env: &TypeEnv) -> Result<ExprType, DharmaError
             }
             let mut key_type = ExprType::Unknown;
             let mut val_type = ExprType::Unknown;
+            let mut key_mismatch = false;
+            let mut val_mismatch = false;
             for (k, v) in entries {
                 let kt = type_of(k, env)?;
                 let vt = type_of(v, env)?;
-                key_type = unify_types(&key_type, &kt)?;
-                val_type = unify_types(&val_type, &vt)?;
+                match unify_types(&key_type, &kt) {
+                    Ok(typ) => key_type = typ,
+                    Err(_) => key_mismatch = true,
+                }
+                match unify_types(&val_type, &vt) {
+                    Ok(typ) => val_type = typ,
+                    Err(_) => val_mismatch = true,
+                }
+            }
+            if key_mismatch || val_mismatch {
+                return Ok(ExprType::Unknown);
             }
             Ok(ExprType::Map(Box::new(key_type), Box::new(val_type)))
         }
@@ -471,25 +663,29 @@ fn resolve_path(path: &[String], env: &TypeEnv) -> Result<TypeSpec, DharmaError>
             let name = path
                 .get(1)
                 .ok_or_else(|| DharmaError::Validation("invalid state path".to_string()))?;
-            if path.len() > 2 {
-                return Err(DharmaError::Validation("nested state path unsupported".to_string()));
-            }
-            env.state
+            let mut typ = env
+                .state
                 .get(name)
                 .cloned()
-                .ok_or_else(|| DharmaError::Validation("unknown state field".to_string()))
+                .ok_or_else(|| DharmaError::Validation("unknown state field".to_string()))?;
+            if path.len() > 2 {
+                typ = resolve_nested(path, 2, typ, env)?;
+            }
+            Ok(typ)
         }
         "args" => {
             let name = path
                 .get(1)
                 .ok_or_else(|| DharmaError::Validation("invalid args path".to_string()))?;
-            if path.len() > 2 {
-                return Err(DharmaError::Validation("nested args path unsupported".to_string()));
-            }
-            env.args
+            let mut typ = env
+                .args
                 .get(name)
                 .cloned()
-                .ok_or_else(|| DharmaError::Validation(format!("unknown arg '{}'", name)))
+                .ok_or_else(|| DharmaError::Validation(format!("unknown arg '{}'", name)))?;
+            if path.len() > 2 {
+                typ = resolve_nested(path, 2, typ, env)?;
+            }
+            Ok(typ)
         }
         "context" => {
             let key = path.join(".");
@@ -499,14 +695,52 @@ fn resolve_path(path: &[String], env: &TypeEnv) -> Result<TypeSpec, DharmaError>
                 .ok_or_else(|| DharmaError::Validation("unknown context".to_string()))
         }
         _ => {
-            if path.len() > 1 {
-                return Err(DharmaError::Validation("nested arg path unsupported".to_string()));
-            }
-            env.args
+            let mut typ = env
+                .args
                 .get(&path[0])
                 .cloned()
-                .ok_or_else(|| DharmaError::Validation(format!("unknown arg '{}'", path[0])))
+                .ok_or_else(|| DharmaError::Validation(format!("unknown arg '{}'", path[0])))?;
+            if path.len() > 1 {
+                typ = resolve_nested(path, 1, typ, env)?;
+            }
+            Ok(typ)
         }
+    }
+}
+
+fn resolve_nested(
+    path: &[String],
+    start: usize,
+    mut typ: TypeSpec,
+    env: &TypeEnv,
+) -> Result<TypeSpec, DharmaError> {
+    let mut optional = false;
+    for part in &path[start..] {
+        if let TypeSpec::Optional(inner) = typ {
+            optional = true;
+            typ = *inner;
+        }
+        typ = match typ {
+            TypeSpec::Struct(name) => {
+                let fields = env.structs.get(&name).ok_or_else(|| {
+                    DharmaError::Validation(format!("unknown struct '{}'", name))
+                })?;
+                fields
+                    .get(part)
+                    .cloned()
+                    .ok_or_else(|| DharmaError::Validation("unknown struct field".to_string()))?
+            }
+            _ => {
+                return Err(DharmaError::Validation(
+                    "nested path requires struct type".to_string(),
+                ))
+            }
+        };
+    }
+    if optional {
+        Ok(TypeSpec::Optional(Box::new(typ)))
+    } else {
+        Ok(typ)
     }
 }
 
@@ -519,6 +753,8 @@ fn expr_type_from_spec(typ: &TypeSpec) -> ExprType {
         TypeSpec::Text(_) | TypeSpec::Currency => ExprType::Text,
         TypeSpec::Enum(variants) => ExprType::Enum(variants.clone()),
         TypeSpec::Identity | TypeSpec::Ref(_) => ExprType::Identity,
+        TypeSpec::SubjectRef(_) => ExprType::SubjectRef,
+        TypeSpec::Struct(name) => ExprType::Struct(name.clone()),
         TypeSpec::GeoPoint => ExprType::GeoPoint,
         TypeSpec::Ratio => ExprType::Ratio,
         TypeSpec::List(inner) => ExprType::List(Box::new(expr_type_from_spec(inner))),
@@ -589,6 +825,24 @@ fn ensure_assignable(target: &TypeSpec, expr: &ExprType) -> Result<(), DharmaErr
             ExprType::Identity => Ok(()),
             _ => Err(DharmaError::Validation("expected identity".to_string())),
         },
+        TypeSpec::SubjectRef(_) => match strip_optional(expr) {
+            ExprType::SubjectRef => Ok(()),
+            _ => Err(DharmaError::Validation("expected subject ref".to_string())),
+        },
+        TypeSpec::Struct(name) => match strip_optional(expr) {
+            ExprType::Struct(actual) => {
+                if actual == name {
+                    Ok(())
+                } else {
+                    Err(DharmaError::Validation(format!(
+                        "struct literal type mismatch: expected '{}', got '{}'",
+                        name, actual
+                    )))
+                }
+            }
+            ExprType::Map(_, _) | ExprType::Unknown => Ok(()),
+            _ => Err(DharmaError::Validation("expected struct".to_string())),
+        },
         TypeSpec::GeoPoint => match strip_optional(expr) {
             ExprType::GeoPoint => Ok(()),
             _ => Err(DharmaError::Validation("expected geopoint".to_string())),
@@ -627,6 +881,10 @@ fn ensure_expr_compatible(expected: &ExprType, actual: &ExprType) -> Result<(), 
     if expected == actual {
         return Ok(());
     }
+    match (expected, actual) {
+        (ExprType::Struct(left), ExprType::Struct(right)) if left == right => return Ok(()),
+        _ => {}
+    }
     Err(DharmaError::Validation("type mismatch".to_string()))
 }
 
@@ -642,6 +900,14 @@ fn ensure_eq_compatible(left: &ExprType, right: &ExprType) -> Result<(), DharmaE
         (ExprType::Bool, ExprType::Bool) => Ok(()),
         (ExprType::Text, ExprType::Text) => Ok(()),
         (ExprType::Identity, ExprType::Identity) => Ok(()),
+        (ExprType::SubjectRef, ExprType::SubjectRef) => Ok(()),
+        (ExprType::Struct(a), ExprType::Struct(b)) => {
+            if a == b {
+                Ok(())
+            } else {
+                Err(DharmaError::Validation("type mismatch".to_string()))
+            }
+        }
         (ExprType::GeoPoint, ExprType::GeoPoint) => Ok(()),
         (ExprType::Ratio, ExprType::Ratio) => Ok(()),
         (ExprType::Enum(variants), ExprType::Enum(other)) => {
@@ -676,6 +942,13 @@ fn unify_types(left: &ExprType, right: &ExprType) -> Result<ExprType, DharmaErro
     }
     match (left, right) {
         (ExprType::EnumLit(_), ExprType::EnumLit(_)) => Ok(ExprType::EnumLit(String::new())),
+        (ExprType::Struct(a), ExprType::Struct(b)) => {
+            if a == b {
+                Ok(ExprType::Struct(a.clone()))
+            } else {
+                Err(DharmaError::Validation("type mismatch".to_string()))
+            }
+        }
         _ => Err(DharmaError::Validation("type mismatch".to_string())),
     }
 }
@@ -798,6 +1071,90 @@ fn check_index(args: &[Expr], env: &TypeEnv) -> Result<ExprType, DharmaError> {
                 _ => Err(DharmaError::Validation("index expects list or map".to_string())),
             }
         }
+    }
+}
+
+fn ensure_subject_ref(typ: &ExprType) -> Result<(), DharmaError> {
+    match strip_optional(typ) {
+        ExprType::SubjectRef => Ok(()),
+        _ => Err(DharmaError::Validation("expected subject_ref".to_string())),
+    }
+}
+
+fn ensure_path_literal(expr: &Expr) -> Result<(), DharmaError> {
+    match expr {
+        Expr::Literal(Literal::Text(_)) | Expr::Literal(Literal::Enum(_)) => Ok(()),
+        _ => Err(DharmaError::Validation("path must be literal".to_string())),
+    }
+}
+
+fn list_elem_type(expr_type: &ExprType) -> Result<ExprType, DharmaError> {
+    match strip_optional(expr_type) {
+        ExprType::List(elem) => Ok((**elem).clone()),
+        _ => Err(DharmaError::Validation("expected list".to_string())),
+    }
+}
+
+fn check_read_scalar(
+    args: &[Expr],
+    env: &TypeEnv,
+    expected: ExprType,
+) -> Result<ExprType, DharmaError> {
+    if args.len() != 2 {
+        return Err(DharmaError::Validation("read expects two args".to_string()));
+    }
+    let subject_type = type_of(&args[0], env)?;
+    ensure_subject_ref(&subject_type)?;
+    ensure_path_literal(&args[1])?;
+    Ok(expected)
+}
+
+fn check_read_text(args: &[Expr], env: &TypeEnv) -> Result<ExprType, DharmaError> {
+    check_read_scalar(args, env, ExprType::Text)
+}
+
+fn check_intersects(args: &[Expr], env: &TypeEnv) -> Result<ExprType, DharmaError> {
+    if args.len() != 2 {
+        return Err(DharmaError::Validation(
+            "intersects expects two args".to_string(),
+        ));
+    }
+    let left_type = type_of(&args[0], env)?;
+    let right_type = type_of(&args[1], env)?;
+    let left_elem = list_elem_type(&left_type)?;
+    let right_elem = list_elem_type(&right_type)?;
+    ensure_expr_compatible(&left_elem, &right_elem)?;
+    Ok(ExprType::Bool)
+}
+
+fn check_subset(args: &[Expr], env: &TypeEnv) -> Result<ExprType, DharmaError> {
+    if args.len() != 2 {
+        return Err(DharmaError::Validation("subset expects two args".to_string()));
+    }
+    let left_type = type_of(&args[0], env)?;
+    let right_type = type_of(&args[1], env)?;
+    let left_elem = list_elem_type(&left_type)?;
+    let right_elem = list_elem_type(&right_type)?;
+    ensure_expr_compatible(&left_elem, &right_elem)?;
+    Ok(ExprType::Bool)
+}
+
+fn check_remote_intersects(args: &[Expr], env: &TypeEnv) -> Result<ExprType, DharmaError> {
+    if args.len() != 3 {
+        return Err(DharmaError::Validation(
+            "remote_intersects expects three args".to_string(),
+        ));
+    }
+    let subject_type = type_of(&args[0], env)?;
+    ensure_subject_ref(&subject_type)?;
+    ensure_path_literal(&args[1])?;
+    let list_type = type_of(&args[2], env)?;
+    let elem = list_elem_type(&list_type)?;
+    match strip_optional(&elem) {
+        ExprType::Text | ExprType::Identity | ExprType::SubjectRef => Ok(ExprType::Bool),
+        _ => Err(DharmaError::Validation(
+            "remote_intersects expects list<text|identity|subject_ref>".to_string(),
+        )),
     }
 }
 
@@ -1017,6 +1374,38 @@ action Touch()
     }
 
     #[test]
+    fn typecheck_accepts_days_between() {
+        let doc = r#"```dhl
+aggregate Box
+    state
+        started_at: Timestamp
+        ends_at: Timestamp
+
+action Touch()
+    validate
+        days_between(state.started_at, state.ends_at) >= 0
+        days_until(state.ends_at, state.started_at) >= 0
+```"#;
+        let ast = parser::parse(doc).unwrap();
+        check_ast(&ast).unwrap();
+    }
+
+    #[test]
+    fn typecheck_rejects_days_between_arity() {
+        let doc = r#"```dhl
+aggregate Box
+    state
+        started_at: Timestamp
+
+action Touch()
+    validate
+        days_between(state.started_at) > 0
+```"#;
+        let ast = parser::parse(doc).unwrap();
+        assert!(check_ast(&ast).is_err());
+    }
+
+    #[test]
     fn external_requires_dataset_declaration() {
         let expr = Expr::Path(vec![
             "dataset".to_string(),
@@ -1032,5 +1421,148 @@ action Touch()
             vec![Expr::Literal(Literal::Text("fx_rates.v1".to_string()))],
         );
         validate_external_expr(&expr, &[], &[], &datasets).unwrap();
+    }
+
+    #[test]
+    fn implements_requires_actions() {
+        let doc = r#"---
+implements:
+  - std.protocol.contacts@1
+---
+
+```dhl
+aggregate Contact
+    state
+        owner: Identity
+        contact: Identity?
+        relation: Enum(None, Pending, Accepted, Declined, Blocked) = None
+        requested_by: Identity?
+        blocked_by: Identity?
+
+action Create()
+    apply
+        state.owner = context.signer
+```"#;
+        let ast = parser::parse(doc).unwrap();
+        let err = check_ast(&ast).unwrap_err().to_string();
+        assert!(err.contains("missing required action"));
+    }
+
+    #[test]
+    fn implements_requires_fields() {
+        let doc = r#"---
+implements:
+  - std.protocol.contacts@1
+---
+
+```dhl
+aggregate Contact
+    state
+        owner: Identity
+        contact: Identity?
+        requested_by: Identity?
+        blocked_by: Identity?
+
+action Create()
+    apply
+        state.owner = context.signer
+
+action UpdateAlias(text: Text)
+    apply
+        state.owner = context.signer
+
+action Request(other: Identity)
+    apply
+        state.contact = other
+
+action Accept()
+    apply
+        state.owner = state.owner
+
+action Decline()
+    apply
+        state.owner = state.owner
+
+action Block()
+    apply
+        state.owner = state.owner
+
+action Unblock()
+    apply
+        state.owner = state.owner
+
+action Tag(tag: Text)
+    apply
+        state.owner = state.owner
+
+action UpdateNotes(text: Text)
+    apply
+        state.owner = state.owner
+```"#;
+        let ast = parser::parse(doc).unwrap();
+        let err = check_ast(&ast).unwrap_err().to_string();
+        assert!(err.contains("missing required field 'relation'"));
+    }
+
+    #[test]
+    fn implements_allows_extras() {
+        let doc = r#"---
+implements:
+  - std.protocol.contacts@1
+---
+
+```dhl
+aggregate Contact
+    state
+        owner: Identity
+        contact: Identity?
+        relation: Enum(None, Pending, Accepted, Declined, Blocked) = None
+        requested_by: Identity?
+        blocked_by: Identity?
+        alias: Text
+        tags: List<Text>
+        notes: Text
+
+action Create()
+    apply
+        state.owner = context.signer
+
+action UpdateAlias(text: Text)
+    apply
+        state.alias = text
+
+action Request(other: Identity)
+    apply
+        state.contact = other
+        state.relation = 'Pending
+        state.requested_by = context.signer
+
+action Accept()
+    apply
+        state.relation = 'Accepted
+
+action Decline()
+    apply
+        state.relation = 'Declined
+
+action Block()
+    apply
+        state.relation = 'Blocked
+        state.blocked_by = context.signer
+
+action Unblock()
+    apply
+        state.relation = 'None
+
+action Tag(tag: Text)
+    apply
+        state.tags.push(tag)
+
+action UpdateNotes(text: Text)
+    apply
+        state.notes = text
+```"#;
+        let ast = parser::parse(doc).unwrap();
+        check_ast(&ast).unwrap();
     }
 }

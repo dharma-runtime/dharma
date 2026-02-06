@@ -2,6 +2,7 @@ use crate::assertion::AssertionPlaintext;
 use crate::crypto;
 use crate::error::DharmaError;
 use crate::fabric::types::Advertisement;
+use crate::keys::Keyring;
 use crate::net::handshake;
 use crate::net::policy::{OverlayAccess, OverlayPolicy, PeerClaims};
 use crate::net::sync::{sync_loop_with, SyncOptions};
@@ -40,7 +41,7 @@ impl DirectoryState {
             match assertion.header.typ.as_str() {
                 "fabric.domain.request" => state.apply_domain_request(&assertion)?,
                 "fabric.domain.authorize" => state.apply_domain_authorize(&assertion)?,
-                "fabric.domain.register" => state.apply_domain_register(&assertion)?,
+                "fabric.domain.register" => state.apply_domain_register(store, &assertion)?,
                 "fabric.domain.policy" => state.apply_domain_policy(&assertion)?,
                 _ => {}
             }
@@ -103,7 +104,11 @@ impl DirectoryState {
         Ok(())
     }
 
-    fn apply_domain_register(&mut self, assertion: &AssertionPlaintext) -> Result<(), DharmaError> {
+    fn apply_domain_register(
+        &mut self,
+        store: &Store,
+        assertion: &AssertionPlaintext,
+    ) -> Result<(), DharmaError> {
         let map = expect_map(&assertion.body)?;
         let domain = expect_text(
             map_get(map, "domain")
@@ -113,6 +118,23 @@ impl DirectoryState {
             map_get(map, "owner")
                 .ok_or_else(|| DharmaError::Validation("missing owner".to_string()))?,
         )?;
+        let expected_owner = crate::domain::owner_for_domain(store, &domain)?;
+        let Some(expected_owner) = expected_owner else {
+            return Ok(());
+        };
+        if expected_owner.as_bytes() != owner.as_bytes() {
+            return Ok(());
+        }
+        if let Some(parent) = crate::domain::parent_name(&domain) {
+            let domain_subject = crate::domain::subject_for_domain(store, &domain)?;
+            let Some(domain_subject) = domain_subject else {
+                return Ok(());
+            };
+            let state = crate::domain::DomainState::load(store, &domain_subject)?;
+            if state.parent.as_deref() != Some(parent.as_str()) {
+                return Ok(());
+            }
+        }
         if domain.contains('.') {
             if let Some(authorized) = self.authorizations.get(&domain) {
                 if authorized.as_bytes() != owner.as_bytes() {
@@ -194,8 +216,9 @@ impl DirectoryClient {
             let policy = OverlayPolicy::load(store.root());
             let claims = PeerClaims::default();
             let access = OverlayAccess::new(&policy, None, false, &claims);
-            let mut keys = HashMap::new();
-            keys.insert(identity.subject_id, identity.subject_key);
+            let mut keys = Keyring::new();
+            keys.insert_sdk(identity.subject_id, 0, identity.subject_key);
+            keys.insert_hpke_secret(identity.public_key, identity.noise_sk);
             let options = SyncOptions {
                 relay: false,
                 ad_store: Some(self.ad_store.clone()),
@@ -209,7 +232,7 @@ impl DirectoryClient {
                 session,
                 store,
                 index,
-                &keys,
+                &mut keys,
                 identity,
                 &access,
                 options,
@@ -280,5 +303,218 @@ mod tests {
         .unwrap();
         let state = DirectoryState::load(&store, &subject).unwrap();
         assert!(state.policy_hash_for_domain("corp.ph.cmdv").is_some());
+    }
+
+    fn append_directory_assertion(
+        store: &Store,
+        subject: SubjectId,
+        seq: u64,
+        typ: &str,
+        auth: IdentityKey,
+        signing_key: &ed25519_dalek::SigningKey,
+        prev: Option<crate::types::AssertionId>,
+        body: Value,
+    ) -> crate::types::AssertionId {
+        let header = AssertionHeader {
+            v: crypto::PROTOCOL_VERSION,
+            ver: DEFAULT_DATA_VERSION,
+            sub: subject,
+            typ: typ.to_string(),
+            auth,
+            seq,
+            prev,
+            refs: prev.into_iter().collect(),
+            ts: None,
+            schema: SchemaId::from_bytes([2u8; 32]),
+            contract: ContractId::from_bytes([3u8; 32]),
+            note: None,
+            meta: None,
+        };
+        let assertion = AssertionPlaintext::sign(header, body, signing_key).unwrap();
+        let bytes = assertion.to_cbor().unwrap();
+        let env_id = crypto::envelope_id(&bytes);
+        store.put_assertion(&subject, &env_id, &bytes).unwrap();
+        let assertion_id = assertion.assertion_id().unwrap();
+        crate::store::state::append_assertion(
+            store.env(),
+            &subject,
+            seq,
+            assertion_id,
+            env_id,
+            typ,
+            &bytes,
+        )
+        .unwrap();
+        assertion_id
+    }
+
+    fn append_domain_genesis(
+        store: &Store,
+        subject: SubjectId,
+        owner: IdentityKey,
+        signing_key: &ed25519_dalek::SigningKey,
+        domain: &str,
+        parent: Option<&str>,
+    ) {
+        let header = AssertionHeader {
+            v: crypto::PROTOCOL_VERSION,
+            ver: DEFAULT_DATA_VERSION,
+            sub: subject,
+            typ: "atlas.domain.genesis".to_string(),
+            auth: owner,
+            seq: 1,
+            prev: None,
+            refs: Vec::new(),
+            ts: None,
+            schema: SchemaId::from_bytes([2u8; 32]),
+            contract: ContractId::from_bytes([3u8; 32]),
+            note: None,
+            meta: None,
+        };
+        let mut entries = vec![
+            (Value::Text("domain".to_string()), Value::Text(domain.to_string())),
+            (Value::Text("owner".to_string()), Value::Bytes(owner.as_bytes().to_vec())),
+        ];
+        if let Some(parent) = parent {
+            entries.push((Value::Text("parent".to_string()), Value::Text(parent.to_string())));
+        }
+        let body = Value::Map(entries);
+        let assertion = AssertionPlaintext::sign(header, body, signing_key).unwrap();
+        let bytes = assertion.to_cbor().unwrap();
+        let env_id = crypto::envelope_id(&bytes);
+        store.put_assertion(&subject, &env_id, &bytes).unwrap();
+        crate::store::state::append_assertion(
+            store.env(),
+            &subject,
+            1,
+            assertion.assertion_id().unwrap(),
+            env_id,
+            "atlas.domain.genesis",
+            &bytes,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn domain_register_requires_owner_match() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::from_root(temp.path());
+        let mut rng = StdRng::seed_from_u64(21);
+        let (owner_sk, owner_id) = crypto::generate_identity_keypair(&mut rng);
+        let (other_sk, other_id) = crypto::generate_identity_keypair(&mut rng);
+        let domain_subject = SubjectId::from_bytes([21u8; 32]);
+        let dir_subject = SubjectId::from_bytes([22u8; 32]);
+
+        append_domain_genesis(&store, domain_subject, owner_id, &owner_sk, "corp", None);
+
+        let body = Value::Map(vec![
+            (Value::Text("domain".to_string()), Value::Text("corp".to_string())),
+            (Value::Text("owner".to_string()), Value::Bytes(other_id.as_bytes().to_vec())),
+        ]);
+        append_directory_assertion(
+            &store,
+            dir_subject,
+            1,
+            "fabric.domain.register",
+            other_id,
+            &other_sk,
+            None,
+            body,
+        );
+
+        let state = DirectoryState::load(&store, &dir_subject).unwrap();
+        assert!(state.owner_for_domain("corp").is_none());
+    }
+
+    #[test]
+    fn nested_domain_requires_parent_auth() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::from_root(temp.path());
+        let mut rng = StdRng::seed_from_u64(22);
+        let (parent_sk, parent_id) = crypto::generate_identity_keypair(&mut rng);
+        let (child_sk, child_id) = crypto::generate_identity_keypair(&mut rng);
+        let parent_subject = SubjectId::from_bytes([23u8; 32]);
+        let child_subject = SubjectId::from_bytes([24u8; 32]);
+        let dir_subject = SubjectId::from_bytes([25u8; 32]);
+
+        append_domain_genesis(&store, parent_subject, parent_id, &parent_sk, "corp", None);
+        append_domain_genesis(
+            &store,
+            child_subject,
+            child_id,
+            &child_sk,
+            "corp.acme",
+            Some("corp"),
+        );
+
+        let register_parent_body = Value::Map(vec![
+            (Value::Text("domain".to_string()), Value::Text("corp".to_string())),
+            (Value::Text("owner".to_string()), Value::Bytes(parent_id.as_bytes().to_vec())),
+        ]);
+        append_directory_assertion(
+            &store,
+            dir_subject,
+            1,
+            "fabric.domain.register",
+            parent_id,
+            &parent_sk,
+            None,
+            register_parent_body,
+        );
+
+        let register_child_body = Value::Map(vec![
+            (Value::Text("domain".to_string()), Value::Text("corp.acme".to_string())),
+            (Value::Text("owner".to_string()), Value::Bytes(child_id.as_bytes().to_vec())),
+        ]);
+        append_directory_assertion(
+            &store,
+            dir_subject,
+            2,
+            "fabric.domain.register",
+            child_id,
+            &child_sk,
+            None,
+            register_child_body,
+        );
+
+        let state = DirectoryState::load(&store, &dir_subject).unwrap();
+        assert!(state.owner_for_domain("corp.acme").is_none());
+
+        let authorize_body = Value::Map(vec![
+            (Value::Text("domain".to_string()), Value::Text("corp.acme".to_string())),
+            (Value::Text("parent".to_string()), Value::Text("corp".to_string())),
+            (
+                Value::Text("authorized_owner".to_string()),
+                Value::Bytes(child_id.as_bytes().to_vec()),
+            ),
+        ]);
+        let auth_id = append_directory_assertion(
+            &store,
+            dir_subject,
+            3,
+            "fabric.domain.authorize",
+            parent_id,
+            &parent_sk,
+            None,
+            authorize_body,
+        );
+
+        let register_child_body2 = Value::Map(vec![
+            (Value::Text("domain".to_string()), Value::Text("corp.acme".to_string())),
+            (Value::Text("owner".to_string()), Value::Bytes(child_id.as_bytes().to_vec())),
+        ]);
+        append_directory_assertion(
+            &store,
+            dir_subject,
+            4,
+            "fabric.domain.register",
+            child_id,
+            &child_sk,
+            Some(auth_id),
+            register_child_body2,
+        );
+
+        let state = DirectoryState::load(&store, &dir_subject).unwrap();
+        assert!(state.owner_for_domain("corp.acme").is_some());
     }
 }

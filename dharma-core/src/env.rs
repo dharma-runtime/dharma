@@ -1,7 +1,7 @@
 use crate::error::DharmaError;
 use crate::net::codec;
 use rand_core::RngCore;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -119,16 +119,13 @@ impl Fs for StdEnv {
     }
 
     fn write(&self, path: &Path, data: &[u8]) -> Result<(), DharmaError> {
-        fs::write(path, data).map_err(Into::into)
+        fs::write(path, data)?;
+        Ok(())
     }
 
     fn append(&self, path: &Path, data: &[u8]) -> Result<(), DharmaError> {
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         file.write_all(data)?;
-        file.flush()?;
         Ok(())
     }
 

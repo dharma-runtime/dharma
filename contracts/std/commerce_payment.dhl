@@ -1,0 +1,268 @@
+---
+namespace: std.commerce.payment
+version: 1.1.0
+---
+
+# Commerce Payments (Ledger-based)
+
+Payments are **ledger events** that settle invoices.
+
+## Business meaning
+- Payments settle invoices, not orders.
+- Allocations are append‑only to preserve auditability.
+
+## Lifecycle rules
+- Capture cannot exceed authorization.
+- Refunds cannot exceed captured amount.
+- Void is allowed only before capture.
+
+## Queries
+
+### Public queries
+#### ListMyPayments(po_id? date_range?, page)
+Parameters: `$1 = date_from`, `$2 = date_to`, `$3 = offset`, `$4 = limit`
+```dhl
+query ListMyPayments(date_from: Timestamp, date_to: Timestamp, offset: Int, limit: Int)
+    public
+    dhlq
+    std.commerce.payment
+    | where created_at between ($1,$2)
+    | sort -created_at
+    | drop $3
+    | take $4
+```
+
+#### GetMyPayment(payment_id)
+Parameters: `$1 = payment_id`
+```dhl
+query GetMyPayment(payment_id: Ref<std.commerce.payment>)
+    public
+    dhlq
+    std.commerce.payment
+    | where subject == $1
+    | take 1
+```
+
+#### SearchMyPayments(q, date_range?, status?, page)
+Parameters: `$1 = q`, `$2 = date_from`, `$3 = date_to`, `$4 = status`, `$5 = offset`, `$6 = limit`
+```dhl
+query SearchMyPayments(
+    q: Text,
+    date_from: Timestamp,
+    date_to: Timestamp,
+    status: Enum(AwaitingAuthorization, Authorized, Captured, Refunded, Void),
+    offset: Int,
+    limit: Int
+)
+    public
+    dhlq
+    search $1 in std.commerce.payment.provider,std.commerce.payment.method fuzz=1
+    | lj std.commerce.payment on oid=std.commerce.payment.oid
+    | where std.commerce.payment.state == $4,
+            std.commerce.payment.created_at between ($2,$3)
+    | sort -score
+    | drop $5
+    | take $6
+```
+
+#### MySettlementSummary()
+```dhl
+query MySettlementSummary
+    public
+    dhlq
+    std.commerce.payment
+    | agg sum(captured_amount_minor), sum(refunded_amount_minor)
+```
+
+### Private queries
+#### GetPayment(payment_id)
+Parameters: `$1 = payment_id`
+```dhl
+query GetPayment(payment_id: Ref<std.commerce.payment>)
+    private
+    dhlq
+    std.commerce.payment
+    | where subject == $1
+    | take 1
+```
+
+#### ListPayments(date_range, status?, provider?, page)
+Parameters: `$1 = date_from`, `$2 = date_to`, `$3 = status`, `$4 = provider`, `$5 = offset`, `$6 = limit`
+```dhl
+query ListPayments(
+    date_from: Timestamp,
+    date_to: Timestamp,
+    status: Enum(AwaitingAuthorization, Authorized, Captured, Refunded, Void),
+    provider: Text,
+    offset: Int,
+    limit: Int
+)
+    private
+    dhlq
+    std.commerce.payment
+    | where created_at between ($1,$2), state == $3, provider == $4
+    | sort -created_at
+    | drop $5
+    | take $6
+```
+
+#### SearchPayments(q, customer_id?, provider?, status?, date_range?, page)
+Parameters: `$1 = q`, `$2 = date_from`, `$3 = date_to`, `$4 = status`, `$5 = offset`, `$6 = limit`
+```dhl
+query SearchPayments(
+    q: Text,
+    date_from: Timestamp,
+    date_to: Timestamp,
+    status: Enum(AwaitingAuthorization, Authorized, Captured, Refunded, Void),
+    offset: Int,
+    limit: Int
+)
+    private
+    dhlq
+    search $1 in std.commerce.payment.provider,std.commerce.payment.method fuzz=1
+    | lj std.commerce.payment on oid=std.commerce.payment.oid
+    | where std.commerce.payment.state == $4,
+            std.commerce.payment.created_at between ($2,$3)
+    | sort -score
+    | drop $5
+    | take $6
+```
+
+#### PaymentsNeedingAllocation()
+```dhl
+query PaymentsNeedingAllocation
+    private
+    dhlq
+    std.commerce.payment
+    | where state == 'Captured
+```
+
+#### PaymentSuccessRate(date_from, date_to, by=provider|method)
+Parameters: `$1 = date_from`, `$2 = date_to`
+```dhl
+query PaymentSuccessRate(date_from: Timestamp, date_to: Timestamp)
+    private
+    dhlq
+    std.commerce.payment
+    | where created_at between ($1,$2)
+    | by provider
+    | agg count()
+```
+
+#### RefundRate(date_from, date_to)
+Parameters: `$1 = date_from`, `$2 = date_to`
+```dhl
+query RefundRate(date_from: Timestamp, date_to: Timestamp)
+    private
+    dhlq
+    std.commerce.payment
+    | where created_at between ($1,$2)
+    | agg sum(refunded_amount_minor)
+```
+
+#### UnallocatedCashReport(as_of_date)
+Parameters: `$1 = as_of_date`
+```dhl
+query UnallocatedCashReport(as_of_date: Timestamp)
+    private
+    dhlq
+    std.commerce.payment
+    | where state == 'Captured
+    | agg sum(captured_amount_minor)
+```
+
+#### CashCollectionTime()
+```dhl
+query CashCollectionTime
+    private
+    dhlq
+    std.commerce.payment
+    | agg count()
+```
+
+## Code
+
+### Types
+```dhl
+
+
+struct PaymentAllocation
+    public invoice_id: Ref<std.commerce.invoice>
+    public amount_minor: Int
+```
+
+### Aggregate state
+```dhl
+aggregate Payment
+    state
+        public external_id: Text(len=64)?
+        public human_ref: Text(len=64)?
+        public provider: Text(len=64)
+        public method: Text(len=64)
+        public currency: Currency
+        public authorized_amount_minor: Int
+        public captured_amount_minor: Int
+        public refunded_amount_minor: Int
+        public state: Enum(AwaitingAuthorization, Authorized, Captured, Refunded, Void) = 'AwaitingAuthorization
+        public allocations: List<PaymentAllocation>
+        public created_at: Timestamp?
+```
+
+### Actions
+```dhl
+action AuthorizePayment(
+    provider: Text(len=64),
+    method: Text(len=64),
+    currency: Currency,
+    authorized_amount_minor: Int,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.created_at == null
+        authorized_amount_minor >= 0
+    apply
+        state.provider = provider
+        state.method = method
+        state.currency = currency
+        state.authorized_amount_minor = authorized_amount_minor
+        state.captured_amount_minor = 0
+        state.refunded_amount_minor = 0
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.state = 'Authorized
+        state.created_at = context.timestamp
+
+action CapturePayment(captured_amount_minor: Int)
+    validate
+        state.state == 'Authorized
+        captured_amount_minor >= 0
+    apply
+        state.captured_amount_minor = state.captured_amount_minor + captured_amount_minor
+        state.state = 'Captured
+
+action RefundPayment(
+    refund_amount_minor: Int,
+    final_state: Enum(AwaitingAuthorization, Authorized, Captured, Refunded, Void)
+)
+    validate
+        state.state == 'Captured
+        refund_amount_minor >= 0
+        state.refunded_amount_minor + refund_amount_minor <= state.captured_amount_minor
+        ((state.refunded_amount_minor + refund_amount_minor == state.captured_amount_minor) && (final_state == 'Refunded)) || ((state.refunded_amount_minor + refund_amount_minor < state.captured_amount_minor) && (final_state == 'Captured))
+    apply
+        state.refunded_amount_minor = state.refunded_amount_minor + refund_amount_minor
+        state.state = final_state
+
+action AllocatePayment(invoice_id: Ref<std.commerce.invoice>, amount_minor: Int)
+    validate
+        amount_minor > 0
+    apply
+        state.allocations.push(PaymentAllocation { invoice_id: invoice_id, amount_minor: amount_minor })
+
+action VoidPayment()
+    validate
+        state.state == 'Authorized
+    apply
+        state.state = 'Void
+```

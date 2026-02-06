@@ -1,0 +1,180 @@
+---
+namespace: std.commerce.catalog.variant_snapshot
+version: 1.1.0
+---
+
+# Commerce Catalog Variant Snapshot (Immutable Contract)
+
+Variant snapshots are the **legal and commercial truth** captured at order time.
+
+## Business meaning
+- A snapshot freezes the offer so future catalog edits do not affect existing orders.
+- Matching and fulfillment are performed against this snapshot.
+- The snapshot pins the underlying item for compliance and shelf-life rules.
+
+## Immutability
+- A snapshot is created once and never updated.
+- `forbidden_allergens` is normalized for deterministic matching.
+
+## Queries
+
+### Public queries
+#### GetLineContractSnapshot(line_id)
+Parameters: `$1 = line_id`
+```dhl
+query GetLineContractSnapshot(line_id: Ref<std.commerce.order.line>)
+    public
+    dhlq
+    std.commerce.order.line
+    | where subject == $1
+    | lj std.commerce.catalog.variant_snapshot on variant_snapshot_id=std.commerce.catalog.variant_snapshot.subject
+    | sel std.commerce.catalog.variant_snapshot.display_name, std.commerce.catalog.variant_snapshot.offer_spec, std.commerce.catalog.variant_snapshot.uom
+    | take 1
+```
+
+### Private queries
+#### GetVariantSnapshot(variant_snapshot_id)
+Parameters: `$1 = variant_snapshot_id`
+```dhl
+query GetVariantSnapshot(variant_snapshot_id: Ref<std.commerce.catalog.variant_snapshot>)
+    private
+    dhlq
+    std.commerce.catalog.variant_snapshot
+    | where subject == $1
+    | take 1
+```
+
+#### GetVariantSnapshotByHash(variant_id, snapshot_hash) (debug)
+Parameters: `$1 = variant_id`, `$2 = snapshot_hash`
+```dhl
+query GetVariantSnapshotByHash(variant_id: Ref<std.commerce.catalog.variant>, snapshot_hash: Hash)
+    private
+    dhlq
+    std.commerce.catalog.variant_snapshot
+    | where variant_id == $1, snapshot_hash == $2
+    | take 1
+```
+
+#### ListSnapshotsForVariant(variant_id, page)
+Parameters: `$1 = variant_id`, `$2 = offset`, `$3 = limit`
+```dhl
+query ListSnapshotsForVariant(variant_id: Ref<std.commerce.catalog.variant>, offset: Int, limit: Int)
+    private
+    dhlq
+    std.commerce.catalog.variant_snapshot
+    | where variant_id == $1
+    | sort -captured_at
+    | drop $2
+    | take $3
+```
+
+#### FindSnapshotsByField(field_path, value, page) (debug/tooling)
+Parameters: `$1 = snapshot_id`, `$2 = offset`, `$3 = limit`  
+Use a field‑specific query variant for the chosen `field_path`. The default form is subject‑only.
+```dhl
+query FindSnapshotsByField(snapshot_id: Ref<std.commerce.catalog.variant_snapshot>, offset: Int, limit: Int)
+    private
+    dhlq
+    std.commerce.catalog.variant_snapshot
+    | where subject == $1
+    | drop $2
+    | take $3
+```
+
+#### SnapshotDiff(variant_snapshot_id_a, variant_snapshot_id_b) (debug)
+Parameters: `$1 = [snapshot_id_a, snapshot_id_b]`
+```dhl
+query SnapshotDiff(snapshot_ids: List<Ref<std.commerce.catalog.variant_snapshot>>)
+    private
+    dhlq
+    std.commerce.catalog.variant_snapshot
+    | where subject in $1
+```
+
+## Code
+
+### Types and offer spec
+```dhl
+
+
+
+
+
+struct OfferConstraints
+    public designation: Text(len=128)?
+    public origin: Text(len=64)?
+    public aging_min_months: Int?
+    public format: Text(len=64)?
+    public temp_chain: Text(len=16)?
+    public forbidden_allergens: List<Text(len=64)>
+    public allow_equivalent: Bool?
+    public allow_substitution: Bool?
+
+struct OfferSpec
+    public kind: Enum(PhysicalFood, PhysicalGeneric)
+    public constraints: OfferConstraints
+    public extra: Map<Text(len=64), Text(len=256)>?
+```
+
+### Aggregate state
+```dhl
+aggregate VariantSnapshot
+    state
+        public external_id: Text(len=64)?
+        public human_ref: Text(len=64)?
+        public variant_id: Ref<std.commerce.catalog.variant>
+        public snapshot_hash: Hash
+        public schema_version: Int
+        public captured_at: Timestamp?
+        public item_id: Ref<std.commerce.catalog.item>
+        public product_id: Ref<std.commerce.catalog.product>
+        public product_title: Text(len=256)
+        public variant_label: Text(len=256)
+        public display_name: Text(len=256)
+        public uom: Text(len=16)
+        public offer_spec: OfferSpec
+        public option_values: Map<Text(len=64), Text(len=128)>
+        public designation: Text(len=128)?
+        public payload_extra: Map<Text(len=64), Text(len=256)>?
+```
+
+### Actions
+```dhl
+action CreateSnapshot(
+    variant_id: Ref<std.commerce.catalog.variant>,
+    snapshot_hash: Hash,
+    schema_version: Int,
+    item_id: Ref<std.commerce.catalog.item>,
+    product_id: Ref<std.commerce.catalog.product>,
+    product_title: Text(len=256),
+    variant_label: Text(len=256),
+    display_name: Text(len=256),
+    uom: Text(len=16),
+    offer_spec: OfferSpec,
+    option_values: Map<Text(len=64), Text(len=128)>,
+    designation: Text(len=128)?,
+    payload_extra: Map<Text(len=64), Text(len=256)>?,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.captured_at == null
+    apply
+        state.variant_id = variant_id
+        state.snapshot_hash = snapshot_hash
+        state.schema_version = schema_version
+        state.item_id = item_id
+        state.product_id = product_id
+        state.product_title = product_title
+        state.variant_label = variant_label
+        state.display_name = display_name
+        state.uom = uom
+        state.offer_spec = offer_spec
+        state.offer_spec.constraints.forbidden_allergens.normalize()
+        state.option_values = option_values
+        state.designation = designation
+        state.payload_extra = payload_extra
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.captured_at = context.timestamp
+```

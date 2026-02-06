@@ -1,7 +1,9 @@
-use crate::assertion::{AssertionHeader, AssertionPlaintext};
+use crate::assertion::AssertionHeader;
 use crate::env::{Env, StdEnv};
 use crate::error::DharmaError;
 use crate::store::Store;
+use crate::store::pending::{append_pending, read_pending, PendingOp};
+use crate::keys::Keyring;
 use crate::types::{AssertionId, EnvelopeId, SubjectId};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -11,6 +13,7 @@ use std::sync::Arc;
 pub struct FrontierIndex {
     env: Arc<dyn Env + Send + Sync>,
     tips: HashMap<SubjectId, HashMap<u64, BTreeMap<AssertionId, u64>>>,
+    envelopes: HashSet<EnvelopeId>,
     pending: HashSet<AssertionId>,
     log: Option<FrontierLog>,
 }
@@ -20,6 +23,7 @@ impl Default for FrontierIndex {
         Self {
             env: Arc::new(StdEnv::new(PathBuf::new())),
             tips: HashMap::new(),
+            envelopes: HashSet::new(),
             pending: HashSet::new(),
             log: None,
         }
@@ -32,10 +36,7 @@ impl FrontierIndex {
         build_from_logs(&store)
     }
 
-    pub fn build(
-        store: &Store,
-        keys: &HashMap<SubjectId, [u8; 32]>,
-    ) -> Result<Self, DharmaError> {
+    pub fn build(store: &Store, keys: &Keyring) -> Result<Self, DharmaError> {
         let _ = keys;
         build_from_logs(store)
     }
@@ -92,7 +93,8 @@ impl FrontierIndex {
         self.tips.keys().copied().collect()
     }
 
-    pub fn update(&mut self, assertion_id: AssertionId, header: &AssertionHeader) -> Result<(), DharmaError> {
+    pub fn update(&mut self, assertion_id: AssertionId, envelope_id: EnvelopeId, header: &AssertionHeader) -> Result<(), DharmaError> {
+        self.envelopes.insert(envelope_id);
         let tips = self
             .tips
             .entry(header.sub)
@@ -128,6 +130,9 @@ impl FrontierIndex {
     }
 
     pub fn has_envelope(&self, envelope_id: &EnvelopeId) -> bool {
+        if self.envelopes.contains(envelope_id) {
+            return true;
+        }
         let root = self.env.root();
         if root.as_os_str().is_empty() {
             return false;
@@ -136,16 +141,24 @@ impl FrontierIndex {
         self.env.exists(&path)
     }
 
+    pub fn mark_envelope(&mut self, envelope_id: EnvelopeId) {
+        self.envelopes.insert(envelope_id);
+    }
+
     pub fn mark_known(&mut self, assertion_id: AssertionId) {
         let _ = assertion_id;
     }
 
     pub fn mark_pending(&mut self, assertion_id: AssertionId) {
-        self.pending.insert(assertion_id);
+        if self.pending.insert(assertion_id) {
+            let _ = append_pending(self.env.as_ref(), assertion_id, PendingOp::Add);
+        }
     }
 
     pub fn clear_pending(&mut self, assertion_id: &AssertionId) {
-        self.pending.remove(assertion_id);
+        if self.pending.remove(assertion_id) {
+            let _ = append_pending(self.env.as_ref(), *assertion_id, PendingOp::Remove);
+        }
     }
 
     pub fn is_pending(&self, assertion_id: &AssertionId) -> bool {
@@ -168,17 +181,20 @@ fn build_from_logs(store: &Store) -> Result<FrontierIndex, DharmaError> {
     let env = store.env_arc();
     let log = FrontierLog::new(env.clone());
     let tips = log.replay()?;
-    let tips = if tips.is_empty() {
-        let snapshot = rebuild_from_subject_logs(store)?;
+    let snapshot = rebuild_from_subject_logs(store)?;
+    let use_snapshot = tips.is_empty() || (!snapshot.tips.is_empty() && tips != snapshot.tips);
+    if use_snapshot {
         log.compact(&snapshot.tips)?;
-        snapshot.tips
-    } else {
-        tips
+    }
+    let pending = match read_pending(env.as_ref()) {
+        Ok(map) => map.keys().copied().collect(),
+        Err(_) => HashSet::new(),
     };
     Ok(FrontierIndex {
         env,
-        tips,
-        pending: HashSet::new(),
+        tips: if use_snapshot { snapshot.tips } else { tips },
+        envelopes: snapshot.envelopes,
+        pending,
         log: Some(log),
     })
 }
@@ -186,32 +202,28 @@ fn build_from_logs(store: &Store) -> Result<FrontierIndex, DharmaError> {
 #[derive(Debug)]
 struct IndexSnapshot {
     tips: HashMap<SubjectId, HashMap<u64, BTreeMap<AssertionId, u64>>>,
+    envelopes: HashSet<EnvelopeId>,
 }
 
 fn rebuild_from_subject_logs(store: &Store) -> Result<IndexSnapshot, DharmaError> {
     let mut tips_map: HashMap<SubjectId, HashMap<u64, BTreeMap<AssertionId, u64>>> = HashMap::new();
+    let mut envelopes = HashSet::new();
+    for id in store.list_objects()? {
+        envelopes.insert(id);
+    }
     for subject in store.list_subjects()? {
         let mut per_ver: HashMap<u64, BTreeMap<AssertionId, u64>> = HashMap::new();
-        for record in crate::store::state::list_assertions(store.env(), &subject)? {
-            let assertion = match AssertionPlaintext::from_cbor(&record.bytes) {
-                Ok(assertion) => assertion,
-                Err(_) => continue,
-            };
-            let ver = assertion.header.ver;
+        // Use read_assertion_log directly to avoid reading full assertion bytes
+        for entry in crate::store::state::read_assertion_log(store.env(), &subject)? {
+            envelopes.insert(entry.envelope_id);
+            let ver = entry.ver;
             per_ver
                 .entry(ver)
                 .or_default()
-                .insert(record.assertion_id, record.seq);
-            if let Some(prev) = assertion.header.prev {
+                .insert(entry.assertion_id, entry.seq);
+            if let Some(prev) = entry.prev {
                 if let Some(tips) = per_ver.get_mut(&ver) {
                     tips.remove(&prev);
-                }
-            }
-            if assertion.header.typ == "core.merge" {
-                for ref_id in &assertion.header.refs {
-                    if let Some(tips) = per_ver.get_mut(&ver) {
-                        tips.remove(ref_id);
-                    }
                 }
             }
         }
@@ -222,6 +234,7 @@ fn rebuild_from_subject_logs(store: &Store) -> Result<IndexSnapshot, DharmaError
     }
     Ok(IndexSnapshot {
         tips: tips_map,
+        envelopes,
     })
 }
 
@@ -520,8 +533,8 @@ mod tests {
             ..header1.clone()
         };
 
-        index.update(id1, &header1).unwrap();
-        index.update(id2, &header2).unwrap();
+        index.update(id1, EnvelopeId::from_bytes(*id1.as_bytes()), &header1).unwrap();
+        index.update(id2, EnvelopeId::from_bytes(*id2.as_bytes()), &header2).unwrap();
 
         let tips = index.get_tips(&subject);
         assert_eq!(tips.len(), 1);
@@ -552,14 +565,14 @@ mod tests {
         let fork_b = AssertionId::from_bytes([12u8; 32]);
         let merge_id = AssertionId::from_bytes([13u8; 32]);
 
-        index.update(base_id, &header).unwrap();
+        index.update(base_id, EnvelopeId::from_bytes(*base_id.as_bytes()), &header).unwrap();
         let fork_header = AssertionHeader {
             seq: 2,
             prev: Some(base_id),
             ..header.clone()
         };
-        index.update(fork_a, &fork_header).unwrap();
-        index.update(fork_b, &fork_header).unwrap();
+        index.update(fork_a, EnvelopeId::from_bytes(*fork_a.as_bytes()), &fork_header).unwrap();
+        index.update(fork_b, EnvelopeId::from_bytes(*fork_b.as_bytes()), &fork_header).unwrap();
         let tips = index.get_tips_for_ver(&subject, DEFAULT_DATA_VERSION);
         assert_eq!(tips.len(), 2);
 
@@ -570,7 +583,7 @@ mod tests {
             typ: "core.merge".to_string(),
             ..header
         };
-        index.update(merge_id, &merge_header).unwrap();
+        index.update(merge_id, EnvelopeId::from_bytes(*merge_id.as_bytes()), &merge_header).unwrap();
         let tips = index.get_tips_for_ver(&subject, DEFAULT_DATA_VERSION);
         assert_eq!(tips, vec![merge_id]);
     }
@@ -600,8 +613,8 @@ mod tests {
         };
         let id_v1 = AssertionId::from_bytes([9u8; 32]);
         let id_v2 = AssertionId::from_bytes([10u8; 32]);
-        index.update(id_v1, &header_v1).unwrap();
-        index.update(id_v2, &header_v2).unwrap();
+        index.update(id_v1, EnvelopeId::from_bytes(*id_v1.as_bytes()), &header_v1).unwrap();
+        index.update(id_v2, EnvelopeId::from_bytes(*id_v2.as_bytes()), &header_v2).unwrap();
         let tips_all = index.get_tips(&subject);
         assert_eq!(tips_all.len(), 2);
         assert!(tips_all.contains(&id_v1));
@@ -639,14 +652,14 @@ mod tests {
         let id_v2 = AssertionId::from_bytes([10u8; 32]);
         let id_v1_next = AssertionId::from_bytes([12u8; 32]);
 
-        index.update(id_v1, &header_v1).unwrap();
-        index.update(id_v2, &header_v2).unwrap();
+        index.update(id_v1, EnvelopeId::from_bytes(*id_v1.as_bytes()), &header_v1).unwrap();
+        index.update(id_v2, EnvelopeId::from_bytes(*id_v2.as_bytes()), &header_v2).unwrap();
         let header_v1_next = AssertionHeader {
             seq: 2,
             prev: Some(id_v1),
             ..header_v1.clone()
         };
-        index.update(id_v1_next, &header_v1_next).unwrap();
+        index.update(id_v1_next, EnvelopeId::from_bytes(*id_v1_next.as_bytes()), &header_v1_next).unwrap();
         index.compact().unwrap();
 
         let index = FrontierIndex::new(temp.path()).unwrap();

@@ -55,6 +55,7 @@ pub fn run() -> Result<(), DharmaError> {
         if let Some(helper) = rl.helper_mut() {
             helper.state.lock().ok().map(|mut state| state.update_from_ctx(&ctx));
         }
+        ctx.maybe_warn_backup_policy();
         let prompt = ctx.prompt();
         let readline = rl.readline(&prompt);
         match readline {

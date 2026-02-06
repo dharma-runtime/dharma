@@ -1,7 +1,7 @@
 use crate::cbor;
 use crate::error::DharmaError;
 use crate::fabric::types::Advertisement;
-use crate::types::{EnvelopeId, HpkePublicKey, IdentityKey, SubjectId};
+use crate::types::{AssertionId, EnvelopeId, HpkePublicKey, IdentityKey, SubjectId};
 use crate::value::{expect_array, expect_map, expect_text, expect_uint, expect_bytes, map_get};
 use ciborium::value::Value;
 
@@ -38,8 +38,8 @@ pub enum Inventory {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SubjectInventory {
     pub sub: SubjectId,
-    pub frontier: Vec<EnvelopeId>,
-    pub overlay: Vec<EnvelopeId>,
+    pub frontier: Vec<AssertionId>,
+    pub overlay: Vec<AssertionId>,
     pub since_seq: Option<u64>,
 }
 
@@ -50,14 +50,20 @@ pub struct Subscriptions {
     pub namespaces: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ObjectRef {
+    Assertion(AssertionId),
+    Envelope(EnvelopeId),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Get {
-    pub ids: Vec<EnvelopeId>,
+    pub ids: Vec<ObjectRef>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Obj {
-    pub id: EnvelopeId,
+    pub id: ObjectRef,
     pub bytes: Vec<u8>,
 }
 
@@ -162,13 +168,23 @@ impl SubjectInventory {
             (Value::Text("sub".to_string()), Value::Bytes(self.sub.as_bytes().to_vec())),
             (
                 Value::Text("frontier".to_string()),
-                Value::Array(self.frontier.iter().map(|id| Value::Bytes(id.as_bytes().to_vec())).collect()),
+                Value::Array(
+                    self.frontier
+                        .iter()
+                        .map(|id| Value::Bytes(id.as_bytes().to_vec()))
+                        .collect(),
+                ),
             ),
         ];
         if !self.overlay.is_empty() {
             entries.push((
                 Value::Text("overlay".to_string()),
-                Value::Array(self.overlay.iter().map(|id| Value::Bytes(id.as_bytes().to_vec())).collect()),
+                Value::Array(
+                    self.overlay
+                        .iter()
+                        .map(|id| Value::Bytes(id.as_bytes().to_vec()))
+                        .collect(),
+                ),
             ));
         }
         if let Some(since) = self.since_seq {
@@ -178,6 +194,36 @@ impl SubjectInventory {
             ));
         }
         Value::Map(entries)
+    }
+}
+
+impl ObjectRef {
+    fn to_value(&self) -> Value {
+        match self {
+            ObjectRef::Assertion(id) => Value::Map(vec![
+                (Value::Text("t".to_string()), Value::Text("assertion".to_string())),
+                (Value::Text("id".to_string()), Value::Bytes(id.as_bytes().to_vec())),
+            ]),
+            ObjectRef::Envelope(id) => Value::Map(vec![
+                (Value::Text("t".to_string()), Value::Text("envelope".to_string())),
+                (Value::Text("id".to_string()), Value::Bytes(id.as_bytes().to_vec())),
+            ]),
+        }
+    }
+
+    fn from_value(value: &Value) -> Result<Self, DharmaError> {
+        let map = expect_map(value)?;
+        let kind = expect_text(
+            map_get(map, "t").ok_or_else(|| DharmaError::Validation("missing ref type".to_string()))?,
+        )?;
+        let id_val =
+            map_get(map, "id").ok_or_else(|| DharmaError::Validation("missing ref id".to_string()))?;
+        let bytes = expect_bytes(id_val)?;
+        match kind.as_str() {
+            "assertion" => Ok(ObjectRef::Assertion(AssertionId::from_slice(&bytes)?)),
+            "envelope" => Ok(ObjectRef::Envelope(EnvelopeId::from_slice(&bytes)?)),
+            _ => Err(DharmaError::Validation("invalid ref type".to_string())),
+        }
     }
 }
 
@@ -235,7 +281,7 @@ impl Get {
     fn to_value(&self) -> Value {
         Value::Map(vec![(
             Value::Text("ids".to_string()),
-            Value::Array(self.ids.iter().map(|id| Value::Bytes(id.as_bytes().to_vec())).collect()),
+            Value::Array(self.ids.iter().map(ObjectRef::to_value).collect()),
         )])
     }
 }
@@ -243,7 +289,7 @@ impl Get {
 impl Obj {
     fn to_value(&self) -> Value {
         Value::Map(vec![
-            (Value::Text("id".to_string()), Value::Bytes(self.id.as_bytes().to_vec())),
+            (Value::Text("id".to_string()), self.id.to_value()),
             (Value::Text("bytes".to_string()), Value::Bytes(self.bytes.clone())),
         ])
     }
@@ -384,14 +430,14 @@ fn parse_subject_inventory(value: &Value) -> Result<SubjectInventory, DharmaErro
     let mut frontier = Vec::new();
     for item in frontier_array {
         let bytes = expect_bytes(item)?;
-        frontier.push(EnvelopeId::from_slice(&bytes)?);
+        frontier.push(AssertionId::from_slice(&bytes)?);
     }
     let mut overlay = Vec::new();
     if let Some(overlay_val) = map_get(map, "overlay") {
         let overlay_array = expect_array(overlay_val)?;
         for item in overlay_array {
             let bytes = expect_bytes(item)?;
-            overlay.push(EnvelopeId::from_slice(&bytes)?);
+            overlay.push(AssertionId::from_slice(&bytes)?);
         }
     }
     let since_seq = map_get(map, "since_seq")
@@ -411,18 +457,17 @@ fn parse_get(value: &Value) -> Result<Get, DharmaError> {
     let ids_array = expect_array(ids_val)?;
     let mut ids = Vec::new();
     for item in ids_array {
-        let bytes = expect_bytes(item)?;
-        ids.push(EnvelopeId::from_slice(&bytes)?);
+        ids.push(ObjectRef::from_value(item)?);
     }
     Ok(Get { ids })
 }
 
 fn parse_obj(value: &Value) -> Result<Obj, DharmaError> {
     let map = expect_map(value)?;
-    let id_bytes = expect_bytes(map_get(map, "id").ok_or_else(|| DharmaError::Validation("missing id".to_string()))?)?;
+    let id_val = map_get(map, "id").ok_or_else(|| DharmaError::Validation("missing id".to_string()))?;
     let bytes = expect_bytes(map_get(map, "bytes").ok_or_else(|| DharmaError::Validation("missing bytes".to_string()))?)?;
     Ok(Obj {
-        id: EnvelopeId::from_slice(&id_bytes)?,
+        id: ObjectRef::from_value(id_val)?,
         bytes,
     })
 }
@@ -477,8 +522,8 @@ mod tests {
     fn inv_subjects_roundtrip() {
         let msg = SyncMessage::Inv(Inventory::Subjects(vec![SubjectInventory {
             sub: SubjectId::from_bytes([3u8; 32]),
-            frontier: vec![EnvelopeId::from_bytes([4u8; 32])],
-            overlay: vec![EnvelopeId::from_bytes([9u8; 32])],
+            frontier: vec![AssertionId::from_bytes([4u8; 32])],
+            overlay: vec![AssertionId::from_bytes([9u8; 32])],
             since_seq: Some(42),
         }]));
         let bytes = msg.to_cbor().unwrap();
@@ -496,7 +541,12 @@ mod tests {
 
     #[test]
     fn get_roundtrip() {
-        let msg = SyncMessage::Get(Get { ids: vec![EnvelopeId::from_bytes([6u8; 32])] });
+        let msg = SyncMessage::Get(Get {
+            ids: vec![
+                ObjectRef::Assertion(AssertionId::from_bytes([6u8; 32])),
+                ObjectRef::Envelope(EnvelopeId::from_bytes([7u8; 32])),
+            ],
+        });
         let bytes = msg.to_cbor().unwrap();
         let parsed = SyncMessage::from_cbor(&bytes).unwrap();
         assert_eq!(msg, parsed);
@@ -504,7 +554,10 @@ mod tests {
 
     #[test]
     fn obj_roundtrip() {
-        let msg = SyncMessage::Obj(Obj { id: EnvelopeId::from_bytes([7u8; 32]), bytes: vec![1, 2, 3] });
+        let msg = SyncMessage::Obj(Obj {
+            id: ObjectRef::Assertion(AssertionId::from_bytes([7u8; 32])),
+            bytes: vec![1, 2, 3],
+        });
         let bytes = msg.to_cbor().unwrap();
         let parsed = SyncMessage::from_cbor(&bytes).unwrap();
         assert_eq!(msg, parsed);

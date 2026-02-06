@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "root": "/Users/julienmarie/Code/pact",
+  "model": "fastembed-default",
+  "dimensions": 384,
+  "metric": "cosine",
+  "created_at": 1769378847,
+  "chunk_size": 1000,
+  "chunk_overlap": 200,
+  "max_file_size": 2097152,
+  "records": 6297,
+  "files": 427
+}

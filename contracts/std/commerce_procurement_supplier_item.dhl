@@ -1,0 +1,131 @@
+---
+namespace: std.commerce.procurement.supplier_item
+version: 1.0.0
+---
+
+# Commerce Procurement Supplier Item
+
+Supplier items bind an item to a supplier with procurement terms.
+
+## Shelf-life contract
+- `min_shelf_life_on_receipt_days` is an optional contractual requirement.
+- If set and known, batches received below this threshold should be quarantined.
+
+## Queries
+
+### Private queries
+#### GetSupplierItem(supplier_item_id)
+Parameters: `$1 = supplier_item_id`
+```dhl
+query GetSupplierItem(supplier_item_id: Ref<std.commerce.procurement.supplier_item>)
+    private
+    dhlq
+    std.commerce.procurement.supplier_item
+    | where subject == $1
+    | take 1
+```
+
+#### ListSupplierItems(supplier_id?, item_id?, page)
+Parameters: `$1 = supplier_id`, `$2 = item_id`, `$3 = offset`, `$4 = limit`
+```dhl
+query ListSupplierItems(
+    supplier_id: Ref<std.commerce.procurement.supplier>,
+    item_id: Ref<std.commerce.catalog.item>,
+    offset: Int,
+    limit: Int
+)
+    private
+    dhlq
+    std.commerce.procurement.supplier_item
+    | where supplier_id == $1, item_id == $2
+    | sort -updated_at
+    | drop $3
+    | take $4
+```
+
+## Code
+
+```dhl
+aggregate SupplierItem
+    state
+        public external_id: Text(len=64)?
+        public human_ref: Text(len=64)?
+        public supplier_id: Ref<std.commerce.procurement.supplier>
+        public item_id: Ref<std.commerce.catalog.item>
+        public lead_time_days: Int?
+        public min_shelf_life_on_receipt_days: Int?
+        public preorder_allowed: Bool = false
+        public preorder_capacity: Decimal(scale=6)?
+        public preorder_unverified: Bool = false
+        public moq: Decimal(scale=6)?
+        public case_size: Decimal(scale=6)?
+        public status: Enum(Active, Archived) = 'Active
+        public created_at: Timestamp?
+        public updated_at: Timestamp?
+
+action Create(
+    supplier_id: Ref<std.commerce.procurement.supplier>,
+    item_id: Ref<std.commerce.catalog.item>,
+    lead_time_days: Int?,
+    min_shelf_life_on_receipt_days: Int?,
+    preorder_allowed: Bool,
+    preorder_capacity: Decimal(scale=6)?,
+    moq: Decimal(scale=6)?,
+    case_size: Decimal(scale=6)?,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.created_at == null
+        (min_shelf_life_on_receipt_days == null) || (min_shelf_life_on_receipt_days >= 0)
+        preorder_allowed || (preorder_capacity == null)
+    apply
+        state.supplier_id = supplier_id
+        state.item_id = item_id
+        state.lead_time_days = lead_time_days
+        state.min_shelf_life_on_receipt_days = min_shelf_life_on_receipt_days
+        state.preorder_allowed = preorder_allowed
+        state.preorder_capacity = preorder_capacity
+        state.preorder_unverified = preorder_allowed && (preorder_capacity == null)
+        state.moq = moq
+        state.case_size = case_size
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.status = 'Active
+        state.created_at = context.timestamp
+        state.updated_at = context.timestamp
+
+action UpdateTerms(
+    lead_time_days: Int?,
+    min_shelf_life_on_receipt_days: Int?,
+    moq: Decimal(scale=6)?,
+    case_size: Decimal(scale=6)?
+)
+    validate
+        state.status == 'Active
+        state.preorder_allowed || (state.preorder_capacity == null)
+        (min_shelf_life_on_receipt_days == null) || (min_shelf_life_on_receipt_days >= 0)
+    apply
+        state.lead_time_days = lead_time_days
+        state.min_shelf_life_on_receipt_days = min_shelf_life_on_receipt_days
+        state.moq = moq
+        state.case_size = case_size
+        state.preorder_unverified = state.preorder_allowed && (state.preorder_capacity == null)
+        state.updated_at = context.timestamp
+
+action SetPreorderPolicy(preorder_allowed: Bool, preorder_capacity: Decimal(scale=6)?)
+    validate
+        state.status == 'Active
+    apply
+        state.preorder_allowed = preorder_allowed
+        state.preorder_capacity = preorder_capacity
+        state.preorder_unverified = preorder_allowed && (preorder_capacity == null)
+        state.updated_at = context.timestamp
+
+action Archive()
+    validate
+        state.status != 'Archived
+    apply
+        state.status = 'Archived
+        state.updated_at = context.timestamp
+```

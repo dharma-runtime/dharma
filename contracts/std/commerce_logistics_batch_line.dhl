@@ -1,0 +1,83 @@
+---
+namespace: std.commerce.logistics.batch_line
+version: 1.0.0
+---
+
+# Commerce Logistics Batch Line (Projection)
+
+This projection flattens **batch ↔ line attachments** for fast lookups.
+It is **derived data** and can be rebuilt at any time.
+
+## Scope
+- One subject per attached line in a batch.
+
+## Access control
+Only projection writers may update this subject.
+
+```dhl
+external
+    roles: [projection.writer]
+```
+
+## Code
+
+```dhl
+aggregate BatchLine
+    state
+        public batch_id: Ref<std.commerce.logistics.batch>
+        public line_id: Ref<std.commerce.order.line>
+        public po_id: Ref<std.commerce.order.po>
+        public qty_planned: Decimal(scale=6)
+        public scheduled_for: Timestamp?
+        public batch_state: Enum(Planning, Scheduled, InTransit, Delivered, Cancelled)
+        public updated_at: Timestamp?
+
+action Upsert(
+    batch_id: Ref<std.commerce.logistics.batch>,
+    line_id: Ref<std.commerce.order.line>,
+    po_id: Ref<std.commerce.order.po>,
+    qty_planned: Decimal(scale=6),
+    scheduled_for: Timestamp?,
+    batch_state: Enum(Planning, Scheduled, InTransit, Delivered, Cancelled)
+)
+    validate
+        has_role(context.signer, "projection.writer")
+        qty_planned >= 0
+    apply
+        state.batch_id = batch_id
+        state.line_id = line_id
+        state.po_id = po_id
+        state.qty_planned = qty_planned
+        state.scheduled_for = scheduled_for
+        state.batch_state = batch_state
+        state.updated_at = context.timestamp
+```
+
+## Projection
+
+```dhl
+projection BatchLineAttachments
+    trigger std.commerce.logistics.batch.AttachLineToBatch
+    trigger std.commerce.logistics.batch.ScheduleBatch
+    trigger std.commerce.logistics.batch.DispatchBatch
+    trigger std.commerce.logistics.batch.DeliverBatch
+    trigger std.commerce.logistics.batch.CancelBatch
+    scope batch_id = subject
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.logistics.batch
+        | explode attachments as attachment
+        | lj std.commerce.order.line on attachment.line_id=std.commerce.order.line.subject
+    emit upsert std.commerce.logistics.batch_line
+        id = proj_id(subject, attachment.line_id)
+        batch_id = subject
+        line_id = attachment.line_id
+        po_id = std.commerce.order.line.po_id
+        qty_planned = attachment.qty_planned
+        scheduled_for = scheduled_for
+        batch_state = batch_state
+    prune
+        by (batch_id, line_id)
+```

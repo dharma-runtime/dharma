@@ -1,7 +1,8 @@
 use crate::error::DharmaError;
 use crate::pdl::ast::{
     ActionDef, AggregateDef, ArgDef, Assignment, AstFile, ConcurrencyMode, EmitDef, Expr, ExternalDef,
-    FieldDef, Header, Literal, Op, ReactorDef, SourceSpan, Spanned, TypeSpec, ViewDef, Visibility,
+    FieldDef, Header, Literal, Op, ProjectionDef, QueryDef, ReactorDef, SourceSpan, Spanned,
+    StructDef, TypeSpec, ViewDef, Visibility,
 };
 use crate::pdl::expr::parse_expr;
 use nom::branch::alt;
@@ -15,9 +16,12 @@ use nom::IResult;
 pub fn parse(markdown: &str) -> Result<AstFile, DharmaError> {
     let (header, body, line_offset) = parse_front_matter(markdown);
     let blocks = extract_dhl_blocks(body, line_offset);
+    let mut structs = Vec::new();
     let mut aggregates = Vec::new();
     let mut actions = Vec::new();
     let mut reactors = Vec::new();
+    let mut queries = Vec::new();
+    let mut projections = Vec::new();
     let mut views = Vec::new();
     let mut package = None;
     let mut external = None;
@@ -31,9 +35,12 @@ pub fn parse(markdown: &str) -> Result<AstFile, DharmaError> {
             &block.code,
             block.start_line,
             doc,
+            &mut structs,
             &mut aggregates,
             &mut actions,
             &mut reactors,
+            &mut queries,
+            &mut projections,
             &mut views,
             &mut package,
             &mut external,
@@ -43,9 +50,12 @@ pub fn parse(markdown: &str) -> Result<AstFile, DharmaError> {
         header,
         package,
         external,
+        structs,
         aggregates,
         actions,
         reactors,
+        queries,
+        projections,
         views,
     })
 }
@@ -117,7 +127,9 @@ fn parse_front_matter(markdown: &str) -> (Header, &str, usize) {
         return (header, markdown, 0);
     }
     let mut imports: Vec<String> = Vec::new();
+    let mut implements: Vec<String> = Vec::new();
     let mut in_imports = false;
+    let mut in_implements = false;
     let mut body_start = 0usize;
     let mut body_line = 0usize;
     for (idx, line) in markdown.lines().enumerate().skip(1) {
@@ -136,6 +148,17 @@ fn parse_front_matter(markdown: &str) -> (Header, &str, usize) {
         }
         if trimmed.starts_with("import:") {
             in_imports = true;
+            in_implements = false;
+            continue;
+        }
+        if trimmed.starts_with("implements:") {
+            in_implements = true;
+            in_imports = false;
+            let inline = trimmed.trim_start_matches("implements:").trim();
+            if !inline.is_empty() {
+                implements.push(inline.to_string());
+                in_implements = false;
+            }
             continue;
         }
         if in_imports && trimmed.starts_with('-') {
@@ -145,13 +168,26 @@ fn parse_front_matter(markdown: &str) -> (Header, &str, usize) {
             }
             continue;
         }
+        if in_implements && trimmed.starts_with('-') {
+            let item = trimmed.trim_start_matches('-').trim();
+            if !item.is_empty() {
+                implements.push(item.to_string());
+            }
+            continue;
+        }
         in_imports = false;
+        in_implements = false;
         if let Some((key, value)) = trimmed.split_once(':') {
             let key = key.trim();
             let value = value.trim();
             match key {
                 "namespace" => header.namespace = value.to_string(),
                 "version" => header.version = value.to_string(),
+                "implements" => {
+                    if !value.is_empty() {
+                        implements.push(value.to_string());
+                    }
+                }
                 "concurrency" => {
                     if let Some(mode) = ConcurrencyMode::from_str(value) {
                         header.concurrency = mode;
@@ -162,6 +198,7 @@ fn parse_front_matter(markdown: &str) -> (Header, &str, usize) {
         }
     }
     header.imports = imports;
+    header.implements = implements;
     let body = if body_start > 0 {
         &markdown[body_start..]
     } else {
@@ -174,28 +211,40 @@ fn parse_code_block(
     code: &str,
     start_line: usize,
     doc: Option<&str>,
+    structs: &mut Vec<StructDef>,
     aggregates: &mut Vec<AggregateDef>,
     actions: &mut Vec<ActionDef>,
     reactors: &mut Vec<ReactorDef>,
+    queries: &mut Vec<QueryDef>,
+    projections: &mut Vec<ProjectionDef>,
     views: &mut Vec<ViewDef>,
     package: &mut Option<String>,
     external: &mut Option<ExternalDef>,
 ) -> Result<(), DharmaError> {
     let mut current_aggregate: Option<AggregateDef> = None;
+    let mut current_struct: Option<StructDef> = None;
     let mut current_action: Option<ActionDef> = None;
     let mut current_reactor: Option<ReactorDef> = None;
+    let mut current_query: Option<QueryDef> = None;
+    let mut current_projection: Option<ProjectionDef> = None;
     let mut current_view: Option<ViewDef> = None;
     let mut section: Option<Section> = None;
     let mut apply_doc = doc.unwrap_or("").trim().to_string();
     let mut flows: Vec<FlowTransition> = Vec::new();
+    let mut query_body_started = false;
+    let mut projection_body_started = false;
 
-    for (idx, raw_line) in code.lines().enumerate() {
+    let lines: Vec<&str> = code.lines().collect();
+    let mut idx = 0usize;
+    while idx < lines.len() {
+        let raw_line = lines[idx];
         let line_no = start_line + idx;
         let line = raw_line.trim_end();
         if line.trim().is_empty() {
+            idx += 1;
             continue;
         }
-        let indent = count_indent(line)?;
+        let indent = count_indent(line).map_err(|e| with_loc(e, line_no, 1))?;
         let level = indent / 4;
         let content = line.trim();
         let span = SourceSpan {
@@ -206,6 +255,51 @@ fn parse_code_block(
         if let Some(view) = current_view.as_mut() {
             if matches!(section, Some(Section::View)) && level >= 1 {
                 view.body.push(content.to_string());
+                idx += 1;
+                continue;
+            }
+        }
+        if let Some(query) = current_query.as_mut() {
+            if matches!(section, Some(Section::Query)) && level >= 1 {
+                if content == "public" {
+                    query.visibility = Visibility::Public;
+                    idx += 1;
+                    continue;
+                }
+                if content == "private" {
+                    query.visibility = Visibility::Private;
+                    idx += 1;
+                    continue;
+                }
+                if content == "dhlq" {
+                    query_body_started = true;
+                    query.start_line = line_no + 1;
+                    idx += 1;
+                    continue;
+                }
+                if !query_body_started {
+                    query_body_started = true;
+                    query.start_line = line_no;
+                }
+                query.body.push(content.to_string());
+                idx += 1;
+                continue;
+            }
+        }
+        if let Some(projection) = current_projection.as_mut() {
+            if matches!(section, Some(Section::Projection)) && level >= 1 {
+                if content == "dhlp" || content == "dsl" || content == "projection" {
+                    projection_body_started = true;
+                    projection.start_line = line_no + 1;
+                    idx += 1;
+                    continue;
+                }
+                if !projection_body_started {
+                    projection_body_started = true;
+                    projection.start_line = line_no;
+                }
+                projection.body.push(content.to_string());
+                idx += 1;
                 continue;
             }
         }
@@ -215,11 +309,20 @@ fn parse_code_block(
                 if let Some(action) = current_action.take() {
                     actions.push(action);
                 }
+                if let Some(st) = current_struct.take() {
+                    structs.push(st);
+                }
                 if let Some(agg) = current_aggregate.take() {
                     aggregates.push(agg);
                 }
                 if let Some(reactor) = current_reactor.take() {
                     reactors.push(reactor);
+                }
+                if let Some(query) = current_query.take() {
+                    queries.push(query);
+                }
+                if let Some(projection) = current_projection.take() {
+                    projections.push(projection);
                 }
                 if let Some(view) = current_view.take() {
                     views.push(view);
@@ -258,6 +361,59 @@ fn parse_code_block(
                         body: Vec::new(),
                     });
                     section = Some(Section::View);
+                } else if content.starts_with("query ") {
+                    let mut header = content.to_string();
+                    let mut depth = paren_delta(&header);
+                    if depth > 0 {
+                        let mut scan_idx = idx + 1;
+                        while scan_idx < lines.len() {
+                            let next = lines[scan_idx].trim();
+                            if !next.is_empty() {
+                                header.push(' ');
+                                header.push_str(next);
+                                depth += paren_delta(next);
+                                if depth <= 0 {
+                                    break;
+                                }
+                            }
+                            scan_idx += 1;
+                        }
+                        idx = scan_idx;
+                    }
+                    let (name, args) = parse_query_header(&header).map_err(|e| with_span(e, &span))?;
+                    current_query = Some(QueryDef {
+                        name,
+                        args,
+                        visibility: Visibility::Private,
+                        body: Vec::new(),
+                        start_line: line_no + 1,
+                        doc: if apply_doc.is_empty() { None } else { Some(apply_doc.clone()) },
+                    });
+                    query_body_started = false;
+                    section = Some(Section::Query);
+                } else if content.starts_with("projection ") {
+                    let name = content.trim_start_matches("projection").trim();
+                    if name.is_empty() {
+                        return Err(DharmaError::Validation("invalid projection".to_string()));
+                    }
+                    current_projection = Some(ProjectionDef {
+                        name: name.to_string(),
+                        body: Vec::new(),
+                        start_line: line_no + 1,
+                        doc: if apply_doc.is_empty() { None } else { Some(apply_doc.clone()) },
+                    });
+                    projection_body_started = false;
+                    section = Some(Section::Projection);
+                } else if content.starts_with("struct ") {
+                    let rest = content.trim_start_matches("struct").trim();
+                    if rest.is_empty() {
+                        return Err(DharmaError::Validation("invalid struct header".to_string()));
+                    }
+                    current_struct = Some(StructDef {
+                        name: rest.split_whitespace().next().unwrap_or(rest).to_string(),
+                        fields: Vec::new(),
+                    });
+                    section = Some(Section::Struct);
                 } else if content.starts_with("aggregate ") {
                     let rest = content.trim_start_matches("aggregate").trim();
                     let (name, extends) = if let Some((name, ext)) = rest.split_once("extends") {
@@ -273,7 +429,25 @@ fn parse_code_block(
                     });
                     section = None;
                 } else if content.starts_with("action ") {
-                    let action = parse_action_header(content)?;
+                    let mut header = content.to_string();
+                    let mut depth = paren_delta(&header);
+                    if depth > 0 {
+                        let mut scan_idx = idx + 1;
+                        while scan_idx < lines.len() {
+                            let next = lines[scan_idx].trim();
+                            if !next.is_empty() {
+                                header.push(' ');
+                                header.push_str(next);
+                                depth += paren_delta(next);
+                                if depth <= 0 {
+                                    break;
+                                }
+                            }
+                            scan_idx += 1;
+                        }
+                        idx = scan_idx;
+                    }
+                    let action = parse_action_header(&header).map_err(|e| with_span(e, &span))?;
                     current_action = Some(ActionDef {
                         name: action.0,
                         args: action.1,
@@ -317,14 +491,28 @@ fn parse_code_block(
                         reactor.trigger = Some(content.to_string());
                         section = None;
                     } else if content.starts_with("emit ") {
-                        reactor.emits.push(parse_emit_line(content, span.clone())?);
+                        reactor
+                            .emits
+                            .push(parse_emit_line(content, span.clone()).map_err(|e| with_span(e, &span))?);
                         section = None;
                     } else {
                         section = None;
                     }
                 } else if matches!(section, Some(Section::External)) {
-                    apply_external_line(external, content)?;
+                    apply_external_line(external, content).map_err(|e| with_span(e, &span))?;
                     section = Some(Section::External);
+                } else if current_struct.is_some() {
+                    if content.contains(':') {
+                        let field =
+                            parse_field_line(content, Visibility::Public).map_err(|e| with_span(e, &span))?;
+                        if let Some(st) = current_struct.as_mut() {
+                            st.fields.push(field);
+                        }
+                        section = Some(Section::Struct);
+                        idx += 1;
+                        continue;
+                    }
+                    section = Some(Section::Struct);
                 } else if current_aggregate.is_some() {
                     if content == "invariant" {
                         section = Some(Section::Invariant);
@@ -337,7 +525,7 @@ fn parse_code_block(
                         };
                     }
                 } else if matches!(section, Some(Section::Flow)) {
-                    flows.push(parse_flow_transition(content)?);
+                    flows.push(parse_flow_transition(content).map_err(|e| with_span(e, &span))?);
                 } else {
                     section = match content {
                         "state" => Some(Section::State),
@@ -350,7 +538,10 @@ fn parse_code_block(
             2 => {
                 if let Some(reactor) = current_reactor.as_mut() {
                     if content.starts_with("emit ") {
-                        reactor.emits.push(parse_emit_line(content, span.clone())?);
+                        reactor
+                            .emits
+                            .push(parse_emit_line(content, span.clone()).map_err(|e| with_span(e, &span))?);
+                        idx += 1;
                         continue;
                     }
                 }
@@ -361,31 +552,39 @@ fn parse_code_block(
                         .and_then(|agg| agg.extends.as_ref())
                         .map(|_| Visibility::Private)
                         .unwrap_or(Visibility::Public);
-                    let field = parse_field_line(content, default_vis)?;
+                    let field = parse_field_line(content, default_vis).map_err(|e| with_span(e, &span))?;
                     if let Some(agg) = current_aggregate.as_mut() {
                         agg.fields.push(field);
+                    }
+                }
+                Some(Section::Struct) => {
+                    let field = parse_field_line(content, Visibility::Public).map_err(|e| with_span(e, &span))?;
+                    if let Some(st) = current_struct.as_mut() {
+                        st.fields.push(field);
                     }
                 }
                 Some(Section::Validate) => {
                     let expr = strip_comment(content);
                     if expr.is_empty() {
+                        idx += 1;
                         continue;
                     }
                     if let Some(action) = current_action.as_mut() {
                         action
                             .validates
-                            .push(Spanned::new(parse_expr(expr)?, span.clone()));
+                            .push(Spanned::new(parse_expr(expr).map_err(|e| with_span(e, &span))?, span.clone()));
                     }
                 }
                 Some(Section::Apply) => {
                     let line = strip_comment(content);
                     if line.is_empty() {
+                        idx += 1;
                         continue;
                     }
                     if let Some(action) = current_action.as_mut() {
                         if let Some((target, value)) = line.split_once('=') {
-                            let target_path = parse_path(target.trim())?;
-                            let value_expr = parse_expr(value.trim())?;
+                            let target_path = parse_path(target.trim()).map_err(|e| with_span(e, &span))?;
+                            let value_expr = parse_expr(value.trim()).map_err(|e| with_span(e, &span))?;
                             action.applies.push(Spanned::new(
                                 Assignment {
                                     target: target_path,
@@ -393,7 +592,9 @@ fn parse_code_block(
                                 },
                                 span.clone(),
                             ));
-                        } else if let Some(assign) = parse_apply_call(line)? {
+                        } else if let Some(assign) =
+                            parse_apply_call(line).map_err(|e| with_span(e, &span))?
+                        {
                             action.applies.push(Spanned::new(assign, span.clone()));
                         }
                     }
@@ -401,42 +602,57 @@ fn parse_code_block(
                 Some(Section::ReactorValidate) => {
                     let expr = strip_comment(content);
                     if expr.is_empty() {
+                        idx += 1;
                         continue;
                     }
                     if let Some(reactor) = current_reactor.as_mut() {
                         let expr = strip_if(expr);
                         reactor
                             .validates
-                            .push(Spanned::new(parse_expr(expr)?, span.clone()));
+                            .push(Spanned::new(parse_expr(expr).map_err(|e| with_span(e, &span))?, span.clone()));
                     }
                 }
                 Some(Section::Invariant) => {
                     let expr = strip_comment(content);
                     if expr.is_empty() {
+                        idx += 1;
                         continue;
                     }
                     if let Some(agg) = current_aggregate.as_mut() {
-                        agg.invariants.push(Spanned::new(parse_expr(expr)?, span.clone()));
+                        agg.invariants
+                            .push(Spanned::new(parse_expr(expr).map_err(|e| with_span(e, &span))?, span.clone()));
                     }
                 }
                 Some(Section::Flow) => {}
                 Some(Section::External) => {}
                 Some(Section::View) => {}
+                Some(Section::Query) => {}
+                Some(Section::Projection) => {}
                 None => {}
             }
             },
             _ => {}
         }
+        idx += 1;
     }
 
     if let Some(action) = current_action.take() {
         actions.push(action);
+    }
+    if let Some(st) = current_struct.take() {
+        structs.push(st);
     }
     if let Some(agg) = current_aggregate.take() {
         aggregates.push(agg);
     }
     if let Some(reactor) = current_reactor.take() {
         reactors.push(reactor);
+    }
+    if let Some(query) = current_query.take() {
+        queries.push(query);
+    }
+    if let Some(projection) = current_projection.take() {
+        projections.push(projection);
     }
     if let Some(view) = current_view.take() {
         views.push(view);
@@ -446,6 +662,19 @@ fn parse_code_block(
         apply_doc.clear();
     }
     Ok(())
+}
+
+fn with_span(err: DharmaError, span: &SourceSpan) -> DharmaError {
+    with_loc(err, span.line, span.column)
+}
+
+fn with_loc(err: DharmaError, line: usize, column: usize) -> DharmaError {
+    match err {
+        DharmaError::Validation(msg) => {
+            DharmaError::Validation(format!("line {} col {}: {}", line, column, msg))
+        }
+        other => other,
+    }
 }
 
 fn parse_fence_start(line: &str) -> Option<(&'static str, &str)> {
@@ -461,6 +690,7 @@ fn parse_fence_start(line: &str) -> Option<(&'static str, &str)> {
 #[derive(Clone, Copy)]
 enum Section {
     State,
+    Struct,
     Validate,
     Apply,
     ReactorValidate,
@@ -468,6 +698,8 @@ enum Section {
     External,
     Invariant,
     View,
+    Query,
+    Projection,
 }
 
 fn count_indent(line: &str) -> Result<usize, DharmaError> {
@@ -552,11 +784,29 @@ fn parse_action_header(line: &str) -> Result<(String, Vec<ArgDef>), DharmaError>
     Ok((name, args))
 }
 
+fn parse_query_header(line: &str) -> Result<(String, Vec<ArgDef>), DharmaError> {
+    let line = line.trim();
+    let (_, (name, args)) = query_parser(line).map_err(|_| DharmaError::Validation("invalid query".to_string()))?;
+    Ok((name, args))
+}
+
 fn strip_comment(line: &str) -> &str {
     match line.find("//") {
         Some(idx) => line[..idx].trim(),
         None => line.trim(),
     }
+}
+
+fn paren_delta(line: &str) -> i32 {
+    let mut delta = 0i32;
+    for ch in line.chars() {
+        if ch == '(' {
+            delta += 1;
+        } else if ch == ')' {
+            delta -= 1;
+        }
+    }
+    delta
 }
 
 fn parse_literal(value: &str, typ: &TypeSpec) -> Result<Literal, DharmaError> {
@@ -597,7 +847,18 @@ fn parse_literal(value: &str, typ: &TypeSpec) -> Result<Literal, DharmaError> {
             Ok(Literal::Enum(name.to_string()))
         }
         TypeSpec::Identity | TypeSpec::Ref(_) => Ok(Literal::Text(value.to_string())),
+        TypeSpec::SubjectRef(_) => Err(DharmaError::Validation(
+            "subject_ref literal unsupported".to_string(),
+        )),
         TypeSpec::Currency => Ok(Literal::Text(value.to_string())),
+        TypeSpec::Struct(_) => {
+            let expr = parse_expr(value)?;
+            let lit = expr_to_literal(&expr)?;
+            match lit {
+                Literal::Map(_) | Literal::Struct(_, _) => Ok(lit),
+                _ => Err(DharmaError::Validation("invalid struct literal".to_string())),
+            }
+        }
         TypeSpec::GeoPoint => Err(DharmaError::Validation("geopoint literal unsupported".to_string())),
         TypeSpec::List(_) | TypeSpec::Map(_, _) => {
             let expr = parse_expr(value)?;
@@ -713,6 +974,12 @@ fn expr_to_literal(expr: &Expr) -> Result<Literal, DharmaError> {
                 }
                 Ok(lit.clone())
             }
+            Literal::Struct(_, items) => {
+                for (_, v) in items {
+                    expr_to_literal(v)?;
+                }
+                Ok(lit.clone())
+            }
             _ => Ok(lit.clone()),
         },
         Expr::UnaryOp(Op::Neg, inner) => match inner.as_ref() {
@@ -748,9 +1015,17 @@ fn parse_type_spec(input: &str) -> Result<TypeSpec, DharmaError> {
         let value = parse_type_spec(&parts[1])?;
         return Ok(TypeSpec::Map(Box::new(key), Box::new(value)));
     }
-    let (_, typ) =
-        type_parser(input).map_err(|_| DharmaError::Validation("invalid type".to_string()))?;
-    Ok(typ)
+    if let Ok((rest, typ)) = type_parser(input) {
+        if rest.trim().is_empty() {
+            return Ok(typ);
+        }
+    }
+    if let Ok((rest, name)) = identifier(input) {
+        if rest.trim().is_empty() {
+            return Ok(TypeSpec::Struct(name.to_string()));
+        }
+    }
+    Err(DharmaError::Validation("invalid type".to_string()))
 }
 
 fn parse_path(input: &str) -> Result<Vec<String>, DharmaError> {
@@ -872,7 +1147,9 @@ fn parse_emit_line(line: &str, span: SourceSpan) -> Result<EmitDef, DharmaError>
 fn split_emit_args(input: &str) -> Result<Vec<String>, DharmaError> {
     let mut parts = Vec::new();
     let mut buf = String::new();
-    let mut depth = 0i32;
+    let mut depth_paren = 0i32;
+    let mut depth_brace = 0i32;
+    let mut depth_bracket = 0i32;
     let mut in_str = false;
     for ch in input.chars() {
         match ch {
@@ -881,14 +1158,30 @@ fn split_emit_args(input: &str) -> Result<Vec<String>, DharmaError> {
                 buf.push(ch);
             }
             '(' if !in_str => {
-                depth += 1;
+                depth_paren += 1;
                 buf.push(ch);
             }
             ')' if !in_str => {
-                depth -= 1;
+                depth_paren -= 1;
                 buf.push(ch);
             }
-            ',' if depth == 0 && !in_str => {
+            '{' if !in_str => {
+                depth_brace += 1;
+                buf.push(ch);
+            }
+            '}' if !in_str => {
+                depth_brace -= 1;
+                buf.push(ch);
+            }
+            '[' if !in_str => {
+                depth_bracket += 1;
+                buf.push(ch);
+            }
+            ']' if !in_str => {
+                depth_bracket -= 1;
+                buf.push(ch);
+            }
+            ',' if depth_paren == 0 && depth_brace == 0 && depth_bracket == 0 && !in_str => {
                 if !buf.trim().is_empty() {
                     parts.push(buf.trim().to_string());
                 }
@@ -900,7 +1193,7 @@ fn split_emit_args(input: &str) -> Result<Vec<String>, DharmaError> {
     if !buf.trim().is_empty() {
         parts.push(buf.trim().to_string());
     }
-    if depth != 0 {
+    if depth_paren != 0 || depth_brace != 0 || depth_bracket != 0 {
         return Err(DharmaError::Validation("invalid emit args".to_string()));
     }
     Ok(parts)
@@ -920,7 +1213,7 @@ fn parse_apply_call(line: &str) -> Result<Option<Assignment>, DharmaError> {
         return Ok(None);
     };
     let method = method.trim();
-    if method != "push" && method != "remove" && method != "set" {
+    if method != "push" && method != "remove" && method != "set" && method != "normalize" {
         return Ok(None);
     }
     let target_path = parse_path(target.trim())?;
@@ -945,6 +1238,12 @@ fn parse_apply_call(line: &str) -> Result<Option<Assignment>, DharmaError> {
                 exprs[0].clone(),
                 exprs[1].clone(),
             ]
+        }
+        "normalize" => {
+            if !exprs.is_empty() {
+                return Err(DharmaError::Validation("invalid apply call".to_string()));
+            }
+            vec![Expr::Path(target_path.clone())]
         }
         _ => return Ok(None),
     };
@@ -1033,12 +1332,61 @@ fn action_parser(input: &str) -> IResult<&str, (String, Vec<ArgDef>)> {
     Ok((input, (name.to_string(), args.unwrap_or_default())))
 }
 
+fn query_parser(input: &str) -> IResult<&str, (String, Vec<ArgDef>)> {
+    let (input, _) = tuple((tag("query"), space0))(input)?;
+    let (input, name) = identifier(input)?;
+    let (input, args) = opt(delimited(
+        char('('),
+        separated_list1(char(','), delimited(space0, arg_parser, space0)),
+        char(')'),
+    ))(input)?;
+    Ok((input, (name.to_string(), args.unwrap_or_default())))
+}
+
 fn arg_parser(input: &str) -> IResult<&str, ArgDef> {
     let (input, name) = identifier(input)?;
     let (input, _) = delimited(space0, char(':'), space0)(input)?;
-    let (input, typ_str) = take_while1(|c: char| c != ',' && c != ')')(input)?;
+    let (input, typ_str) = type_str_parser(input)?;
     let typ = parse_type_spec(typ_str.trim()).map_err(|_| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Fail)))?;
     Ok((input, ArgDef { name: name.to_string(), typ }))
+}
+
+fn type_str_parser(input: &str) -> IResult<&str, &str> {
+    let mut depth_paren = 0i32;
+    let mut depth_angle = 0i32;
+    let mut depth_bracket = 0i32;
+    let mut depth_brace = 0i32;
+    let mut in_str = false;
+    for (idx, ch) in input.char_indices() {
+        match ch {
+            '"' => in_str = !in_str,
+            '(' if !in_str => depth_paren += 1,
+            ')' if !in_str => {
+                if depth_paren == 0 && depth_angle == 0 && depth_bracket == 0 && depth_brace == 0 {
+                    return Ok((&input[idx..], &input[..idx]));
+                }
+                depth_paren -= 1;
+            }
+            '<' if !in_str => depth_angle += 1,
+            '>' if !in_str => depth_angle -= 1,
+            '[' if !in_str => depth_bracket += 1,
+            ']' if !in_str => depth_bracket -= 1,
+            '{' if !in_str => depth_brace += 1,
+            '}' if !in_str => depth_brace -= 1,
+            ',' if !in_str && depth_paren == 0 && depth_angle == 0 && depth_bracket == 0 && depth_brace == 0 => {
+                return Ok((&input[idx..], &input[..idx]));
+            }
+            _ => {}
+        }
+    }
+    if input.trim().is_empty() {
+        Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )))
+    } else {
+        Ok(("", input))
+    }
 }
 
 fn identifier(input: &str) -> IResult<&str, &str> {
@@ -1101,6 +1449,23 @@ fn type_parser(input: &str) -> IResult<&str, TypeSpec> {
         delimited(tag("Ref<"), terminated(identifier, char('>')), multispace0),
         |name: &str| TypeSpec::Ref(name.to_string()),
     );
+    let subject_ref_t = map(
+        alt((
+            delimited(tag("SubjectRef<"), terminated(identifier, char('>')), multispace0),
+            map(tag("SubjectRef"), |_| "SubjectRef"),
+        )),
+        |name: &str| {
+            if name == "SubjectRef" {
+                TypeSpec::SubjectRef(None)
+            } else {
+                TypeSpec::SubjectRef(Some(name.to_string()))
+            }
+        },
+    );
+    let struct_t = map(
+        delimited(tag("Struct<"), terminated(identifier, char('>')), multispace0),
+        |name: &str| TypeSpec::Struct(name.to_string()),
+    );
     alt((
         int_t,
         decimal_t,
@@ -1114,6 +1479,8 @@ fn type_parser(input: &str) -> IResult<&str, TypeSpec> {
         text_t,
         enum_t,
         ref_t,
+        subject_ref_t,
+        struct_t,
     ))(input)
 }
 
@@ -1128,6 +1495,8 @@ namespace: com.ph.cmdv.logistics
 version: 1.0.0
 import:
   - com.ph.cmdv.sales.Order
+implements:
+  - std.protocol.contacts@1
 ---
 
 # Logistics Protocol V1
@@ -1157,6 +1526,7 @@ action Dispatch(current_loc: Text)
         assert_eq!(ast.header.namespace, "com.ph.cmdv.logistics");
         assert_eq!(ast.header.version, "1.0.0");
         assert_eq!(ast.header.imports.len(), 1);
+        assert_eq!(ast.header.implements.len(), 1);
         assert_eq!(ast.aggregates.len(), 1);
         assert_eq!(ast.actions.len(), 1);
         let agg = &ast.aggregates[0];

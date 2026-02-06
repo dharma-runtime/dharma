@@ -1,0 +1,217 @@
+---
+namespace: std.commerce.catalog.product
+version: 1.0.0
+---
+
+# Commerce Catalog Product
+
+Products are **merchandising containers**. They exist for storytelling, taxonomy, and browsing—not for contracts.
+
+## Business meaning
+- Products group variants under a single customer‑facing concept.
+- Orders never reference products directly; they reference **variant snapshots**.
+
+## Lifecycle rules
+- Products can be edited until archived.
+- Archive is terminal and makes the product read-only.
+
+## Queries
+
+### Public queries
+#### GetProduct(product_id) — published only
+Parameters: `$1 = product_id`
+```dhl
+query GetProduct(product_id: Ref<std.commerce.catalog.product>)
+    public
+    dhlq
+    std.commerce.catalog.product
+    | where subject == $1, status == 'Published
+    | take 1
+```
+
+#### ListProducts(page, sort) — published only
+Parameters: `$1 = offset`, `$2 = limit`  
+Default sort: `-updated_at` (other sorts should use predefined query variants)
+```dhl
+query ListProducts(offset: Int, limit: Int)
+    public
+    dhlq
+    std.commerce.catalog.product
+    | where status == 'Published
+    | sort -updated_at
+    | drop $1
+    | take $2
+```
+
+#### SearchProducts(q, category_id, taxonomy_filters, price_range?, in_stock_only?, sort, page)
+Parameters: `$1 = q`, `$2 = category_id`, `$3 = offset`, `$4 = limit`  
+Optional filters are appended as extra `where` predicates (taxonomy filters, price range, in‑stock).  
+Default sort: `-score` (search relevance).
+```dhl
+query SearchProducts(q: Text, category_id: Text(len=64), offset: Int, limit: Int)
+    public
+    dhlq
+    search $1 in std.commerce.catalog.product.title,std.commerce.catalog.product.description_rich fuzz=1
+    | lj std.commerce.catalog.product on oid=std.commerce.catalog.product.oid
+    | where std.commerce.catalog.product.status == 'Published, std.commerce.catalog.product.category_id == $2
+    | sort -score
+    | drop $3
+    | take $4
+```
+
+#### GetProductFacets(category_id, q?)
+Parameters: `$1 = category_id`, `$2 = q_hash?`  
+Uses a projection table of flattened facets (built by pipeline).
+```dhl
+query GetProductFacets(category_id: Text(len=64), q_hash: Text(len=64)?)
+    public
+    dhlq
+    std.commerce.catalog.product_facet
+    | where category_id == $1, status == 'Published, q_hash == $2
+    | sort -count
+```
+
+#### GetCategoryCounts() — published only, cached
+```dhl
+query GetCategoryCounts
+    public
+    dhlq
+    std.commerce.catalog.product
+    | where status == 'Published
+    | by category_id
+    | agg count()
+```
+
+### Private queries
+#### GetProductAdmin(product_id)
+Parameters: `$1 = product_id`
+```dhl
+query GetProductAdmin(product_id: Ref<std.commerce.catalog.product>)
+    private
+    dhlq
+    std.commerce.catalog.product
+    | where subject == $1
+    | take 1
+```
+
+#### ListProductsAdmin(status, category_id, page)
+Parameters: `$1 = status`, `$2 = category_id`, `$3 = offset`, `$4 = limit`
+```dhl
+query ListProductsAdmin(status: Enum(Draft, Published, Archived), category_id: Text(len=64), offset: Int, limit: Int)
+    private
+    dhlq
+    std.commerce.catalog.product
+    | where status == $1, category_id == $2
+    | sort -updated_at
+    | drop $3
+    | take $4
+```
+
+#### SearchProductsAdmin(q, status, category_id, missing_fields?, page)
+Parameters: `$1 = q`, `$2 = status`, `$3 = category_id`, `$4 = offset`, `$5 = limit`
+```dhl
+query SearchProductsAdmin(q: Text, status: Enum(Draft, Published, Archived), category_id: Text(len=64), offset: Int, limit: Int)
+    private
+    dhlq
+    search $1 in std.commerce.catalog.product.title,std.commerce.catalog.product.description_rich fuzz=1
+    | lj std.commerce.catalog.product on oid=std.commerce.catalog.product.oid
+    | where std.commerce.catalog.product.status == $2, std.commerce.catalog.product.category_id == $3
+    | sort -score
+    | drop $4
+    | take $5
+```
+
+#### CatalogHealthReport()
+```dhl
+query CatalogHealthReport
+    private
+    dhlq
+    std.commerce.catalog.product
+    | where status != 'Archived
+    | sel subject, title, status, images, updated_at
+```
+
+## Code
+
+### Types
+```dhl
+
+
+
+
+```
+
+### Aggregate state
+```dhl
+aggregate Product
+    state
+        public external_id: Text(len=64)?
+        public human_ref: Text(len=64)?
+        public title: Text(len=256)
+        public description_rich: Text(len=2048)?
+        public images: List<Text(len=256)>
+        public category_id: Text(len=64)?
+        public taxonomy: Map<Text(len=64), Text(len=256)>
+        public status: Enum(Draft, Published, Archived) = 'Draft
+        public created_at: Timestamp?
+        public updated_at: Timestamp?
+```
+
+### Actions
+```dhl
+action Create(
+    title: Text(len=256),
+    description_rich: Text(len=2048)?,
+    images: List<Text(len=256)>,
+    category_id: Text(len=64)?,
+    taxonomy: Map<Text(len=64), Text(len=256)>,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.created_at == null
+    apply
+        state.title = title
+        state.description_rich = description_rich
+        state.images = images
+        state.category_id = category_id
+        state.taxonomy = taxonomy
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.status = 'Draft
+        state.created_at = context.timestamp
+        state.updated_at = context.timestamp
+
+action Update(
+    title: Text(len=256),
+    description_rich: Text(len=2048)?,
+    images: List<Text(len=256)>,
+    category_id: Text(len=64)?,
+    taxonomy: Map<Text(len=64), Text(len=256)>,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.status != 'Archived
+    apply
+        state.title = title
+        state.description_rich = description_rich
+        state.images = images
+        state.category_id = category_id
+        state.taxonomy = taxonomy
+        state.human_ref = human_ref
+        state.updated_at = context.timestamp
+
+action Publish()
+    validate
+        state.status != 'Archived
+    apply
+        state.status = 'Published
+        state.updated_at = context.timestamp
+
+action Archive()
+    validate
+        state.status != 'Archived
+    apply
+        state.status = 'Archived
+        state.updated_at = context.timestamp
+```

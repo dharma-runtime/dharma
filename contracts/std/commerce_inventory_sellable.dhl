@@ -1,0 +1,300 @@
+---
+namespace: std.commerce.inventory.sellable
+version: 1.1.0
+---
+
+# Commerce Inventory Sellable (Physical Unit)
+
+Sellables are **execution units**. They represent the concrete items that can fulfill a line.
+
+## Business meaning
+- Customers never buy sellables directly; they buy variants.
+- A sellable must satisfy the line’s offer constraints at allocation time.
+
+## Allergen safety
+- `allergens_declared` and `allergens` are required for allergen‑safe matching.
+- Missing allergen data should be treated as unsafe downstream.
+
+## Inventory behavior
+- `quantity_on_hand` is mutable.
+- When it reaches zero, status becomes `Depleted`.
+
+## Queries
+
+### Public queries
+#### GetVariantStockStatus(variant_id, delivery_area?, bucket_date?) (optional)
+Parameters: `$1 = variant_id`, `$2 = delivery_area?`, `$3 = bucket_date?`  
+Uses a time-bucketed availability projection by variant.
+```dhl
+query GetVariantStockStatus(
+    variant_id: Ref<std.commerce.catalog.variant>,
+    delivery_area: Text(len=64)?,
+    bucket_date: Timestamp?
+)
+    public
+    dhlq
+    std.commerce.catalog.variant_availability
+    | where variant_id == $1, bucket_date == $3
+    | take 1
+```
+
+### Private queries
+#### GetSellable(sellable_id)
+Parameters: `$1 = sellable_id`
+```dhl
+query GetSellable(sellable_id: Ref<std.commerce.inventory.sellable>)
+    private
+    dhlq
+    std.commerce.inventory.sellable
+    | where subject == $1
+    | take 1
+```
+
+#### GetSellableBySC(sc)
+Parameters: `$1 = sc`
+```dhl
+query GetSellableBySC(sc: Text(len=64))
+    private
+    dhlq
+    std.commerce.inventory.sellable
+    | where sc == $1
+    | take 1
+```
+
+#### ListSellablesByLot(lot_id)
+Parameters: `$1 = lot_id`, `$2 = offset`, `$3 = limit`
+```dhl
+query ListSellablesByLot(lot_id: Text(len=64), offset: Int, limit: Int)
+    private
+    dhlq
+    std.commerce.inventory.sellable
+    | where lot_id == $1
+    | sort expiry_date
+    | drop $2
+    | take $3
+```
+
+#### ListSellablesByWarehouse(warehouse_id, status, page)
+Parameters: `$1 = warehouse_id`, `$2 = status`, `$3 = offset`, `$4 = limit`
+```dhl
+query ListSellablesByWarehouse(
+    warehouse_id: Ref<std.commerce.logistics.warehouse>,
+    status: Enum(Available, Reserved, Picked, Shipped, Depleted, Archived),
+    offset: Int,
+    limit: Int
+)
+    private
+    dhlq
+    std.commerce.inventory.sellable
+    | where warehouse_id == $1, status == $2
+    | sort expiry_date
+    | drop $3
+    | take $4
+```
+
+#### SearchSellables(q, sc?, designation?, supplier_id?, warehouse_id?, expiry_before?, received_after?, status?, page)
+Parameters: `$1 = q`, `$2 = offset`, `$3 = limit`  
+Optional filters are appended as extra `where` predicates.
+```dhl
+query SearchSellables(q: Text, offset: Int, limit: Int)
+    private
+    dhlq
+    search $1 in std.commerce.inventory.sellable.sc,std.commerce.inventory.sellable.designation fuzz=1
+    | lj std.commerce.inventory.sellable on oid=std.commerce.inventory.sellable.oid
+    | sort -score
+    | drop $2
+    | take $3
+```
+
+#### FindSellablesMatchingOfferSpec(offer_spec, min_qty?, warehouse_id?, sort)
+Parameters: offer spec fields expand to `where` predicates (designation/origin/format/temp_chain/aging).  
+```dhl
+query FindSellablesMatchingOfferSpec(
+    offer_spec: Text,
+    min_qty: Decimal(scale=6)?,
+    warehouse_id: Ref<std.commerce.logistics.warehouse>?,
+    sort: Text
+)
+    private
+    dhlq
+    std.commerce.inventory.sellable
+    | where status == 'Available
+    | sort expiry_date
+```
+
+#### InventoryAgingReport(warehouse_id, by=designation|supplier|temp_chain)
+Parameters: `$1 = warehouse_id`
+```dhl
+query InventoryAgingReport(warehouse_id: Ref<std.commerce.logistics.warehouse>)
+    private
+    dhlq
+    std.commerce.inventory.sellable
+    | where warehouse_id == $1
+    | by designation
+    | agg count(), min(received_at), max(received_at)
+```
+
+#### ExpiryRiskReport(expiry_before, warehouse_id?)
+Parameters: `$1 = expiry_before`, `$2 = warehouse_id`
+```dhl
+query ExpiryRiskReport(expiry_before: Timestamp, warehouse_id: Ref<std.commerce.logistics.warehouse>)
+    private
+    dhlq
+    std.commerce.inventory.sellable
+    | where expiry_date <= $1, warehouse_id == $2
+    | sort expiry_date
+```
+
+#### StockMovementSummary(date_from, date_to, by=warehouse|supplier|designation)
+Parameters: `$1 = date_from`, `$2 = date_to`
+```dhl
+query StockMovementSummary(date_from: Timestamp, date_to: Timestamp)
+    private
+    dhlq
+    std.commerce.inventory.sellable
+    | where received_at between ($1,$2)
+    | by warehouse_id
+    | agg count(), sum(quantity_on_hand)
+```
+
+#### FillRatePotential(variant_id, qty)
+Parameters: `$1 = variant_id`, `$2 = qty`  
+Uses a projection table (variant availability summary).
+```dhl
+query FillRatePotential(variant_id: Ref<std.commerce.catalog.variant>, qty: Decimal(scale=6))
+    private
+    dhlq
+    std.commerce.catalog.variant_availability
+    | where variant_id == $1
+    | take 1
+```
+
+## Code
+
+### Types
+```dhl
+
+
+
+
+```
+
+### Aggregate state
+```dhl
+aggregate Sellable
+    state
+        public external_id: Text(len=64)?
+        public human_ref: Text(len=64)?
+        public sc: Text(len=64)?
+        public sellable_type: Enum(Physical) = 'Physical
+        public uom: Text(len=16)
+        public variant_id: Ref<std.commerce.catalog.variant>
+        public batch_id: Ref<std.commerce.inventory.batch>?
+        public physical_identity: Text(len=128)?
+        public lot_id: Text(len=64)?
+        public expiry_date: Timestamp?
+        public supplier_id: Ref<std.commerce.inventory.supplier>?
+        public warehouse_id: Ref<std.commerce.logistics.warehouse>?
+        public received_at: Timestamp?
+        public attributes: Map<Text(len=64), Text(len=256)>
+        public designation: Text(len=128)?
+        public aging_actual_months: Int?
+        public origin: Text(len=64)?
+        public format: Text(len=64)?
+        public temp_chain: Text(len=16)?
+        public allergens_declared: Bool = false
+        public allergens: List<Text(len=64)>
+        public quantity_on_hand: Decimal(scale=6)
+        public status: Enum(Available, Reserved, Picked, Shipped, Depleted, Archived) = 'Available
+```
+
+### Actions
+```dhl
+action Receive(
+    sc: Text(len=64),
+    variant_id: Ref<std.commerce.catalog.variant>,
+    uom: Text(len=16),
+    quantity_on_hand: Decimal(scale=6),
+    batch_id: Ref<std.commerce.inventory.batch>?,
+    physical_identity: Text(len=128)?,
+    lot_id: Text(len=64)?,
+    expiry_date: Timestamp?,
+    supplier_id: Ref<std.commerce.inventory.supplier>?,
+    warehouse_id: Ref<std.commerce.logistics.warehouse>?,
+    received_at: Timestamp?,
+    attributes: Map<Text(len=64), Text(len=256)>,
+    designation: Text(len=128)?,
+    aging_actual_months: Int?,
+    origin: Text(len=64)?,
+    format: Text(len=64)?,
+    temp_chain: Text(len=16)?,
+    allergens_declared: Bool,
+    allergens: List<Text(len=64)>,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.sc == null
+        quantity_on_hand >= 0
+    apply
+        state.sc = sc
+        state.uom = uom
+        state.variant_id = variant_id
+        state.quantity_on_hand = quantity_on_hand
+        state.batch_id = batch_id
+        state.physical_identity = physical_identity
+        state.lot_id = lot_id
+        state.expiry_date = expiry_date
+        state.supplier_id = supplier_id
+        state.warehouse_id = warehouse_id
+        state.received_at = received_at
+        state.attributes = attributes
+        state.designation = designation
+        state.aging_actual_months = aging_actual_months
+        state.origin = origin
+        state.format = format
+        state.temp_chain = temp_chain
+        state.allergens_declared = allergens_declared
+        state.allergens = allergens
+        state.allergens.normalize()
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.status = 'Available
+
+action AdjustQty(
+    qty_delta: Decimal(scale=6),
+    new_status: Enum(Available, Reserved, Picked, Shipped, Depleted, Archived)
+)
+    validate
+        state.status != 'Archived
+        new_status != 'Archived
+        state.quantity_on_hand + qty_delta >= 0
+        (
+            (state.quantity_on_hand + qty_delta == 0) && (new_status == 'Depleted)
+        ) || (
+            (state.quantity_on_hand + qty_delta > 0) && (new_status != 'Depleted)
+        )
+    apply
+        state.quantity_on_hand = state.quantity_on_hand + qty_delta
+        state.status = new_status
+
+action UpdateAttributes(attributes: Map<Text(len=64), Text(len=256)>)
+    validate
+        state.status != 'Archived
+    apply
+        state.attributes = attributes
+
+action UpdateAllergens(allergens_declared: Bool, allergens: List<Text(len=64)>)
+    validate
+        state.status != 'Archived
+    apply
+        state.allergens_declared = allergens_declared
+        state.allergens = allergens
+        state.allergens.normalize()
+
+action Archive()
+    validate
+        state.status != 'Archived
+    apply
+        state.status = 'Archived
+```

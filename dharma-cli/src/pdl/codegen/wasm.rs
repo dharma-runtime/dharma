@@ -6,7 +6,8 @@ use crate::pdl::schema::{
     CqrsSchema, TypeSpec, DEFAULT_TEXT_LEN,
 };
 use crate::pdl::typecheck;
-use std::collections::HashMap;
+use std::cell::Cell;
+use std::collections::{BTreeMap, HashMap};
 use wasm_encoder::{
     BlockType, CodeSection, DataSection, ExportKind, ExportSection, Function, FunctionSection,
     GlobalSection, GlobalType, ImportSection, Instruction, MemorySection, Module, TypeSection,
@@ -18,10 +19,12 @@ pub const OVERLAY_BASE: u32 = 0x1000;
 pub const ARGS_BASE: u32 = 0x2000;
 pub const CONTEXT_BASE: u32 = 0x3000;
 pub const LITERAL_BASE: u32 = 0x4000;
+pub const SCRATCH_BASE: u32 = 0x4800;
 pub const REACTOR_OUT_BASE: u32 = 0x4000;
 pub const REACTOR_PLAN_BASE: u32 = 0x5000;
 pub const STATE_SIZE: u32 = 0x1000;
 pub const ARGS_SIZE: u32 = 0x1000;
+const MAX_PATH_LEN: usize = 256;
 
 pub fn compile(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
     typecheck::check_ast(ast)?;
@@ -52,7 +55,7 @@ pub fn compile(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
             .actions
             .get(name)
             .ok_or_else(|| DharmaError::Validation("missing action".to_string()))?;
-        let layout = layout_action(action_schema);
+        let layout = layout_action(action_schema, &schema.structs);
         let total = layout.last().map(|f| f.offset + f.size).unwrap_or(4);
         if total > ARGS_SIZE as usize {
             return Err(DharmaError::Validation("args size exceeds 0x1000".to_string()));
@@ -63,16 +66,40 @@ pub fn compile(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
     let mut types = TypeSection::new();
     types.function([ValType::I32, ValType::I32, ValType::I32], [ValType::I32]);
     let has_role_type = 0u32;
+    types.function([ValType::I32, ValType::I32], [ValType::I64]);
+    let read_int_type = 1u32;
+    types.function([ValType::I32, ValType::I32], [ValType::I32]);
+    let read_bool_type = 2u32;
+    types.function([ValType::I32, ValType::I32, ValType::I32], [ValType::I32]);
+    let read_text_type = 3u32;
+    types.function([ValType::I32, ValType::I32, ValType::I32, ValType::I32, ValType::I32], [ValType::I32]);
+    let remote_intersects_type = 4u32;
     types.function([], [ValType::I32]);
-    let validate_type = 1u32;
+    let validate_type = 5u32;
     types.function([], [ValType::I32]);
-    let reduce_type = 2u32;
+    let reduce_type = 6u32;
 
     let mut module = Module::new();
     module.section(&types);
 
     let mut imports = ImportSection::new();
     imports.import("env", "has_role", wasm_encoder::EntityType::Function(has_role_type));
+    imports.import("env", "read_int", wasm_encoder::EntityType::Function(read_int_type));
+    imports.import("env", "read_bool", wasm_encoder::EntityType::Function(read_bool_type));
+    imports.import("env", "read_text", wasm_encoder::EntityType::Function(read_text_type));
+    imports.import("env", "read_identity", wasm_encoder::EntityType::Function(read_text_type));
+    imports.import("env", "read_subject_ref", wasm_encoder::EntityType::Function(read_text_type));
+    imports.import("env", "subject_id", wasm_encoder::EntityType::Function(read_bool_type));
+    imports.import(
+        "env",
+        "remote_intersects",
+        wasm_encoder::EntityType::Function(remote_intersects_type),
+    );
+    imports.import(
+        "env",
+        "normalize_text_list",
+        wasm_encoder::EntityType::Function(has_role_type),
+    );
     module.section(&imports);
 
     let mut functions = FunctionSection::new();
@@ -91,10 +118,22 @@ pub fn compile(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
 
     let mut exports = ExportSection::new();
     exports.export("memory", ExportKind::Memory, 0);
-    let import_count = 1u32;
+    let import_count = 9u32;
     exports.export("validate", ExportKind::Func, import_count);
     exports.export("reduce", ExportKind::Func, import_count + 1);
     module.section(&exports);
+
+    let host = HostFuncs {
+        has_role_func: Some(0),
+        read_int_func: Some(1),
+        read_bool_func: Some(2),
+        read_text_func: Some(3),
+        read_identity_func: Some(4),
+        read_subject_ref_func: Some(5),
+        subject_id_func: Some(6),
+        remote_intersects_func: Some(7),
+        normalize_text_list_func: Some(8),
+    };
 
     let mut code = CodeSection::new();
     let validate = compile_validate(
@@ -104,6 +143,9 @@ pub fn compile(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
         &private_layout,
         &action_layouts,
         &action_order,
+        host,
+        LITERAL_BASE,
+        SCRATCH_BASE,
     )?;
     code.function(&validate);
     let reduce = compile_reduce(
@@ -113,6 +155,9 @@ pub fn compile(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
         &private_layout,
         &action_layouts,
         &action_order,
+        host,
+        LITERAL_BASE,
+        SCRATCH_BASE,
     )?;
     code.function(&reduce);
     module.section(&code);
@@ -135,7 +180,7 @@ pub fn compile_reactor(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
             .actions
             .get(name)
             .ok_or_else(|| DharmaError::Validation("missing action".to_string()))?;
-        let layout = layout_action(action_schema);
+        let layout = layout_action(action_schema, &schema.structs);
         action_layouts.insert(name.clone(), layout);
         action_index.insert(name.clone(), idx as u32);
     }
@@ -161,7 +206,8 @@ pub fn compile_reactor(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
 
     let import_count = 1u32;
     let mut func_index = import_count;
-    let scratch_base = align_u32(REACTOR_PLAN_BASE + plan_bytes.len() as u32, 8);
+    let literal_base = align_u32(REACTOR_PLAN_BASE + plan_bytes.len() as u32, 8);
+    let scratch_base = align_u32(literal_base + 0x400, 8);
     let empty_layout: Vec<crate::pdl::schema::LayoutEntry> = Vec::new();
     for (r_idx, reactor) in ast.reactors.iter().enumerate() {
         let trigger_layout = if is_cron_trigger(reactor.trigger.as_deref()) {
@@ -178,7 +224,8 @@ pub fn compile_reactor(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
             &private_layout,
             trigger_layout,
             ARGS_BASE,
-            Some(0),
+            HostFuncs::has_role_only(Some(0)),
+            literal_base,
             scratch_base,
         );
 
@@ -371,7 +418,7 @@ fn compile_reactor_emit(
         if let Some(expr) = provided.remove(&entry.name) {
             compile_store_field(&field, expr, env, func)?;
         } else if matches!(field.typ, TypeSpec::Optional(_)) {
-            store_optional_null(&field, func)?;
+            store_optional_null(&field, &env._schema.structs, func)?;
         } else {
             return Err(DharmaError::Validation("missing emit arg".to_string()));
         }
@@ -393,7 +440,7 @@ fn compile_store_field(
 ) -> Result<(), DharmaError> {
     if let TypeSpec::Optional(inner) = &target.typ {
         if matches!(expr, Expr::Literal(Literal::Null)) {
-            return store_optional_null(target, func);
+            return store_optional_null(target, &env._schema.structs, func);
         }
         push_addr(func, target.base, target.offset);
         func.instruction(&Instruction::I32Const(1));
@@ -412,7 +459,11 @@ fn compile_store_field(
     compile_assignment_inner(target, expr, env, func)
 }
 
-fn store_optional_null(target: &FieldInfo, func: &mut Function) -> Result<(), DharmaError> {
+fn store_optional_null(
+    target: &FieldInfo,
+    structs: &BTreeMap<String, crate::pdl::schema::StructSchema>,
+    func: &mut Function,
+) -> Result<(), DharmaError> {
     let TypeSpec::Optional(inner) = &target.typ else {
         return Err(DharmaError::Validation("expected optional".to_string()));
     };
@@ -423,7 +474,7 @@ fn store_optional_null(target: &FieldInfo, func: &mut Function) -> Result<(), Dh
         align: 0,
         memory_index: 0,
     }));
-    let size = type_size(inner);
+    let size = type_size(inner, structs);
     zero_bytes(func, target.base, target.offset + 1, size as u32);
     Ok(())
 }
@@ -435,6 +486,9 @@ fn compile_validate(
     private_layout: &[crate::pdl::schema::LayoutEntry],
     action_layouts: &HashMap<String, Vec<crate::pdl::schema::LayoutEntry>>,
     action_order: &[String],
+    host: HostFuncs,
+    literal_base: u32,
+    scratch_base: u32,
 ) -> Result<Function, DharmaError> {
     let mut func = Function::new(vec![(4, ValType::I32), (2, ValType::I64)]);
     // load action id
@@ -457,8 +511,9 @@ fn compile_validate(
             private_layout,
             arg_layout,
             ARGS_BASE,
-            Some(0),
-            LITERAL_BASE,
+            host,
+            literal_base,
+            scratch_base,
         );
         func.instruction(&Instruction::LocalGet(0));
         func.instruction(&Instruction::I32Const(idx as i32));
@@ -490,6 +545,9 @@ fn compile_reduce(
     private_layout: &[crate::pdl::schema::LayoutEntry],
     action_layouts: &HashMap<String, Vec<crate::pdl::schema::LayoutEntry>>,
     action_order: &[String],
+    host: HostFuncs,
+    literal_base: u32,
+    scratch_base: u32,
 ) -> Result<Function, DharmaError> {
     let mut func = Function::new(vec![(4, ValType::I32), (2, ValType::I64)]);
     func.instruction(&Instruction::I32Const(ARGS_BASE as i32));
@@ -517,8 +575,9 @@ fn compile_reduce(
             private_layout,
             arg_layout,
             ARGS_BASE,
-            Some(0),
-            LITERAL_BASE,
+            host,
+            literal_base,
+            scratch_base,
         );
         func.instruction(&Instruction::LocalGet(0));
         func.instruction(&Instruction::I32Const(idx as i32));
@@ -553,13 +612,44 @@ fn find_action<'a>(ast: &'a AstFile, name: &str) -> Result<&'a ActionDef, Dharma
         .ok_or_else(|| DharmaError::Validation("action not found".to_string()))
 }
 
+#[derive(Clone, Copy, Debug)]
+struct HostFuncs {
+    has_role_func: Option<u32>,
+    read_int_func: Option<u32>,
+    read_bool_func: Option<u32>,
+    read_text_func: Option<u32>,
+    read_identity_func: Option<u32>,
+    read_subject_ref_func: Option<u32>,
+    subject_id_func: Option<u32>,
+    remote_intersects_func: Option<u32>,
+    normalize_text_list_func: Option<u32>,
+}
+
+impl HostFuncs {
+    fn has_role_only(func: Option<u32>) -> Self {
+        Self {
+            has_role_func: func,
+            read_int_func: None,
+            read_bool_func: None,
+            read_text_func: None,
+            read_identity_func: None,
+            read_subject_ref_func: None,
+            subject_id_func: None,
+            remote_intersects_func: None,
+            normalize_text_list_func: None,
+        }
+    }
+}
+
 struct Env<'a> {
     state: HashMap<String, FieldInfo>,
     args: HashMap<String, FieldInfo>,
     context: HashMap<String, FieldInfo>,
     _schema: &'a CqrsSchema,
-    has_role_func: Option<u32>,
+    host: HostFuncs,
     literal_base: u32,
+    scratch_base: u32,
+    scratch_cursor: Cell<u32>,
 }
 
 #[derive(Clone)]
@@ -576,39 +666,46 @@ impl<'a> Env<'a> {
         private_layout: &[crate::pdl::schema::LayoutEntry],
         args_layout: &[crate::pdl::schema::LayoutEntry],
         args_base: u32,
-        has_role_func: Option<u32>,
+        host: HostFuncs,
         literal_base: u32,
+        scratch_base: u32,
     ) -> Self {
         let mut state = HashMap::new();
         for entry in public_layout {
-            state.insert(
+            insert_field(
+                &mut state,
                 entry.name.clone(),
                 FieldInfo {
                     base: STATE_BASE,
                     offset: entry.offset as u32,
                     typ: entry.typ.clone(),
                 },
+                schema,
             );
         }
         for entry in private_layout {
-            state.insert(
+            insert_field(
+                &mut state,
                 entry.name.clone(),
                 FieldInfo {
                     base: OVERLAY_BASE,
                     offset: entry.offset as u32,
                     typ: entry.typ.clone(),
                 },
+                schema,
             );
         }
         let mut args = HashMap::new();
         for entry in args_layout {
-            args.insert(
+            insert_field(
+                &mut args,
                 entry.name.clone(),
                 FieldInfo {
                     base: args_base,
                     offset: entry.offset as u32,
                     typ: entry.typ.clone(),
                 },
+                schema,
             );
         }
         let mut context = HashMap::new();
@@ -628,14 +725,73 @@ impl<'a> Env<'a> {
                 typ: TypeSpec::Int,
             },
         );
+        context.insert(
+            "context.timestamp".to_string(),
+            FieldInfo {
+                base: CONTEXT_BASE,
+                offset: 32,
+                typ: TypeSpec::Int,
+            },
+        );
         Self {
             state,
             args,
             context,
             _schema: schema,
-            has_role_func,
+            host,
             literal_base,
+            scratch_base,
+            scratch_cursor: Cell::new(0),
         }
+    }
+
+    fn alloc_scratch(&self, size: u32) -> Result<u32, DharmaError> {
+        let cursor = self.scratch_cursor.get();
+        let next = cursor
+            .checked_add(size)
+            .ok_or_else(|| DharmaError::Validation("scratch overflow".to_string()))?;
+        let max = 0x1000u32;
+        if next > max {
+            return Err(DharmaError::Validation("scratch overflow".to_string()));
+        }
+        self.scratch_cursor.set(next);
+        Ok(self.scratch_base + cursor)
+    }
+}
+
+fn insert_field(
+    map: &mut HashMap<String, FieldInfo>,
+    name: String,
+    info: FieldInfo,
+    schema: &CqrsSchema,
+) {
+    map.insert(name.clone(), info.clone());
+    let mut offset = info.offset;
+    let mut typ = info.typ.clone();
+    if let TypeSpec::Optional(inner) = typ {
+        offset = offset.saturating_add(1);
+        typ = *inner;
+    }
+    let TypeSpec::Struct(struct_name) = typ else {
+        return;
+    };
+    let Some(def) = schema.structs.get(&struct_name) else {
+        return;
+    };
+    let mut cursor = 0u32;
+    for (field_name, field) in &def.fields {
+        let child = FieldInfo {
+            base: info.base,
+            offset: offset + cursor,
+            typ: field.typ.clone(),
+        };
+        insert_field(
+            map,
+            format!("{name}.{field_name}"),
+            child,
+            schema,
+        );
+        cursor += crate::pdl::schema::type_size(&field.typ, &schema.structs) as u32;
     }
 }
 
@@ -669,7 +825,9 @@ fn compile_expr(expr: &Expr, env: &Env<'_>, func: &mut Function) -> Result<ExprT
             Literal::Text(_) => Err(DharmaError::Validation("text unsupported in expression".to_string())),
             Literal::Enum(_) => Err(DharmaError::Validation("enum literal requires context".to_string())),
             Literal::Null => Err(DharmaError::Validation("null unsupported in expression".to_string())),
-            Literal::List(_) | Literal::Map(_) => Err(DharmaError::Validation("collection literal unsupported in expression".to_string())),
+            Literal::List(_) | Literal::Map(_) | Literal::Struct(_, _) => {
+                Err(DharmaError::Validation("collection literal unsupported in expression".to_string()))
+            }
         },
         Expr::Path(path) => compile_path_expr(path, env, func),
         Expr::UnaryOp(op, inner) => {
@@ -842,14 +1000,28 @@ fn compile_expr(expr: &Expr, env: &Env<'_>, func: &mut Function) -> Result<ExprT
             }
             Op::And | Op::Or => {
                 let left_type = compile_expr(left, env, func)?;
-                let right_type = compile_expr(right, env, func)?;
-                if left_type != ExprType::Bool || right_type != ExprType::Bool {
+                if left_type != ExprType::Bool {
                     return Err(DharmaError::Validation("expected bool".to_string()));
                 }
                 if *op == Op::And {
-                    func.instruction(&Instruction::I32And);
+                    func.instruction(&Instruction::I32Eqz);
+                    func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::Else);
+                    let right_type = compile_expr(right, env, func)?;
+                    if right_type != ExprType::Bool {
+                        return Err(DharmaError::Validation("expected bool".to_string()));
+                    }
+                    func.instruction(&Instruction::End);
                 } else {
-                    func.instruction(&Instruction::I32Or);
+                    func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::Else);
+                    let right_type = compile_expr(right, env, func)?;
+                    if right_type != ExprType::Bool {
+                        return Err(DharmaError::Validation("expected bool".to_string()));
+                    }
+                    func.instruction(&Instruction::End);
                 }
                 Ok(ExprType::Bool)
             }
@@ -914,6 +1086,8 @@ fn compile_expr(expr: &Expr, env: &Env<'_>, func: &mut Function) -> Result<ExprT
                 }));
                 Ok(ExprType::Int)
             }
+            "days_between" => compile_days_between_expr(args, env, func, false),
+            "days_until" => compile_days_between_expr(args, env, func, true),
             "distance" => {
                 if args.len() != 2 {
                     return Err(DharmaError::Validation("distance expects two args".to_string()));
@@ -926,9 +1100,58 @@ fn compile_expr(expr: &Expr, env: &Env<'_>, func: &mut Function) -> Result<ExprT
                 }
                 compile_sum_expr(&args[0], env, func)
             }
+            "read_int" => compile_read_int(args, env, func),
+            "read_bool" => compile_read_bool(args, env, func),
+            "read_text" => compile_read_text(args, env, func),
+            "read_identity" | "read_ref" => compile_read_identity(args, env, func),
+            "read_subject_ref" => compile_read_subject_ref(args, env, func),
+            "subject_id" => compile_subject_id(args, env, func),
+            "intersects" => compile_intersects(args, env, func),
+            "subset" => compile_subset(args, env, func),
+            "remote_intersects" => compile_remote_intersects(args, env, func),
             _ => Err(DharmaError::Validation("unknown function".to_string())),
         },
     }
+}
+
+fn compile_days_between_expr(
+    args: &[Expr],
+    env: &Env<'_>,
+    func: &mut Function,
+    swap: bool,
+) -> Result<ExprType, DharmaError> {
+    if args.len() != 2 {
+        return Err(DharmaError::Validation(
+            "days_between expects two args".to_string(),
+        ));
+    }
+    let (start, end) = if swap { (&args[1], &args[0]) } else { (&args[0], &args[1]) };
+    let end_type = compile_expr(end, env, func)?;
+    let start_type = compile_expr(start, env, func)?;
+    if end_type != ExprType::Int || start_type != ExprType::Int {
+        return Err(DharmaError::Validation(
+            "days_between expects numeric args".to_string(),
+        ));
+    }
+    // diff = end - start
+    func.instruction(&Instruction::I64Sub);
+    // floor divide by 86_400 (seconds per day)
+    func.instruction(&Instruction::LocalSet(4));
+    func.instruction(&Instruction::LocalGet(4));
+    func.instruction(&Instruction::I64Const(0));
+    func.instruction(&Instruction::I64GeS);
+    func.instruction(&Instruction::If(BlockType::Result(ValType::I64)));
+    func.instruction(&Instruction::LocalGet(4));
+    func.instruction(&Instruction::I64Const(86_400));
+    func.instruction(&Instruction::I64DivS);
+    func.instruction(&Instruction::Else);
+    func.instruction(&Instruction::LocalGet(4));
+    func.instruction(&Instruction::I64Const(86_399));
+    func.instruction(&Instruction::I64Sub);
+    func.instruction(&Instruction::I64Const(86_400));
+    func.instruction(&Instruction::I64DivS);
+    func.instruction(&Instruction::End);
+    Ok(ExprType::Int)
 }
 
 fn compile_has_role(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
@@ -937,7 +1160,7 @@ fn compile_has_role(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result
             "has_role expects two or three args".to_string(),
         ));
     }
-    let Some(has_role_func) = env.has_role_func else {
+    let Some(has_role_func) = env.host.has_role_func else {
         func.instruction(&Instruction::I32Const(1));
         return Ok(ExprType::Bool);
     };
@@ -992,6 +1215,140 @@ fn compile_has_role(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result
 
     func.instruction(&Instruction::Call(has_role_func));
     Ok(ExprType::Bool)
+}
+
+const ELEM_KIND_TEXT: i32 = 1;
+const ELEM_KIND_IDENTITY: i32 = 2;
+const ELEM_KIND_SUBJECT_REF: i32 = 3;
+
+fn compile_path_literal_arg(expr: &Expr, env: &Env<'_>, func: &mut Function) -> Result<u32, DharmaError> {
+    let text = match expr {
+        Expr::Literal(Literal::Text(text)) => text,
+        Expr::Literal(Literal::Enum(text)) => text,
+        _ => {
+            return Err(DharmaError::Validation(
+                "path must be literal".to_string(),
+            ))
+        }
+    };
+    if text.len() > MAX_PATH_LEN {
+        return Err(DharmaError::Validation("path literal too long".to_string()));
+    }
+    let bytes = text_bytes(text, MAX_PATH_LEN);
+    write_const_bytes(func, env.literal_base, &bytes);
+    func.instruction(&Instruction::I32Const(env.literal_base as i32));
+    Ok(env.literal_base)
+}
+
+fn compile_read_int(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
+    if args.len() != 2 {
+        return Err(DharmaError::Validation("read_int expects two args".to_string()));
+    }
+    let subject_type = compile_expr(&args[0], env, func)?;
+    if subject_type != ExprType::Bytes(40) {
+        return Err(DharmaError::Validation("read_int expects subject_ref".to_string()));
+    }
+    let _ = compile_path_literal_arg(&args[1], env, func)?;
+    let Some(read_int) = env.host.read_int_func else {
+        return Err(DharmaError::Validation("read_int unsupported".to_string()));
+    };
+    func.instruction(&Instruction::Call(read_int));
+    Ok(ExprType::Int)
+}
+
+fn compile_read_bool(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
+    if args.len() != 2 {
+        return Err(DharmaError::Validation("read_bool expects two args".to_string()));
+    }
+    let subject_type = compile_expr(&args[0], env, func)?;
+    if subject_type != ExprType::Bytes(40) {
+        return Err(DharmaError::Validation("read_bool expects subject_ref".to_string()));
+    }
+    let _ = compile_path_literal_arg(&args[1], env, func)?;
+    let Some(read_bool) = env.host.read_bool_func else {
+        return Err(DharmaError::Validation("read_bool unsupported".to_string()));
+    };
+    func.instruction(&Instruction::Call(read_bool));
+    Ok(ExprType::Bool)
+}
+
+fn compile_read_text(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
+    if args.len() != 2 {
+        return Err(DharmaError::Validation("read_text expects two args".to_string()));
+    }
+    let subject_type = compile_expr(&args[0], env, func)?;
+    if subject_type != ExprType::Bytes(40) {
+        return Err(DharmaError::Validation("read_text expects subject_ref".to_string()));
+    }
+    let _ = compile_path_literal_arg(&args[1], env, func)?;
+    let scratch = env.alloc_scratch((4 + DEFAULT_TEXT_LEN) as u32)?;
+    func.instruction(&Instruction::I32Const(scratch as i32));
+    let Some(read_text) = env.host.read_text_func else {
+        return Err(DharmaError::Validation("read_text unsupported".to_string()));
+    };
+    func.instruction(&Instruction::Call(read_text));
+    Ok(ExprType::Text(DEFAULT_TEXT_LEN))
+}
+
+fn compile_read_identity(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
+    if args.len() != 2 {
+        return Err(DharmaError::Validation("read_identity expects two args".to_string()));
+    }
+    let subject_type = compile_expr(&args[0], env, func)?;
+    if subject_type != ExprType::Bytes(40) {
+        return Err(DharmaError::Validation("read_identity expects subject_ref".to_string()));
+    }
+    let _ = compile_path_literal_arg(&args[1], env, func)?;
+    let scratch = env.alloc_scratch(32)?;
+    func.instruction(&Instruction::I32Const(scratch as i32));
+    let Some(read_identity) = env.host.read_identity_func else {
+        return Err(DharmaError::Validation("read_identity unsupported".to_string()));
+    };
+    func.instruction(&Instruction::Call(read_identity));
+    Ok(ExprType::Bytes(32))
+}
+
+fn compile_subject_id(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
+    if args.len() != 1 {
+        return Err(DharmaError::Validation("subject_id expects one arg".to_string()));
+    }
+    let subject_type = compile_expr(&args[0], env, func)?;
+    if subject_type != ExprType::Bytes(40) {
+        return Err(DharmaError::Validation("subject_id expects subject_ref".to_string()));
+    }
+    let scratch = env.alloc_scratch(32)?;
+    func.instruction(&Instruction::I32Const(scratch as i32));
+    let Some(subject_id) = env.host.subject_id_func else {
+        return Err(DharmaError::Validation("subject_id unsupported".to_string()));
+    };
+    func.instruction(&Instruction::Call(subject_id));
+    Ok(ExprType::Bytes(32))
+}
+
+fn compile_read_subject_ref(
+    args: &[Expr],
+    env: &Env<'_>,
+    func: &mut Function,
+) -> Result<ExprType, DharmaError> {
+    if args.len() != 2 {
+        return Err(DharmaError::Validation(
+            "read_subject_ref expects two args".to_string(),
+        ));
+    }
+    let subject_type = compile_expr(&args[0], env, func)?;
+    if subject_type != ExprType::Bytes(40) {
+        return Err(DharmaError::Validation(
+            "read_subject_ref expects subject_ref".to_string(),
+        ));
+    }
+    let _ = compile_path_literal_arg(&args[1], env, func)?;
+    let scratch = env.alloc_scratch(40)?;
+    func.instruction(&Instruction::I32Const(scratch as i32));
+    let Some(read_subject_ref) = env.host.read_subject_ref_func else {
+        return Err(DharmaError::Validation("read_subject_ref unsupported".to_string()));
+    };
+    func.instruction(&Instruction::Call(read_subject_ref));
+    Ok(ExprType::Bytes(40))
 }
 
 fn compile_path_expr(path: &[String], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
@@ -1052,6 +1409,12 @@ fn compile_path_expr(path: &[String], env: &Env<'_>, func: &mut Function) -> Res
             func.instruction(&Instruction::I32Add);
             Ok(ExprType::Bytes(32))
         }
+        TypeSpec::SubjectRef(_) => {
+            func.instruction(&Instruction::I32Const(info.base as i32));
+            func.instruction(&Instruction::I32Const(info.offset as i32));
+            func.instruction(&Instruction::I32Add);
+            Ok(ExprType::Bytes(40))
+        }
         TypeSpec::Ratio => {
             func.instruction(&Instruction::I32Const(info.base as i32));
             func.instruction(&Instruction::I32Const(info.offset as i32));
@@ -1064,6 +1427,7 @@ fn compile_path_expr(path: &[String], env: &Env<'_>, func: &mut Function) -> Res
             func.instruction(&Instruction::I32Add);
             Ok(ExprType::Bytes(8))
         }
+        TypeSpec::Struct(_) => Err(DharmaError::Validation("struct unsupported in expression".to_string())),
         TypeSpec::List(_) | TypeSpec::Map(_, _) => Err(DharmaError::Validation("collection unsupported in expression".to_string())),
         TypeSpec::Optional(_) => Err(DharmaError::Validation("optional unsupported in expression".to_string())),
     }
@@ -1184,7 +1548,7 @@ fn compile_sum_expr(expr: &Expr, env: &Env<'_>, func: &mut Function) -> Result<E
             let info = resolve_path_info(path, env)?;
             let info = unwrap_optional_info(info);
             match &info.typ {
-                TypeSpec::List(inner) => compile_sum_list(&info, inner, func),
+                TypeSpec::List(inner) => compile_sum_list(&info, inner, env, func),
                 _ => Err(DharmaError::Validation("sum expects list".to_string())),
             }
         }
@@ -1192,9 +1556,192 @@ fn compile_sum_expr(expr: &Expr, env: &Env<'_>, func: &mut Function) -> Result<E
     }
 }
 
+fn compile_intersects(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
+    if args.len() != 2 {
+        return Err(DharmaError::Validation("intersects expects two args".to_string()));
+    }
+    match (&args[0], &args[1]) {
+        (Expr::Literal(Literal::List(left)), Expr::Literal(Literal::List(right))) => {
+            let mut hit = false;
+            for l in left {
+                if let Some(lit_l) = expr_literal(l) {
+                    for r in right {
+                        if let Some(lit_r) = expr_literal(r) {
+                            if literal_eq(lit_l, lit_r) {
+                                hit = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if hit {
+                    break;
+                }
+            }
+            func.instruction(&Instruction::I32Const(if hit { 1 } else { 0 }));
+            Ok(ExprType::Bool)
+        }
+        (Expr::Literal(Literal::List(items)), Expr::Path(path))
+        | (Expr::Path(path), Expr::Literal(Literal::List(items))) => {
+            if items.is_empty() {
+                func.instruction(&Instruction::I32Const(0));
+                return Ok(ExprType::Bool);
+            }
+            let mut first = true;
+            for item in items {
+                compile_contains_path(path, item, env, func)?;
+                if first {
+                    first = false;
+                } else {
+                    func.instruction(&Instruction::I32Or);
+                }
+            }
+            Ok(ExprType::Bool)
+        }
+        (Expr::Path(left), Expr::Path(right)) => {
+            let left_info = unwrap_optional_info(resolve_path_info(left, env)?);
+            let right_info = unwrap_optional_info(resolve_path_info(right, env)?);
+            let TypeSpec::List(left_elem) = &left_info.typ else {
+                return Err(DharmaError::Validation("intersects expects list".to_string()));
+            };
+            let TypeSpec::List(right_elem) = &right_info.typ else {
+                return Err(DharmaError::Validation("intersects expects list".to_string()));
+            };
+            if left_elem.as_ref() != right_elem.as_ref() {
+                return Err(DharmaError::Validation("intersects list type mismatch".to_string()));
+            }
+            compile_list_intersects_paths(&left_info, &right_info, left_elem, env, func)
+        }
+        _ => Err(DharmaError::Validation("intersects expects lists".to_string())),
+    }
+}
+
+fn compile_subset(args: &[Expr], env: &Env<'_>, func: &mut Function) -> Result<ExprType, DharmaError> {
+    if args.len() != 2 {
+        return Err(DharmaError::Validation("subset expects two args".to_string()));
+    }
+    match (&args[0], &args[1]) {
+        (Expr::Literal(Literal::List(left)), Expr::Literal(Literal::List(right))) => {
+            let mut ok = true;
+            for l in left {
+                let mut found = false;
+                if let Some(lit_l) = expr_literal(l) {
+                    for r in right {
+                        if let Some(lit_r) = expr_literal(r) {
+                            if literal_eq(lit_l, lit_r) {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !found {
+                    ok = false;
+                    break;
+                }
+            }
+            func.instruction(&Instruction::I32Const(if ok { 1 } else { 0 }));
+            Ok(ExprType::Bool)
+        }
+        (Expr::Literal(Literal::List(items)), Expr::Path(path)) => {
+            if items.is_empty() {
+                func.instruction(&Instruction::I32Const(1));
+                return Ok(ExprType::Bool);
+            }
+            let mut first = true;
+            for item in items {
+                compile_contains_path(path, item, env, func)?;
+                if first {
+                    first = false;
+                } else {
+                    func.instruction(&Instruction::I32And);
+                }
+            }
+            Ok(ExprType::Bool)
+        }
+        (Expr::Path(path), Expr::Literal(Literal::List(items))) => {
+            let info = unwrap_optional_info(resolve_path_info(path, env)?);
+            let TypeSpec::List(elem_type) = &info.typ else {
+                return Err(DharmaError::Validation("subset expects list".to_string()));
+            };
+            compile_list_subset_path_literal(&info, elem_type, items, env, func)
+        }
+        (Expr::Path(left), Expr::Path(right)) => {
+            let left_info = unwrap_optional_info(resolve_path_info(left, env)?);
+            let right_info = unwrap_optional_info(resolve_path_info(right, env)?);
+            let TypeSpec::List(left_elem) = &left_info.typ else {
+                return Err(DharmaError::Validation("subset expects list".to_string()));
+            };
+            let TypeSpec::List(right_elem) = &right_info.typ else {
+                return Err(DharmaError::Validation("subset expects list".to_string()));
+            };
+            if left_elem.as_ref() != right_elem.as_ref() {
+                return Err(DharmaError::Validation("subset list type mismatch".to_string()));
+            }
+            compile_list_subset_paths(&left_info, &right_info, left_elem, env, func)
+        }
+        _ => Err(DharmaError::Validation("subset expects lists".to_string())),
+    }
+}
+
+fn compile_remote_intersects(
+    args: &[Expr],
+    env: &Env<'_>,
+    func: &mut Function,
+) -> Result<ExprType, DharmaError> {
+    if args.len() != 3 {
+        return Err(DharmaError::Validation(
+            "remote_intersects expects three args".to_string(),
+        ));
+    }
+    let subject_type = compile_expr(&args[0], env, func)?;
+    if subject_type != ExprType::Bytes(40) {
+        return Err(DharmaError::Validation(
+            "remote_intersects expects subject_ref".to_string(),
+        ));
+    }
+    let _ = compile_path_literal_arg(&args[1], env, func)?;
+    let Expr::Path(path) = &args[2] else {
+        return Err(DharmaError::Validation(
+            "remote_intersects expects list path".to_string(),
+        ));
+    };
+    let info = unwrap_optional_info(resolve_path_info(path, env)?);
+    let TypeSpec::List(elem) = &info.typ else {
+        return Err(DharmaError::Validation(
+            "remote_intersects expects list path".to_string(),
+        ));
+    };
+    let (kind, size) = remote_elem_kind(elem, env)?;
+    func.instruction(&Instruction::I32Const(info.base as i32));
+    func.instruction(&Instruction::I32Const(info.offset as i32));
+    func.instruction(&Instruction::I32Add);
+    func.instruction(&Instruction::I32Const(kind));
+    func.instruction(&Instruction::I32Const(size as i32));
+    let Some(remote_intersects) = env.host.remote_intersects_func else {
+        return Err(DharmaError::Validation(
+            "remote_intersects unsupported".to_string(),
+        ));
+    };
+    func.instruction(&Instruction::Call(remote_intersects));
+    Ok(ExprType::Bool)
+}
+
+fn remote_elem_kind(elem: &TypeSpec, env: &Env<'_>) -> Result<(i32, usize), DharmaError> {
+    match elem {
+        TypeSpec::Text(_) | TypeSpec::Currency => Ok((ELEM_KIND_TEXT, type_size(elem, &env._schema.structs))),
+        TypeSpec::Identity | TypeSpec::Ref(_) => Ok((ELEM_KIND_IDENTITY, 32)),
+        TypeSpec::SubjectRef(_) => Ok((ELEM_KIND_SUBJECT_REF, 40)),
+        _ => Err(DharmaError::Validation(
+            "remote_intersects expects list<text|identity|subject_ref>".to_string(),
+        )),
+    }
+}
+
 fn compile_sum_list(
     list_info: &FieldInfo,
     elem_type: &TypeSpec,
+    env: &Env<'_>,
     func: &mut Function,
 ) -> Result<ExprType, DharmaError> {
     if !matches!(
@@ -1203,7 +1750,7 @@ fn compile_sum_list(
     ) {
         return Err(DharmaError::Validation("sum expects list<int>".to_string()));
     }
-    let cap = list_capacity(elem_type);
+    let cap = list_capacity(elem_type, &env._schema.structs);
     func.instruction(&Instruction::I64Const(0));
     func.instruction(&Instruction::LocalSet(4));
     if cap == 0 {
@@ -1217,7 +1764,7 @@ fn compile_sum_list(
         func.instruction(&Instruction::I64LtU);
         func.instruction(&Instruction::If(BlockType::Empty));
         func.instruction(&Instruction::LocalGet(4));
-        emit_list_elem_load(list_info, elem_type, idx, func)?;
+        emit_list_elem_load(list_info, elem_type, idx, &env._schema.structs, func)?;
         func.instruction(&Instruction::I64Add);
         func.instruction(&Instruction::LocalSet(4));
         func.instruction(&Instruction::End);
@@ -1230,9 +1777,10 @@ fn emit_list_elem_load(
     list_info: &FieldInfo,
     elem_type: &TypeSpec,
     idx: usize,
+    structs: &BTreeMap<String, crate::pdl::schema::StructSchema>,
     func: &mut Function,
 ) -> Result<(), DharmaError> {
-    let elem_size = type_size(elem_type);
+    let elem_size = type_size(elem_type, structs);
     let elem_offset = list_info.offset as usize + 4 + idx * elem_size;
     push_addr(func, list_info.base, elem_offset as u32);
     func.instruction(&Instruction::I64Load(wasm_encoder::MemArg {
@@ -1314,7 +1862,7 @@ fn compile_list_contains(
     env: &Env<'_>,
     func: &mut Function,
 ) -> Result<ExprType, DharmaError> {
-    let cap = list_capacity(elem_type);
+    let cap = list_capacity(elem_type, &env._schema.structs);
     if cap == 0 {
         func.instruction(&Instruction::I32Const(0));
         return Ok(ExprType::Bool);
@@ -1336,6 +1884,138 @@ fn compile_list_contains(
     Ok(ExprType::Bool)
 }
 
+fn compile_list_intersects_paths(
+    left_info: &FieldInfo,
+    right_info: &FieldInfo,
+    elem_type: &TypeSpec,
+    env: &Env<'_>,
+    func: &mut Function,
+) -> Result<ExprType, DharmaError> {
+    let cap_left = list_capacity(elem_type, &env._schema.structs);
+    let cap_right = list_capacity(elem_type, &env._schema.structs);
+    if cap_left == 0 || cap_right == 0 {
+        func.instruction(&Instruction::I32Const(0));
+        return Ok(ExprType::Bool);
+    }
+    let mut first_outer = true;
+    for idx_left in 0..cap_left {
+        func.instruction(&Instruction::I32Const(idx_left as i32));
+        emit_len_load(left_info, func);
+        func.instruction(&Instruction::I32LtU);
+        func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        let mut first_inner = true;
+        for idx_right in 0..cap_right {
+            emit_idx_in_len(right_info, idx_right, func);
+            compile_list_elem_eq_offsets(left_info, right_info, idx_left, idx_right, elem_type, env, func)?;
+            func.instruction(&Instruction::I32And);
+            if first_inner {
+                first_inner = false;
+            } else {
+                func.instruction(&Instruction::I32Or);
+            }
+        }
+        if first_inner {
+            func.instruction(&Instruction::I32Const(0));
+        }
+        func.instruction(&Instruction::Else);
+        func.instruction(&Instruction::I32Const(0));
+        func.instruction(&Instruction::End);
+        if first_outer {
+            first_outer = false;
+        } else {
+            func.instruction(&Instruction::I32Or);
+        }
+    }
+    Ok(ExprType::Bool)
+}
+
+fn compile_list_subset_paths(
+    left_info: &FieldInfo,
+    right_info: &FieldInfo,
+    elem_type: &TypeSpec,
+    env: &Env<'_>,
+    func: &mut Function,
+) -> Result<ExprType, DharmaError> {
+    let cap_left = list_capacity(elem_type, &env._schema.structs);
+    let cap_right = list_capacity(elem_type, &env._schema.structs);
+    if cap_left == 0 {
+        func.instruction(&Instruction::I32Const(1));
+        return Ok(ExprType::Bool);
+    }
+    let mut first_outer = true;
+    for idx_left in 0..cap_left {
+        func.instruction(&Instruction::I32Const(idx_left as i32));
+        emit_len_load(left_info, func);
+        func.instruction(&Instruction::I32LtU);
+        func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        let mut first_inner = true;
+        for idx_right in 0..cap_right {
+            emit_idx_in_len(right_info, idx_right, func);
+            compile_list_elem_eq_offsets(left_info, right_info, idx_left, idx_right, elem_type, env, func)?;
+            func.instruction(&Instruction::I32And);
+            if first_inner {
+                first_inner = false;
+            } else {
+                func.instruction(&Instruction::I32Or);
+            }
+        }
+        if first_inner {
+            func.instruction(&Instruction::I32Const(0));
+        }
+        func.instruction(&Instruction::Else);
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::End);
+        if first_outer {
+            first_outer = false;
+        } else {
+            func.instruction(&Instruction::I32And);
+        }
+    }
+    Ok(ExprType::Bool)
+}
+
+fn compile_list_subset_path_literal(
+    list_info: &FieldInfo,
+    elem_type: &TypeSpec,
+    items: &[Expr],
+    env: &Env<'_>,
+    func: &mut Function,
+) -> Result<ExprType, DharmaError> {
+    let cap = list_capacity(elem_type, &env._schema.structs);
+    if cap == 0 {
+        func.instruction(&Instruction::I32Const(1));
+        return Ok(ExprType::Bool);
+    }
+    let mut first_outer = true;
+    for idx in 0..cap {
+        func.instruction(&Instruction::I32Const(idx as i32));
+        emit_len_load(list_info, func);
+        func.instruction(&Instruction::I32LtU);
+        func.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+        let mut first_inner = true;
+        for item in items {
+            compile_list_elem_eq(list_info, elem_type, idx, item, env, func)?;
+            if first_inner {
+                first_inner = false;
+            } else {
+                func.instruction(&Instruction::I32Or);
+            }
+        }
+        if first_inner {
+            func.instruction(&Instruction::I32Const(0));
+        }
+        func.instruction(&Instruction::Else);
+        func.instruction(&Instruction::I32Const(1));
+        func.instruction(&Instruction::End);
+        if first_outer {
+            first_outer = false;
+        } else {
+            func.instruction(&Instruction::I32And);
+        }
+    }
+    Ok(ExprType::Bool)
+}
+
 fn compile_map_contains(
     map_info: &FieldInfo,
     key_type: &TypeSpec,
@@ -1344,7 +2024,7 @@ fn compile_map_contains(
     env: &Env<'_>,
     func: &mut Function,
 ) -> Result<ExprType, DharmaError> {
-    let cap = map_capacity(key_type, value_type);
+    let cap = map_capacity(key_type, value_type, &env._schema.structs);
     if cap == 0 {
         func.instruction(&Instruction::I32Const(0));
         return Ok(ExprType::Bool);
@@ -1378,8 +2058,8 @@ fn compile_map_key_eq(
     env: &Env<'_>,
     func: &mut Function,
 ) -> Result<(), DharmaError> {
-    let key_size = type_size(key_type);
-    let entry_size = key_size + type_size(value_type);
+    let key_size = type_size(key_type, &env._schema.structs);
+    let entry_size = key_size + type_size(value_type, &env._schema.structs);
     let key_offset = map_info.offset as usize + 4 + idx * entry_size;
     match key_type {
         TypeSpec::Int | TypeSpec::Decimal(_) | TypeSpec::Duration | TypeSpec::Timestamp => {
@@ -1512,7 +2192,7 @@ fn compile_list_elem_eq(
     env: &Env<'_>,
     func: &mut Function,
 ) -> Result<(), DharmaError> {
-    let elem_size = type_size(elem_type);
+    let elem_size = type_size(elem_type, &env._schema.structs);
     let elem_offset = list_info.offset as usize + 4 + idx * elem_size;
     match elem_type {
         TypeSpec::Int | TypeSpec::Decimal(_) | TypeSpec::Duration | TypeSpec::Timestamp => {
@@ -1683,7 +2363,7 @@ fn compile_list_index(
     func: &mut Function,
 ) -> Result<ExprType, DharmaError> {
     compile_list_index_bounds(list_info, index_expr, env, func)?;
-    let elem_size = type_size(elem_type);
+    let elem_size = type_size(elem_type, &env._schema.structs);
     push_addr(func, list_info.base, (list_info.offset + 4) as u32);
     let typ = compile_expr(index_expr, env, func)?;
     if typ != ExprType::Int {
@@ -1722,12 +2402,142 @@ fn compile_list_index(
         TypeSpec::Text(len) => Ok(ExprType::Text(len.unwrap_or(DEFAULT_TEXT_LEN))),
         TypeSpec::Currency => Ok(ExprType::Text(DEFAULT_TEXT_LEN)),
         TypeSpec::Identity | TypeSpec::Ref(_) => Ok(ExprType::Bytes(32)),
+        TypeSpec::SubjectRef(_) => Ok(ExprType::Bytes(40)),
         TypeSpec::Ratio => Ok(ExprType::Bytes(16)),
         TypeSpec::GeoPoint => Ok(ExprType::Bytes(8)),
         _ => Err(DharmaError::Validation(
-            "index supports int/bool/enum/text/identity/ratio/geopoint lists".to_string(),
+            "index supports int/bool/enum/text/identity/subjectref/ratio/geopoint lists"
+                .to_string(),
         )),
     }
+}
+
+fn compile_list_elem_eq_offsets(
+    left_info: &FieldInfo,
+    right_info: &FieldInfo,
+    left_idx: usize,
+    right_idx: usize,
+    elem_type: &TypeSpec,
+    env: &Env<'_>,
+    func: &mut Function,
+) -> Result<(), DharmaError> {
+    let elem_size = type_size(elem_type, &env._schema.structs);
+    let left_offset = left_info.offset as usize + 4 + left_idx * elem_size;
+    let right_offset = right_info.offset as usize + 4 + right_idx * elem_size;
+    match elem_type {
+        TypeSpec::Int | TypeSpec::Decimal(_) | TypeSpec::Duration | TypeSpec::Timestamp => {
+            push_addr(func, left_info.base, left_offset as u32);
+            func.instruction(&Instruction::I64Load(wasm_encoder::MemArg {
+                offset: 0,
+                align: 3,
+                memory_index: 0,
+            }));
+            push_addr(func, right_info.base, right_offset as u32);
+            func.instruction(&Instruction::I64Load(wasm_encoder::MemArg {
+                offset: 0,
+                align: 3,
+                memory_index: 0,
+            }));
+            func.instruction(&Instruction::I64Eq);
+        }
+        TypeSpec::Enum(_) => {
+            push_addr(func, left_info.base, left_offset as u32);
+            func.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+            push_addr(func, right_info.base, right_offset as u32);
+            func.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+            func.instruction(&Instruction::I32Eq);
+        }
+        TypeSpec::Bool => {
+            push_addr(func, left_info.base, left_offset as u32);
+            func.instruction(&Instruction::I32Load8U(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+            push_addr(func, right_info.base, right_offset as u32);
+            func.instruction(&Instruction::I32Load8U(wasm_encoder::MemArg {
+                offset: 0,
+                align: 0,
+                memory_index: 0,
+            }));
+            func.instruction(&Instruction::I32Eq);
+        }
+        TypeSpec::Identity | TypeSpec::Ref(_) => {
+            compile_mem_eq(
+                func,
+                left_info.base,
+                left_offset as u32,
+                right_info.base,
+                right_offset as u32,
+                32,
+            );
+        }
+        TypeSpec::SubjectRef(_) => {
+            compile_mem_eq(
+                func,
+                left_info.base,
+                left_offset as u32,
+                right_info.base,
+                right_offset as u32,
+                40,
+            );
+        }
+        TypeSpec::GeoPoint => {
+            compile_mem_eq(
+                func,
+                left_info.base,
+                left_offset as u32,
+                right_info.base,
+                right_offset as u32,
+                8,
+            );
+        }
+        TypeSpec::Ratio => {
+            compile_mem_eq(
+                func,
+                left_info.base,
+                left_offset as u32,
+                right_info.base,
+                right_offset as u32,
+                16,
+            );
+        }
+        TypeSpec::Text(len) => {
+            let max = len.unwrap_or(DEFAULT_TEXT_LEN);
+            compile_mem_eq(
+                func,
+                left_info.base,
+                left_offset as u32,
+                right_info.base,
+                right_offset as u32,
+                4 + max,
+            );
+        }
+        TypeSpec::Currency => {
+            compile_mem_eq(
+                func,
+                left_info.base,
+                left_offset as u32,
+                right_info.base,
+                right_offset as u32,
+                4 + DEFAULT_TEXT_LEN,
+            );
+        }
+        _ => {
+            return Err(DharmaError::Validation(
+                "list element type unsupported".to_string(),
+            ))
+        }
+    }
+    Ok(())
 }
 
 fn compile_list_mutation(
@@ -1753,8 +2563,45 @@ fn compile_list_mutation(
             }
             compile_list_remove(list_info, elem_type, &args[1], env, func)
         }
+        "normalize" => {
+            if args.len() != 1 {
+                return Err(DharmaError::Validation(
+                    "list.normalize expects no args".to_string(),
+                ));
+            }
+            compile_list_normalize(list_info, elem_type, env, func)
+        }
         _ => Err(DharmaError::Validation("list assignment expects push/remove".to_string())),
     }
+}
+
+fn compile_list_normalize(
+    list_info: &FieldInfo,
+    elem_type: &TypeSpec,
+    env: &Env<'_>,
+    func: &mut Function,
+) -> Result<(), DharmaError> {
+    let max_len = match elem_type {
+        TypeSpec::Text(len) => len.unwrap_or(DEFAULT_TEXT_LEN),
+        TypeSpec::Currency => DEFAULT_TEXT_LEN,
+        _ => {
+            return Err(DharmaError::Validation(
+                "list.normalize supports text lists only".to_string(),
+            ))
+        }
+    };
+    let cap = list_capacity(elem_type, &env._schema.structs);
+    let Some(normalize) = env.host.normalize_text_list_func else {
+        return Err(DharmaError::Validation(
+            "list.normalize unsupported".to_string(),
+        ));
+    };
+    push_addr(func, list_info.base, list_info.offset);
+    func.instruction(&Instruction::I32Const(max_len as i32));
+    func.instruction(&Instruction::I32Const(cap as i32));
+    func.instruction(&Instruction::Call(normalize));
+    func.instruction(&Instruction::Drop);
+    Ok(())
 }
 
 fn compile_list_push(
@@ -1764,7 +2611,7 @@ fn compile_list_push(
     env: &Env<'_>,
     func: &mut Function,
 ) -> Result<(), DharmaError> {
-    let cap = list_capacity(elem_type);
+    let cap = list_capacity(elem_type, &env._schema.structs);
     if cap == 0 {
         func.instruction(&Instruction::Unreachable);
         return Ok(());
@@ -1778,7 +2625,7 @@ fn compile_list_push(
     func.instruction(&Instruction::End);
 
     // dest = base + offset + 4 + len * elem_size
-    let elem_size = type_size(elem_type);
+    let elem_size = type_size(elem_type, &env._schema.structs);
     push_addr(func, list_info.base, (list_info.offset + 4) as u32);
     emit_len_load(list_info, func);
     func.instruction(&Instruction::I32Const(elem_size as i32));
@@ -1806,7 +2653,7 @@ fn compile_list_remove(
     env: &Env<'_>,
     func: &mut Function,
 ) -> Result<(), DharmaError> {
-    let cap = list_capacity(elem_type);
+    let cap = list_capacity(elem_type, &env._schema.structs);
     if cap == 0 {
         return Ok(());
     }
@@ -1829,7 +2676,7 @@ fn compile_list_remove_branch(
     compile_list_elem_eq(list_info, elem_type, idx, item_expr, env, func)?;
     func.instruction(&Instruction::I32And);
     func.instruction(&Instruction::If(BlockType::Empty));
-    emit_list_remove_at_idx(list_info, elem_type, idx, func)?;
+    emit_list_remove_at_idx(list_info, elem_type, idx, &env._schema.structs, func)?;
     func.instruction(&Instruction::Else);
     compile_list_remove_branch(idx + 1, cap, list_info, elem_type, item_expr, env, func)?;
     func.instruction(&Instruction::End);
@@ -1840,10 +2687,11 @@ fn emit_list_remove_at_idx(
     list_info: &FieldInfo,
     elem_type: &TypeSpec,
     idx: usize,
+    structs: &BTreeMap<String, crate::pdl::schema::StructSchema>,
     func: &mut Function,
 ) -> Result<(), DharmaError> {
-    let elem_size = type_size(elem_type);
-    let cap = list_capacity(elem_type);
+    let elem_size = type_size(elem_type, structs);
+    let cap = list_capacity(elem_type, structs);
     for shift_idx in idx..cap.saturating_sub(1) {
         func.instruction(&Instruction::I32Const((shift_idx + 1) as i32));
         emit_len_load(list_info, func);
@@ -1879,7 +2727,7 @@ fn compile_map_index(
     env: &Env<'_>,
     func: &mut Function,
 ) -> Result<ExprType, DharmaError> {
-    let cap = map_capacity(key_type, value_type);
+    let cap = map_capacity(key_type, value_type, &env._schema.structs);
     let (expr_type, wasm_type) = match value_type {
         TypeSpec::Int | TypeSpec::Decimal(_) | TypeSpec::Duration | TypeSpec::Timestamp => {
             (ExprType::Int, ValType::I64)
@@ -1887,6 +2735,7 @@ fn compile_map_index(
         TypeSpec::Enum(_) => (ExprType::Int, ValType::I64),
         TypeSpec::Bool => (ExprType::Bool, ValType::I32),
         TypeSpec::Identity | TypeSpec::Ref(_) => (ExprType::Bytes(32), ValType::I32),
+        TypeSpec::SubjectRef(_) => (ExprType::Bytes(40), ValType::I32),
         TypeSpec::Ratio => (ExprType::Bytes(16), ValType::I32),
         TypeSpec::GeoPoint => (ExprType::Bytes(8), ValType::I32),
         TypeSpec::Text(len) => (ExprType::Text(len.unwrap_or(DEFAULT_TEXT_LEN)), ValType::I32),
@@ -1942,7 +2791,7 @@ fn compile_map_set(
     env: &Env<'_>,
     func: &mut Function,
 ) -> Result<(), DharmaError> {
-    let cap = map_capacity(key_type, value_type);
+    let cap = map_capacity(key_type, value_type, &env._schema.structs);
     if cap == 0 {
         func.instruction(&Instruction::Unreachable);
         return Ok(());
@@ -2004,8 +2853,8 @@ fn emit_map_store_value_at_idx(
     env: &Env<'_>,
     func: &mut Function,
 ) -> Result<(), DharmaError> {
-    let key_size = type_size(key_type);
-    let val_size = type_size(value_type);
+    let key_size = type_size(key_type, &env._schema.structs);
+    let val_size = type_size(value_type, &env._schema.structs);
     let entry_size = key_size + val_size;
     let val_offset = map_info.offset as usize + 4 + idx * entry_size + key_size;
     push_addr(func, map_info.base, val_offset as u32);
@@ -2021,9 +2870,9 @@ fn emit_map_append(
     env: &Env<'_>,
     func: &mut Function,
 ) -> Result<(), DharmaError> {
-    let cap = map_capacity(key_type, value_type);
-    let key_size = type_size(key_type);
-    let val_size = type_size(value_type);
+    let cap = map_capacity(key_type, value_type, &env._schema.structs);
+    let key_size = type_size(key_type, &env._schema.structs);
+    let val_size = type_size(value_type, &env._schema.structs);
     let entry_size = key_size + val_size;
     // if len >= cap -> trap
     emit_len_load(map_info, func);
@@ -2083,7 +2932,7 @@ fn compile_map_index_branch(
     compile_map_key_eq(map_info, key_type, value_type, key_expr, idx, env, func)?;
     func.instruction(&Instruction::I32And);
     func.instruction(&Instruction::If(BlockType::Result(wasm_type)));
-    emit_map_value(map_info, key_type, value_type, idx, func)?;
+    emit_map_value(map_info, key_type, value_type, idx, &env._schema.structs, func)?;
     func.instruction(&Instruction::Else);
     compile_map_index_branch(
         idx + 1,
@@ -2105,16 +2954,18 @@ fn emit_map_value(
     key_type: &TypeSpec,
     value_type: &TypeSpec,
     idx: usize,
+    structs: &BTreeMap<String, crate::pdl::schema::StructSchema>,
     func: &mut Function,
 ) -> Result<ExprType, DharmaError> {
-    let key_size = type_size(key_type);
-    let val_size = type_size(value_type);
+    let key_size = type_size(key_type, structs);
+    let val_size = type_size(value_type, structs);
     let entry_size = key_size + val_size;
     let val_offset = map_info.offset as usize + 4 + idx * entry_size + key_size;
     if matches!(
         value_type,
         TypeSpec::Identity
             | TypeSpec::Ref(_)
+            | TypeSpec::SubjectRef(_)
             | TypeSpec::Ratio
             | TypeSpec::GeoPoint
             | TypeSpec::Text(_)
@@ -2125,6 +2976,7 @@ fn emit_map_value(
         func.instruction(&Instruction::I32Add);
         return Ok(match value_type {
             TypeSpec::Identity | TypeSpec::Ref(_) => ExprType::Bytes(32),
+            TypeSpec::SubjectRef(_) => ExprType::Bytes(40),
             TypeSpec::Ratio => ExprType::Bytes(16),
             TypeSpec::GeoPoint => ExprType::Bytes(8),
             TypeSpec::Text(len) => ExprType::Text(len.unwrap_or(DEFAULT_TEXT_LEN)),
@@ -2686,6 +3538,20 @@ fn emit_store_value_at_ptr(
             func.instruction(&Instruction::I32Const(32));
             func.instruction(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
         }
+        TypeSpec::SubjectRef(_) => {
+            let Expr::Path(path) = expr else {
+                return Err(DharmaError::Validation("expected subject ref path".to_string()));
+            };
+            let info = resolve_path_info(path, env)?;
+            if !matches!(info.typ, TypeSpec::SubjectRef(_)) {
+                return Err(DharmaError::Validation("expected subject ref path".to_string()));
+            }
+            let info = unwrap_optional_info(info);
+            func.instruction(&Instruction::LocalGet(1));
+            push_addr(func, info.base, info.offset);
+            func.instruction(&Instruction::I32Const(40));
+            func.instruction(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+        }
         TypeSpec::Ratio => {
             let Expr::Path(path) = expr else {
                 return Err(DharmaError::Validation("expected ratio path".to_string()));
@@ -2774,6 +3640,121 @@ fn emit_store_value_at_ptr(
                 _ => {
                     return Err(DharmaError::Validation("expected text literal or path".to_string()));
                 }
+            }
+        }
+        TypeSpec::Optional(inner) => {
+            match expr {
+                Expr::Literal(Literal::Null) => {
+                    func.instruction(&Instruction::LocalGet(1));
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::I32Store8(wasm_encoder::MemArg {
+                        offset: 0,
+                        align: 0,
+                        memory_index: 0,
+                    }));
+                    let size = type_size(inner, &env._schema.structs);
+                    func.instruction(&Instruction::LocalGet(1));
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::I32Add);
+                    func.instruction(&Instruction::I32Const(0));
+                    func.instruction(&Instruction::I32Const(size as i32));
+                    func.instruction(&Instruction::MemoryFill(0));
+                }
+                _ => {
+                    func.instruction(&Instruction::LocalGet(1));
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::I32Store8(wasm_encoder::MemArg {
+                        offset: 0,
+                        align: 0,
+                        memory_index: 0,
+                    }));
+                    func.instruction(&Instruction::LocalGet(1));
+                    func.instruction(&Instruction::I32Const(1));
+                    func.instruction(&Instruction::I32Add);
+                    emit_store_value_at_ptr(inner, expr, env, func)?;
+                }
+            }
+        }
+        TypeSpec::Struct(name) => {
+            let mut values = BTreeMap::new();
+            match expr {
+                Expr::Literal(Literal::Map(entries)) => {
+                    for (k, v) in entries {
+                        let Expr::Literal(Literal::Text(key)) = k else {
+                            return Err(DharmaError::Validation("struct field name must be text".to_string()));
+                        };
+                        values.insert(key.clone(), v.clone());
+                    }
+                }
+                Expr::Literal(Literal::Struct(lit_name, entries)) => {
+                    if lit_name != name {
+                        return Err(DharmaError::Validation("struct literal type mismatch".to_string()));
+                    }
+                    for (k, v) in entries {
+                        values.insert(k.clone(), v.clone());
+                    }
+                }
+                Expr::Path(path) => {
+                    let info = resolve_path_info(path, env)?;
+                    let info = unwrap_optional_info(info);
+                    if !matches!(info.typ, TypeSpec::Struct(_)) {
+                        return Err(DharmaError::Validation("expected struct path".to_string()));
+                    }
+                    func.instruction(&Instruction::LocalGet(1));
+                    push_addr(func, info.base, info.offset);
+                    let size = type_size(typ, &env._schema.structs);
+                    func.instruction(&Instruction::I32Const(size as i32));
+                    func.instruction(&Instruction::MemoryCopy { src_mem: 0, dst_mem: 0 });
+                    return Ok(());
+                }
+                _ => {
+                    return Err(DharmaError::Validation("expected struct literal or path".to_string()));
+                }
+            }
+            let Some(def) = env._schema.structs.get(name) else {
+                return Err(DharmaError::Validation("unknown struct".to_string()));
+            };
+            let base_slot = env.alloc_scratch(4)?;
+            func.instruction(&Instruction::I32Const(base_slot as i32));
+            func.instruction(&Instruction::LocalGet(1));
+            func.instruction(&Instruction::I32Store(wasm_encoder::MemArg {
+                offset: 0,
+                align: 2,
+                memory_index: 0,
+            }));
+            let mut cursor = 0usize;
+            for (field_name, field) in &def.fields {
+                let field_expr = match values.get(field_name) {
+                    Some(expr) => expr,
+                    None => {
+                        if matches!(field.typ, TypeSpec::Optional(_)) {
+                            func.instruction(&Instruction::I32Const(base_slot as i32));
+                            func.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                                offset: 0,
+                                align: 2,
+                                memory_index: 0,
+                            }));
+                            func.instruction(&Instruction::I32Const(cursor as i32));
+                            func.instruction(&Instruction::I32Add);
+                            emit_store_value_at_ptr(&field.typ, &Expr::Literal(Literal::Null), env, func)?;
+                            cursor += type_size(&field.typ, &env._schema.structs);
+                            continue;
+                        }
+                        return Err(DharmaError::Validation(format!(
+                            "missing struct field '{}'", field_name
+                        )));
+                    }
+                };
+                func.instruction(&Instruction::I32Const(base_slot as i32));
+                func.instruction(&Instruction::I32Load(wasm_encoder::MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                func.instruction(&Instruction::I32Const(cursor as i32));
+                func.instruction(&Instruction::I32Add);
+                emit_store_value_at_ptr(&field.typ, field_expr, env, func)?;
+                cursor += type_size(&field.typ, &env._schema.structs);
             }
         }
         _ => return Err(DharmaError::Validation("collection value unsupported".to_string())),
@@ -3045,18 +4026,28 @@ fn resolve_path_info<'a>(
         let name = path
             .get(1)
             .ok_or_else(|| DharmaError::Validation("invalid state path".to_string()))?;
+        let key = if path.len() > 2 {
+            path[1..].join(".")
+        } else {
+            name.clone()
+        };
         return env
             .state
-            .get(name)
+            .get(&key)
             .ok_or_else(|| DharmaError::Validation("unknown state field".to_string()));
     }
     if path[0] == "args" {
         let name = path
             .get(1)
             .ok_or_else(|| DharmaError::Validation("invalid args path".to_string()))?;
+        let key = if path.len() > 2 {
+            path[1..].join(".")
+        } else {
+            name.clone()
+        };
         return env
             .args
-            .get(name)
+            .get(&key)
             .ok_or_else(|| DharmaError::Validation(format!("unknown arg '{}'", name)));
     }
     if path[0] == "context" {
@@ -3066,8 +4057,13 @@ fn resolve_path_info<'a>(
             .get(&key)
             .ok_or_else(|| DharmaError::Validation("unknown context".to_string()));
     }
+    let key = if path.len() > 1 {
+        path.join(".")
+    } else {
+        path[0].clone()
+    };
     env.args
-        .get(&path[0])
+        .get(&key)
         .ok_or_else(|| DharmaError::Validation(format!("unknown arg '{}'", path[0])))
 }
 
@@ -3241,7 +4237,7 @@ fn compile_null_eq(
             func.instruction(&Instruction::I32Eq);
             func.instruction(&Instruction::I32And);
         }
-        TypeSpec::List(_) | TypeSpec::Map(_, _) => {
+        TypeSpec::List(_) | TypeSpec::Map(_, _) | TypeSpec::SubjectRef(_) | TypeSpec::Struct(_) => {
             return Err(DharmaError::Validation("null comparison unsupported".to_string()));
         }
         TypeSpec::Optional(_) => {
@@ -3285,9 +4281,29 @@ fn compile_assignment(
                 align: 0,
                 memory_index: 0,
             }));
-            let size = type_size(inner);
+            let size = type_size(inner, &env._schema.structs);
             zero_bytes(func, target_info.base, target_info.offset + 1, size as u32);
             return Ok(());
+        }
+        if let Expr::Path(path) = expr {
+            let source = resolve_path_info(path, env)?;
+            if let TypeSpec::Optional(source_inner) = &source.typ {
+                if **source_inner != **inner {
+                    return Err(DharmaError::Validation(
+                        "optional assignment type mismatch".to_string(),
+                    ));
+                }
+                let size = 1 + type_size(inner, &env._schema.structs);
+                copy_bytes(
+                    func,
+                    source.base,
+                    source.offset,
+                    target_info.base,
+                    target_info.offset,
+                    size,
+                )?;
+                return Ok(());
+            }
         }
         push_addr(func, target_info.base, target_info.offset);
         func.instruction(&Instruction::I32Const(1));
@@ -3379,6 +4395,28 @@ fn compile_assignment_inner(
                 return Err(DharmaError::Validation("expected identity assignment".to_string()));
             }
         }
+        TypeSpec::SubjectRef(_) => {
+            if let Expr::Path(path) = expr {
+                let source = resolve_path_info(path, env)?;
+                if !matches!(source.typ, TypeSpec::SubjectRef(_)) {
+                    return Err(DharmaError::Validation(
+                        "expected subject_ref source".to_string(),
+                    ));
+                }
+                copy_bytes(
+                    func,
+                    source.base,
+                    source.offset,
+                    target_info.base,
+                    target_info.offset,
+                    40,
+                )?;
+            } else {
+                return Err(DharmaError::Validation(
+                    "expected subject_ref assignment".to_string(),
+                ));
+            }
+        }
         TypeSpec::Ratio => {
             if let Expr::Path(path) = expr {
                 let source = resolve_path_info(path, env)?;
@@ -3424,13 +4462,50 @@ fn compile_assignment_inner(
             }
         }
         TypeSpec::List(inner) => {
+            if let Expr::Path(path) = expr {
+                let source = resolve_path_info(path, env)?;
+                if !matches!(source.typ, TypeSpec::List(_)) {
+                    return Err(DharmaError::Validation("expected list source".to_string()));
+                }
+                let size = type_size(&target_info.typ, &env._schema.structs);
+                copy_bytes(
+                    func,
+                    source.base,
+                    source.offset,
+                    target_info.base,
+                    target_info.offset,
+                    size,
+                )?;
+                return Ok(());
+            }
             return compile_list_mutation(target_info, &inner, expr, env, func);
         }
         TypeSpec::Map(key, val) => {
+            if let Expr::Path(path) = expr {
+                let source = resolve_path_info(path, env)?;
+                if !matches!(source.typ, TypeSpec::Map(_, _)) {
+                    return Err(DharmaError::Validation("expected map source".to_string()));
+                }
+                let size = type_size(&target_info.typ, &env._schema.structs);
+                copy_bytes(
+                    func,
+                    source.base,
+                    source.offset,
+                    target_info.base,
+                    target_info.offset,
+                    size,
+                )?;
+                return Ok(());
+            }
             return compile_map_mutation(target_info, &key, &val, expr, env, func);
         }
         TypeSpec::Optional(_) => {
             return Err(DharmaError::Validation("optional assignment unsupported".to_string()));
+        }
+        TypeSpec::Struct(_) => {
+            push_addr(func, target_info.base, target_info.offset);
+            emit_store_value_at_ptr(&target_info.typ, expr, env, func)?;
+            return Ok(());
         }
     }
     Ok(())
@@ -3481,6 +4556,64 @@ mod tests {
                 "env",
                 "has_role",
                 |_caller: Caller<'_, ()>, _subject: i32, _identity: i32, _role: i32| -> i32 { 0 },
+            )
+            .unwrap();
+        linker
+            .func_wrap("env", "read_int", |_caller: Caller<'_, ()>, _sub: i32, _path: i32| -> i64 {
+                0
+            })
+            .unwrap();
+        linker
+            .func_wrap("env", "read_bool", |_caller: Caller<'_, ()>, _sub: i32, _path: i32| -> i32 {
+                0
+            })
+            .unwrap();
+        linker
+            .func_wrap(
+                "env",
+                "read_text",
+                |_caller: Caller<'_, ()>, _sub: i32, _path: i32, out: i32| -> i32 { out },
+            )
+            .unwrap();
+        linker
+            .func_wrap(
+                "env",
+                "read_identity",
+                |_caller: Caller<'_, ()>, _sub: i32, _path: i32, out: i32| -> i32 { out },
+            )
+            .unwrap();
+        linker
+            .func_wrap(
+                "env",
+                "read_subject_ref",
+                |_caller: Caller<'_, ()>, _sub: i32, _path: i32, out: i32| -> i32 { out },
+            )
+            .unwrap();
+        linker
+            .func_wrap(
+                "env",
+                "subject_id",
+                |_caller: Caller<'_, ()>, _sub: i32, out: i32| -> i32 { out },
+            )
+            .unwrap();
+        linker
+            .func_wrap(
+                "env",
+                "remote_intersects",
+                |_caller: Caller<'_, ()>,
+                 _sub: i32,
+                 _path: i32,
+                 _list: i32,
+                 _kind: i32,
+                 _size: i32|
+                 -> i32 { 0 },
+            )
+            .unwrap();
+        linker
+            .func_wrap(
+                "env",
+                "normalize_text_list",
+                |_caller: Caller<'_, ()>, _ptr: i32, _max: i32, _cap: i32| -> i32 { 0 },
             )
             .unwrap();
         linker
@@ -4330,7 +5463,7 @@ action Calc()
         let memory = instance.get_memory(&store, "memory").unwrap();
 
         let list_type = TypeSpec::List(Box::new(TypeSpec::Int));
-        let list_size = type_size(&list_type);
+        let list_size = type_size(&list_type, &BTreeMap::new());
         memory
             .write(&mut store, 0, &3u32.to_le_bytes())
             .unwrap();

@@ -1,0 +1,99 @@
+---
+namespace: std.commerce.availability.reservation_summary
+version: 1.0.0
+---
+
+# Commerce Availability Reservation Summary (Projection)
+
+Aggregates reservation ledger entries into a per‑item, per‑warehouse total.
+This projection is **derived** and can be rebuilt at any time.
+
+## Access control
+Only projection writers may update this subject.
+
+```dhl
+external
+    roles: [projection.writer]
+```
+
+## Code
+
+```dhl
+aggregate ReservationSummary
+    state
+        public item_id: Ref<std.commerce.catalog.item>
+        public warehouse_id: Ref<std.commerce.logistics.warehouse>
+        public reserved_qty: Decimal(scale=6)
+        public as_of: Timestamp?
+
+action Upsert(
+    item_id: Ref<std.commerce.catalog.item>,
+    warehouse_id: Ref<std.commerce.logistics.warehouse>,
+    reserved_qty: Decimal(scale=6),
+    as_of: Timestamp?
+)
+    validate
+        has_role(context.signer, "projection.writer")
+        reserved_qty >= 0
+    apply
+        state.item_id = item_id
+        state.warehouse_id = warehouse_id
+        state.reserved_qty = reserved_qty
+        state.as_of = as_of
+
+action Deactivate()
+    validate
+        has_role(context.signer, "projection.writer")
+    apply
+        state.reserved_qty = 0
+        state.as_of = context.timestamp
+```
+
+## Projections
+
+```dhl
+projection ReservationSummarySeedByBatch
+    trigger std.commerce.inventory.batch.CreateBatch
+    trigger std.commerce.inventory.batch.MarkInTransit
+    trigger std.commerce.inventory.batch.ReceiveBatch
+    trigger std.commerce.inventory.batch.ReleaseQuarantine
+    trigger std.commerce.inventory.batch.CancelBatch
+    scope item_id = state.item_id
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.inventory.batch
+        | sel item_id, warehouse_id
+        | by item_id, warehouse_id
+        | agg count() as batch_count
+    emit upsert std.commerce.availability.reservation_summary
+        id = proj_id(item_id, warehouse_id)
+        item_id = item_id
+        warehouse_id = warehouse_id
+        reserved_qty = 0
+        as_of = null
+    prune
+        by (item_id, warehouse_id)
+
+projection ReservationSummaryByLedger
+    trigger std.commerce.inventory.ledger.Record
+    trigger std.commerce.inventory.ledger.Upsert
+    scope item_id = state.item_id
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.inventory.ledger
+        | where entry_type == 'ReserveHold, entry_type == 'ReserveFinal, entry_type == 'Release, entry_type == 'ExpireHold
+        | by item_id, warehouse_id
+        | agg sum(qty) as reserved_qty
+    emit upsert std.commerce.availability.reservation_summary
+        id = proj_id(item_id, warehouse_id)
+        item_id = item_id
+        warehouse_id = warehouse_id
+        reserved_qty = reserved_qty
+        as_of = null
+    prune
+        by (item_id, warehouse_id)
+```

@@ -1,0 +1,255 @@
+---
+namespace: std.commerce.logistics.batch
+version: 1.1.0
+---
+
+# Commerce Logistics Batch (Grouping Layer)
+
+Logistics batches are **planning and grouping containers** for execution.
+
+## Business meaning
+- Batches group fulfillment across lines and dates.
+- They are **not** the source of truth for contract execution (the line is).
+
+## Rules
+- Address is editable until `InTransit`.
+- Attachments are line-scoped planning intent.
+- Dispatch sets `dispatched_at` for downstream time validation.
+
+## Queries
+
+### Public queries
+#### ListMyDeliveries(po_id)
+Parameters: `$1 = po_id`
+```dhl
+query ListMyDeliveries(po_id: Ref<std.commerce.order.po>)
+    public
+    dhlq
+    std.commerce.logistics.batch_line
+    | where po_id == $1
+    | lj std.commerce.logistics.batch on batch_id=std.commerce.logistics.batch.subject
+    | sort -scheduled_for
+```
+
+#### GetMyDelivery(batch_id)
+Parameters: `$1 = batch_id`
+```dhl
+query GetMyDelivery(batch_id: Ref<std.commerce.logistics.batch>)
+    public
+    dhlq
+    std.commerce.logistics.batch
+    | where subject == $1
+    | take 1
+```
+
+#### SearchMyDeliveries(date_range, status?, page)
+Parameters: `$1 = date_from`, `$2 = date_to`, `$3 = status`, `$4 = offset`, `$5 = limit`
+```dhl
+query SearchMyDeliveries(
+    date_from: Timestamp,
+    date_to: Timestamp,
+    status: Enum(Planning, Scheduled, InTransit, Delivered, Cancelled),
+    offset: Int,
+    limit: Int
+)
+    public
+    dhlq
+    std.commerce.logistics.batch
+    | where scheduled_for between ($1,$2), batch_state == $3
+    | sort -scheduled_for
+    | drop $4
+    | take $5
+```
+
+### Private queries
+#### GetBatch(batch_id)
+Parameters: `$1 = batch_id`
+```dhl
+query GetBatch(batch_id: Ref<std.commerce.logistics.batch>)
+    private
+    dhlq
+    std.commerce.logistics.batch
+    | where subject == $1
+    | take 1
+```
+
+#### ListBatches(date_range, state?, type?, page)
+Parameters: `$1 = date_from`, `$2 = date_to`, `$3 = state`, `$4 = type`, `$5 = offset`, `$6 = limit`
+```dhl
+query ListBatches(
+    date_from: Timestamp,
+    date_to: Timestamp,
+    state: Enum(Planning, Scheduled, InTransit, Delivered, Cancelled),
+    type: Enum(Delivery, Shipment, Pickup, SupplierDelivery),
+    offset: Int,
+    limit: Int
+)
+    private
+    dhlq
+    std.commerce.logistics.batch
+    | where scheduled_for between ($1,$2), batch_state == $3, batch_type == $4
+    | sort -scheduled_for
+    | drop $5
+    | take $6
+```
+
+#### SearchBatches(q, date_range?, state?, carrier?, warehouse?, address_text?, page)
+Parameters: `$1 = q`, `$2 = offset`, `$3 = limit`
+```dhl
+query SearchBatches(q: Text, offset: Int, limit: Int)
+    private
+    dhlq
+    search $1 in std.commerce.logistics.batch.carrier,std.commerce.logistics.batch.human_ref fuzz=1
+    | lj std.commerce.logistics.batch on oid=std.commerce.logistics.batch.oid
+    | sort -score
+    | drop $2
+    | take $3
+```
+
+#### BatchesByRoute(route_id, date)
+Parameters: `$1 = route_id`, `$2 = date`
+```dhl
+query BatchesByRoute(route_id: Text(len=64), date: Timestamp)
+    private
+    dhlq
+    std.commerce.logistics.batch_route
+    | where route_id == $1, date == $2
+```
+
+#### DeliveryPerformanceReport(date_from, date_to)
+Parameters: `$1 = date_from`, `$2 = date_to`
+```dhl
+query DeliveryPerformanceReport(date_from: Timestamp, date_to: Timestamp)
+    private
+    dhlq
+    std.commerce.logistics.batch
+    | where scheduled_for between ($1,$2)
+    | agg count()
+```
+
+#### BatchLoadReport(date_from, date_to, by=day|rider|carrier)
+Parameters: `$1 = date_from`, `$2 = date_to`
+```dhl
+query BatchLoadReport(date_from: Timestamp, date_to: Timestamp)
+    private
+    dhlq
+    std.commerce.logistics.batch
+    | where scheduled_for between ($1,$2)
+    | bucket scheduled_for 1d
+    | by bucket
+    | agg count()
+```
+
+#### ColdChainComplianceReport()
+```dhl
+query ColdChainComplianceReport
+    private
+    dhlq
+    std.commerce.logistics.batch
+    | agg count()
+```
+
+## Code
+
+### Types
+```dhl
+
+
+
+
+struct BatchLineAttachment
+    public line_id: Ref<std.commerce.order.line>
+    public qty_planned: Decimal(scale=6)
+    public attached_at: Timestamp
+```
+
+### Aggregate state
+```dhl
+aggregate LogisticsBatch
+    state
+        public external_id: Text(len=64)?
+        public human_ref: Text(len=64)?
+        public batch_type: Enum(Delivery, Shipment, Pickup, SupplierDelivery)
+        public scheduled_for: Timestamp?
+        public route_id: Text(len=64)?
+        public route_sequence: Int?
+        public carrier: Text(len=128)?
+        public address_snapshot: Map<Text(len=64), Text(len=256)>?
+        public batch_state: Enum(Planning, Scheduled, InTransit, Delivered, Cancelled) = 'Planning
+        public dispatched_at: Timestamp?
+        public attachments: List<BatchLineAttachment>
+        public created_at: Timestamp?
+```
+
+### Actions
+```dhl
+action CreateLogisticsBatch(
+    batch_type: Enum(Delivery, Shipment, Pickup, SupplierDelivery),
+    scheduled_for: Timestamp?,
+    carrier: Text(len=128)?,
+    address_snapshot: Map<Text(len=64), Text(len=256)>?,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.created_at == null
+    apply
+        state.batch_type = batch_type
+        state.scheduled_for = scheduled_for
+        state.carrier = carrier
+        state.address_snapshot = address_snapshot
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.batch_state = 'Planning
+        state.created_at = context.timestamp
+
+action UpdateAddress(address_snapshot: Map<Text(len=64), Text(len=256)>)
+    validate
+        state.batch_state != 'InTransit
+        state.batch_state != 'Delivered
+        state.batch_state != 'Cancelled
+    apply
+        state.address_snapshot = address_snapshot
+
+action AttachLineToBatch(line_id: Ref<std.commerce.order.line>, qty_planned: Decimal(scale=6))
+    validate
+        qty_planned > 0
+        state.batch_state != 'Cancelled
+    apply
+        state.attachments.push(BatchLineAttachment { line_id: line_id, qty_planned: qty_planned, attached_at: context.timestamp })
+
+action ScheduleBatch(scheduled_for: Timestamp)
+    validate
+        state.batch_state == 'Planning
+    apply
+        state.batch_state = 'Scheduled
+        state.scheduled_for = scheduled_for
+
+action DispatchBatch()
+    validate
+        (state.batch_state == 'Scheduled) || (state.batch_state == 'Planning)
+    apply
+        state.batch_state = 'InTransit
+        state.dispatched_at = context.timestamp
+
+action DeliverBatch()
+    validate
+        state.batch_state == 'InTransit
+    apply
+        state.batch_state = 'Delivered
+
+action CancelBatch()
+    validate
+        state.batch_state != 'Delivered
+        state.batch_state != 'Cancelled
+    apply
+        state.batch_state = 'Cancelled
+
+action AssignRoute(route_id: Text(len=64), sequence: Int?)
+    validate
+        state.batch_state != 'Delivered
+        state.batch_state != 'Cancelled
+    apply
+        state.route_id = route_id
+        state.route_sequence = sequence
+```

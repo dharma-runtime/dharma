@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct SchemaManifest {
     pub v: u64,
     pub name: String,
+    pub implements: Vec<String>,
     pub types: BTreeMap<String, SchemaType>,
 }
 
@@ -41,11 +42,21 @@ impl SchemaManifest {
         for (name, schema_type) in &self.types {
             types.push((Value::Text(name.clone()), schema_type.to_value()));
         }
-        Value::Map(vec![
+        let mut entries = vec![
             (Value::Text("v".to_string()), Value::Integer(self.v.into())),
             (Value::Text("name".to_string()), Value::Text(self.name.clone())),
             (Value::Text("types".to_string()), Value::Map(types)),
-        ])
+        ];
+        if !self.implements.is_empty() {
+            let list = self
+                .implements
+                .iter()
+                .cloned()
+                .map(Value::Text)
+                .collect::<Vec<_>>();
+            entries.push((Value::Text("implements".to_string()), Value::Array(list)));
+        }
+        Value::Map(entries)
     }
 }
 
@@ -103,6 +114,7 @@ pub fn parse_schema_value(value: &Value) -> Result<SchemaManifest, DharmaError> 
     let v = map_get(map, "v").ok_or_else(|| DharmaError::Schema("missing v".to_string()))?;
     let name = map_get(map, "name").ok_or_else(|| DharmaError::Schema("missing name".to_string()))?;
     let types_val = map_get(map, "types").ok_or_else(|| DharmaError::Schema("missing types".to_string()))?;
+    let implements_val = map_get(map, "implements");
 
     let version = match v {
         Value::Integer(int) => (*int).try_into().map_err(|_| DharmaError::Schema("invalid v".to_string()))?,
@@ -117,7 +129,20 @@ pub fn parse_schema_value(value: &Value) -> Result<SchemaManifest, DharmaError> 
         types.insert(typ, schema_type);
     }
 
-    Ok(SchemaManifest { v: version, name, types })
+    let mut implements = Vec::new();
+    if let Some(implements_val) = implements_val {
+        let items = expect_array(implements_val)?;
+        for item in items {
+            implements.push(expect_text(item)?);
+        }
+    }
+
+    Ok(SchemaManifest {
+        v: version,
+        name,
+        implements,
+        types,
+    })
 }
 
 fn parse_schema_type(value: &Value) -> Result<SchemaType, DharmaError> {

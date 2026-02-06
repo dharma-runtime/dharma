@@ -1,9 +1,11 @@
 use crate::cmd::action::{
     apply_action_prepared, load_contract_bytes, load_contract_ids_for_ver, load_schema_bytes,
 };
+use crate::cmd::ops::expire_reserve_holds;
 use crate::DharmaError;
 use ciborium::value::Value;
 use dharma::assertion::{is_overlay, signer_from_meta, AssertionPlaintext};
+use dharma::config::Config;
 use dharma::env::StdEnv;
 use dharma::runtime::cqrs::{action_index, decode_args_buffer, encode_args_buffer};
 use dharma::runtime::vm::{ARGS_BASE, CONTEXT_BASE, STATE_BASE};
@@ -11,6 +13,7 @@ use dharma::pdl::schema::CqrsSchema;
 use dharma::reactor::ReactorVm;
 use dharma::store::state::list_assertions;
 use dharma::types::{EnvelopeId, SubjectId};
+use dharma::vault::drain_archive_queue;
 use dharma::{IdentityState, Store};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,6 +21,8 @@ use std::thread;
 use std::time::Duration;
 
 type ContractKey = (u64, dharma::types::SchemaId, dharma::types::ContractId);
+
+const RESERVE_EXPIRE_INTERVAL_SECS: i64 = 60;
 
 pub fn spawn_daemon(data_dir: PathBuf, identity: IdentityState) {
     let _ = thread::Builder::new()
@@ -61,6 +66,7 @@ fn run_daemon(data_dir: &Path, identity: &IdentityState) -> Result<(), DharmaErr
     }
 
     let mut prepared: HashMap<ContractKey, PreparedContract> = HashMap::new();
+    let mut last_reserve_check: i64 = 0;
 
     loop {
         let now_ts = crate::cmd::action::now_timestamp() as i64;
@@ -90,7 +96,13 @@ fn run_daemon(data_dir: &Path, identity: &IdentityState) -> Result<(), DharmaErr
                     None => continue,
                 };
                 let action_idx = action_index(&prepared_contract.schema, &event_action)?;
-                let args_buffer = match encode_args_buffer(action_schema, action_idx, &assertion.body, false) {
+                let args_buffer = match encode_args_buffer(
+                    action_schema,
+                    &prepared_contract.schema.structs,
+                    action_idx,
+                    &assertion.body,
+                    false,
+                ) {
                     Ok(buf) => buf,
                     Err(err) => {
                         eprintln!(
@@ -144,7 +156,10 @@ fn run_daemon(data_dir: &Path, identity: &IdentityState) -> Result<(), DharmaErr
                                     continue;
                                 }
                             };
-                            let layout = dharma::pdl::schema::layout_action(emit_schema);
+                            let layout = dharma::pdl::schema::layout_action(
+                                emit_schema,
+                                &prepared_contract.schema.structs,
+                            );
                             let out_len = layout
                                 .last()
                                 .map(|entry| entry.offset + entry.size)
@@ -160,7 +175,11 @@ fn run_daemon(data_dir: &Path, identity: &IdentityState) -> Result<(), DharmaErr
                                 eprintln!("Reactor: read emit buffer error: {err}");
                                 continue;
                             }
-                            let args_value = match decode_args_buffer(emit_schema, &out) {
+                            let args_value = match decode_args_buffer(
+                                emit_schema,
+                                &prepared_contract.schema.structs,
+                                &out,
+                            ) {
                                 Ok(value) => value,
                                 Err(err) => {
                                     eprintln!("Reactor: decode args error: {err}");
@@ -245,7 +264,10 @@ fn run_daemon(data_dir: &Path, identity: &IdentityState) -> Result<(), DharmaErr
                                     continue;
                                 }
                             };
-                            let layout = dharma::pdl::schema::layout_action(emit_schema);
+                            let layout = dharma::pdl::schema::layout_action(
+                                emit_schema,
+                                &prepared_contract.schema.structs,
+                            );
                             let out_len = layout
                                 .last()
                                 .map(|entry| entry.offset + entry.size)
@@ -261,7 +283,11 @@ fn run_daemon(data_dir: &Path, identity: &IdentityState) -> Result<(), DharmaErr
                                 eprintln!("Reactor: read emit buffer error: {err}");
                                 continue;
                             }
-                            let args_value = match decode_args_buffer(emit_schema, &out) {
+                            let args_value = match decode_args_buffer(
+                                emit_schema,
+                                &prepared_contract.schema.structs,
+                                &out,
+                            ) {
                                 Ok(value) => value,
                                 Err(err) => {
                                     eprintln!("Reactor: decode args error: {err}");
@@ -286,6 +312,22 @@ fn run_daemon(data_dir: &Path, identity: &IdentityState) -> Result<(), DharmaErr
                             }
                         }
                     }
+                }
+            }
+        }
+        if let Ok(root) = std::env::current_dir() {
+            if let Ok(config) = Config::load(&root) {
+                if let Err(err) = drain_archive_queue(&store, &config, identity) {
+                    eprintln!("Vault archive error: {err}");
+                }
+            }
+        }
+        if RESERVE_EXPIRE_INTERVAL_SECS > 0 {
+            let now_ts = crate::cmd::action::now_timestamp() as i64;
+            if now_ts.saturating_sub(last_reserve_check) >= RESERVE_EXPIRE_INTERVAL_SECS {
+                last_reserve_check = now_ts;
+                if let Err(err) = expire_reserve_holds(data_dir, identity, false, now_ts) {
+                    eprintln!("Reserve expire error: {err}");
                 }
             }
         }
@@ -703,8 +745,12 @@ mod tests {
             version: "1.0.0".to_string(),
             aggregate: "Task".to_string(),
             extends: None,
+            implements: Vec::new(),
+            structs: BTreeMap::new(),
             fields: BTreeMap::new(),
             actions: BTreeMap::new(),
+            queries: BTreeMap::new(),
+        projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Strict,
         };
         assert!(scope_matches(None, &schema));
@@ -770,7 +816,8 @@ reactor Auto
             Value::Text("amount".to_string()),
             Value::Integer(12.into()),
         )]);
-        let args_buffer = encode_args_buffer(action_schema, idx, &args_value, false).unwrap();
+        let args_buffer =
+            encode_args_buffer(action_schema, &schema.structs, idx, &args_value, false).unwrap();
         let state = default_state_memory(&schema);
         let context = vec![0u8; 40];
 
@@ -781,7 +828,7 @@ reactor Auto
         vm.emit(0, 0).unwrap();
 
         let emit_schema = schema.action("Approve").unwrap();
-        let layout = layout_action(emit_schema);
+        let layout = layout_action(emit_schema, &schema.structs);
         let out_len = layout
             .last()
             .map(|entry| entry.offset + entry.size)
@@ -789,7 +836,7 @@ reactor Auto
             .max(4);
         let mut out = vec![0u8; out_len];
         vm.read_memory(vm.out_base(), &mut out).unwrap();
-        let decoded = decode_args_buffer(emit_schema, &out).unwrap();
+        let decoded = decode_args_buffer(emit_schema, &schema.structs, &out).unwrap();
         if let Value::Map(entries) = decoded {
             let amount = entries
                 .iter()
@@ -897,7 +944,8 @@ reactor Auto
         let action_schema = schema.action("Send").unwrap();
         let idx = action_index(&schema, "Send").unwrap();
         let args_value = Value::Map(vec![]);
-        let args_buffer = encode_args_buffer(action_schema, idx, &args_value, false).unwrap();
+        let args_buffer =
+            encode_args_buffer(action_schema, &schema.structs, idx, &args_value, false).unwrap();
         let state = default_state_memory(&schema);
         let mut context = vec![0u8; 40];
         context[..32].copy_from_slice(subject.as_bytes());
@@ -1017,7 +1065,8 @@ reactor Auto
         let action_schema = schema.action("Send").unwrap();
         let idx = action_index(&schema, "Send").unwrap();
         let args_value = Value::Map(vec![]);
-        let args_buffer = encode_args_buffer(action_schema, idx, &args_value, false).unwrap();
+        let args_buffer =
+            encode_args_buffer(action_schema, &schema.structs, idx, &args_value, false).unwrap();
         let state = default_state_memory(&schema);
         let mut context = vec![0u8; 40];
         context[..32].copy_from_slice(subject.as_bytes());

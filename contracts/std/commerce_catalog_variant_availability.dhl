@@ -1,0 +1,138 @@
+---
+namespace: std.commerce.catalog.variant_availability
+version: 1.0.0
+---
+
+# Commerce Catalog Variant Availability (Projection)
+
+This projection summarizes **time-bucketed availability** for a variant.
+It powers lightweight availability hints for catalog browsing and planning.
+
+## Scope
+- One subject per `(variant_id, delivery_area, bucket_date)` bucket.
+- Data is **derived** and can be rebuilt at any time.
+
+## Shelf-life behavior
+- `shelf_life_status` reflects whether availability is supported by known expiry dates.
+- `shelf_life_unverified = true` when availability includes batches with unknown expiry.
+
+## Access control
+Only projection writers may update this subject.
+
+```dhl
+external
+    roles: [projection.writer]
+```
+
+## Code
+
+```dhl
+aggregate VariantAvailability
+    state
+        public variant_id: Ref<std.commerce.catalog.variant>
+        public delivery_area: Text(len=64)?
+        public bucket_date: Timestamp?
+        public available_on_hand_qty: Decimal(scale=6)
+        public available_backorder_qty: Decimal(scale=6)
+        public available_preorder_qty: Decimal(scale=6)
+        public preorder_allowed: Bool
+        public preorder_capacity: Decimal(scale=6)
+        public preorder_unverified: Bool
+        public status: Enum(InStock, Backorder, Preorder, OutOfStock)
+        public shelf_life_status: Enum(Ok, Unknown, Insufficient)
+        public shelf_life_unverified: Bool
+        public as_of: Timestamp?
+
+action Upsert(
+    variant_id: Ref<std.commerce.catalog.variant>,
+    delivery_area: Text(len=64)?,
+    bucket_date: Timestamp?,
+    available_on_hand_qty: Decimal(scale=6),
+    available_backorder_qty: Decimal(scale=6),
+    available_preorder_qty: Decimal(scale=6),
+    preorder_allowed: Bool,
+    preorder_capacity: Decimal(scale=6),
+    preorder_unverified: Bool,
+    shelf_life_status: Enum(Ok, Unknown, Insufficient),
+    shelf_life_unverified: Bool,
+    as_of: Timestamp?
+)
+    validate
+        has_role(context.signer, "projection.writer")
+        available_on_hand_qty >= 0
+        available_backorder_qty >= 0
+        available_preorder_qty >= 0
+        preorder_capacity >= 0
+    apply
+        state.variant_id = variant_id
+        state.delivery_area = delivery_area
+        state.bucket_date = bucket_date
+        state.available_on_hand_qty = available_on_hand_qty
+        state.available_backorder_qty = available_backorder_qty
+        state.available_preorder_qty = available_preorder_qty
+        state.preorder_allowed = preorder_allowed
+        state.preorder_capacity = preorder_capacity
+        state.preorder_unverified = preorder_unverified
+        state.shelf_life_status = shelf_life_status
+        state.shelf_life_unverified = shelf_life_unverified
+        state.as_of = as_of
+        if available_on_hand_qty > 0
+            state.status = 'InStock
+        else
+            if available_backorder_qty > 0
+                state.status = 'Backorder
+            else
+                if preorder_allowed == true && available_preorder_qty > 0
+                    state.status = 'Preorder
+                else
+                    state.status = 'OutOfStock
+
+action Deactivate()
+    validate
+        has_role(context.signer, "projection.writer")
+    apply
+        state.available_on_hand_qty = 0
+        state.available_backorder_qty = 0
+        state.available_preorder_qty = 0
+        state.preorder_allowed = false
+        state.preorder_capacity = 0
+        state.preorder_unverified = false
+        state.status = 'OutOfStock
+        state.shelf_life_status = 'Unknown
+        state.shelf_life_unverified = true
+        state.as_of = context.timestamp
+```
+
+## Projection
+
+```dhl
+projection VariantAvailabilityByBucket
+    trigger std.commerce.availability.item_bucket.Upsert
+    scope item_id = state.item_id
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.availability.item_bucket
+        | lj std.commerce.catalog.variant on item_id=std.commerce.catalog.variant.item_id
+        | sel std.commerce.catalog.variant.subject as variant_id, delivery_area, bucket_date, available_on_hand_qty, available_backorder_qty, available_preorder_qty, preorder_allowed, preorder_capacity, preorder_unverified, shelf_life_status, shelf_life_unverified
+        | by variant_id, delivery_area, bucket_date
+        | agg sum(available_backorder_qty) as available_backorder_qty, sum(available_on_hand_qty) as available_on_hand_qty, sum(available_preorder_qty) as available_preorder_qty, max(preorder_allowed) as preorder_allowed, max(preorder_capacity) as preorder_capacity, max(preorder_unverified) as preorder_unverified, min(shelf_life_status) as shelf_life_status, max(shelf_life_unverified) as shelf_life_unverified
+    emit upsert std.commerce.catalog.variant_availability
+        id = proj_id(variant_id, delivery_area, bucket_date)
+        variant_id = variant_id
+        delivery_area = delivery_area
+        bucket_date = bucket_date
+        available_on_hand_qty = available_on_hand_qty
+        available_backorder_qty = available_backorder_qty
+        available_preorder_qty = available_preorder_qty
+        preorder_allowed = preorder_allowed == true
+        preorder_capacity = preorder_capacity
+        preorder_unverified = preorder_unverified == true
+        shelf_life_status = shelf_life_status
+        shelf_life_unverified = shelf_life_unverified
+        as_of = null
+    prune
+        by (variant_id, delivery_area, bucket_date)
+
+```

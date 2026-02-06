@@ -136,6 +136,43 @@ impl std::fmt::Debug for Nonce12 {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Nonce24(pub(crate) [u8; 24]);
+
+impl Nonce24 {
+    pub fn from_bytes(bytes: [u8; 24]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn from_slice(slice: &[u8]) -> Result<Self, DharmaError> {
+        if slice.len() != 24 {
+            return Err(DharmaError::InvalidLength {
+                expected: 24,
+                actual: slice.len(),
+            });
+        }
+        let mut bytes = [0u8; 24];
+        bytes.copy_from_slice(slice);
+        Ok(Self(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 24] {
+        &self.0
+    }
+
+    pub fn random<R: RngCore + CryptoRng>(rng: &mut R) -> Self {
+        let mut bytes = [0u8; 24];
+        rng.fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+}
+
+impl std::fmt::Debug for Nonce24 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex_encode(self.0))
+    }
+}
+
 pub fn hex_encode<const N: usize>(bytes: [u8; N]) -> String {
     let mut out = String::with_capacity(N * 2);
     for b in bytes.iter() {
@@ -214,6 +251,18 @@ mod tests {
             DharmaError::InvalidLength { expected, actual } => {
                 assert_eq!(12, expected);
                 assert_eq!(11, actual);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nonce24_length_validation() {
+        let err = Nonce24::from_slice(&[0u8; 23]).unwrap_err();
+        match err {
+            DharmaError::InvalidLength { expected, actual } => {
+                assert_eq!(24, expected);
+                assert_eq!(23, actual);
             }
             other => panic!("unexpected error: {other:?}"),
         }

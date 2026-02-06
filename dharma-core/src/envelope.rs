@@ -12,6 +12,7 @@ pub struct AssertionEnvelope {
     pub kid: KeyId,
     pub nonce: Nonce12,
     pub ct: Vec<u8>,
+    pub epoch: Option<u64>,
 }
 
 impl AssertionEnvelope {
@@ -22,11 +23,23 @@ impl AssertionEnvelope {
             kid,
             nonce,
             ct,
+            epoch: None,
+        }
+    }
+
+    pub fn with_epoch(kid: KeyId, nonce: Nonce12, ct: Vec<u8>, epoch: u64) -> Self {
+        Self {
+            v: ENVELOPE_VERSION,
+            suite: SUITE_ID,
+            kid,
+            nonce,
+            ct,
+            epoch: Some(epoch),
         }
     }
 
     pub fn aad_value(&self) -> Value {
-        Value::Map(vec![
+        let mut entries = vec![
             (Value::Text("v".to_string()), Value::Integer(self.v.into())),
             (Value::Text("suite".to_string()), Value::Integer(self.suite.into())),
             (Value::Text("kid".to_string()), Value::Bytes(self.kid.as_bytes().to_vec())),
@@ -34,7 +47,11 @@ impl AssertionEnvelope {
                 Value::Text("nonce".to_string()),
                 Value::Bytes(self.nonce.as_bytes().to_vec()),
             ),
-        ])
+        ];
+        if let Some(epoch) = self.epoch {
+            entries.push((Value::Text("epoch".to_string()), Value::Integer(epoch.into())));
+        }
+        Value::Map(entries)
     }
 
     pub fn aad_bytes(&self) -> Result<Vec<u8>, DharmaError> {
@@ -42,7 +59,7 @@ impl AssertionEnvelope {
     }
 
     pub fn to_value(&self) -> Value {
-        Value::Map(vec![
+        let mut entries = vec![
             (Value::Text("v".to_string()), Value::Integer(self.v.into())),
             (Value::Text("suite".to_string()), Value::Integer(self.suite.into())),
             (Value::Text("kid".to_string()), Value::Bytes(self.kid.as_bytes().to_vec())),
@@ -51,7 +68,11 @@ impl AssertionEnvelope {
                 Value::Bytes(self.nonce.as_bytes().to_vec()),
             ),
             (Value::Text("ct".to_string()), Value::Bytes(self.ct.clone())),
-        ])
+        ];
+        if let Some(epoch) = self.epoch {
+            entries.push((Value::Text("epoch".to_string()), Value::Integer(epoch.into())));
+        }
+        Value::Map(entries)
     }
 
     pub fn to_cbor(&self) -> Result<Vec<u8>, DharmaError> {
@@ -66,12 +87,17 @@ impl AssertionEnvelope {
         let kid_bytes = expect_bytes(map_get(map, "kid").ok_or_else(|| DharmaError::Validation("missing kid".to_string()))?)?;
         let nonce_bytes = expect_bytes(map_get(map, "nonce").ok_or_else(|| DharmaError::Validation("missing nonce".to_string()))?)?;
         let ct = expect_bytes(map_get(map, "ct").ok_or_else(|| DharmaError::Validation("missing ct".to_string()))?)?;
+        let epoch = match map_get(map, "epoch") {
+            Some(val) => Some(expect_uint(val)?),
+            None => None,
+        };
         Ok(Self {
             v,
             suite,
             kid: KeyId::from_slice(&kid_bytes)?,
             nonce: Nonce12::from_slice(&nonce_bytes)?,
             ct,
+            epoch,
         })
     }
 
@@ -90,6 +116,19 @@ pub fn encrypt_assertion(
     let aad = envelope.aad_bytes()?;
     let ct = crypto::aead_encrypt(key, nonce.as_bytes(), plaintext, &aad)?;
     Ok(AssertionEnvelope::new(kid, nonce, ct))
+}
+
+pub fn encrypt_assertion_with_epoch(
+    plaintext: &[u8],
+    kid: KeyId,
+    key: &[u8; 32],
+    nonce: Nonce12,
+    epoch: u64,
+) -> Result<AssertionEnvelope, DharmaError> {
+    let envelope = AssertionEnvelope::with_epoch(kid, nonce, Vec::new(), epoch);
+    let aad = envelope.aad_bytes()?;
+    let ct = crypto::aead_encrypt(key, nonce.as_bytes(), plaintext, &aad)?;
+    Ok(AssertionEnvelope::with_epoch(kid, nonce, ct, epoch))
 }
 
 pub fn decrypt_assertion(
@@ -133,5 +172,16 @@ mod tests {
         let nonce = Nonce12::from_bytes([3u8; 12]);
         let envelope = encrypt_assertion(b"data", kid, &key, nonce).unwrap();
         assert!(decrypt_assertion(&envelope, &bad_key).is_err());
+    }
+
+    #[test]
+    fn epoch_metadata_roundtrip() {
+        let kid = KeyId::from_bytes([5u8; 32]);
+        let nonce = Nonce12::from_bytes([7u8; 12]);
+        let envelope = AssertionEnvelope::with_epoch(kid, nonce, vec![1, 2, 3], 9);
+        let bytes = envelope.to_cbor().unwrap();
+        let parsed = AssertionEnvelope::from_cbor(&bytes).unwrap();
+        assert_eq!(parsed.epoch, Some(9));
+        assert_eq!(parsed.kid, envelope.kid);
     }
 }

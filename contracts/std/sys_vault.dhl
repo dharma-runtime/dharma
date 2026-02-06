@@ -1,0 +1,62 @@
+---
+namespace: std.sys.vault
+version: 1.0.0
+---
+
+# Vault & Archival Contract
+
+Defines the structures for tiered storage (Glacier) and historical checkpoints.
+
+```dhl
+type StorageDriver = Enum(Local, S3, Arweave, IPFS, Filecoin, Peer)
+type EncryptionAlg = Enum(XChaCha20_Poly1305)
+type CompressionAlg = Enum(Zstd_19)
+
+struct VaultShard
+    public driver: StorageDriver
+    public location: Text(len=256)
+    public hash: Hash
+    public size: Int
+    public shard_index: Int
+    public shard_total: Int
+
+struct VaultRef
+    public driver: StorageDriver
+    public location: Text(len=256)
+    public hash: Hash                 // BLAKE3 ciphertext hash
+    public size: Int                  // Size in bytes
+    public compression: CompressionAlg
+    public encryption: EncryptionAlg
+    public format_version: Int
+    public subject: Hash
+    public seq_start: Int
+    public seq_end: Int
+    public snapshot_hash: Hash
+    public merkle_root: Hash
+    public dict_hash: Hash?
+    public dict_size: Int?
+    public shards: List<VaultShard>?
+
+aggregate Checkpoint
+    state
+        public subject: Hash
+        public seq_start: Int
+        public seq_end: Int
+        public state_root: Hash        // Merkle root of contract state at seq_end
+        public vault: VaultRef
+        public created_at: Int
+
+action Checkpoint(
+    start_seq: Int,
+    end_seq: Int,
+    state_root: Hash,
+    vault: VaultRef
+)
+    apply
+        state.subject = vault.subject
+        state.seq_start = start_seq
+        state.seq_end = end_seq
+        state.state_root = state_root
+        state.vault = vault
+        state.created_at = context.timestamp
+```

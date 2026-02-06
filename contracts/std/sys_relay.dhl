@@ -1,0 +1,59 @@
+---
+namespace: std.sys.relay
+version: 1.0.0
+---
+
+# Relay Policy Contract
+#
+# Defines storage plans and grants for relay operators. Enforcement of signer
+# authorization is handled by runtime (relay domain owner), not the DSL.
+
+```dhl
+type RelayPlanName = Text(len=64)
+
+type PlanStatus = Enum(Active, Revoked)
+
+struct RelayPlan
+    public name: RelayPlanName
+    public max_bytes: Int
+    public max_objects: Int?
+    public retention_days: Int?
+    public note: Text?
+
+aggregate Relay
+    state
+        public plans: Map<RelayPlanName, RelayPlan>
+        public grants: Map<Text, RelayPlanName>     // domain -> plan name
+        public expires: Map<Text, Int>              // domain -> unix ts (0 = none)
+        public disabled: Map<Text, Bool>
+
+action PlanDefine(
+    name: RelayPlanName,
+    max_bytes: Int,
+    max_objects: Int?,
+    retention_days: Int?,
+    note: Text?
+)
+    apply
+        state.plans.set(name, RelayPlan { name, max_bytes, max_objects, retention_days, note })
+
+action PlanRevoke(name: RelayPlanName)
+    apply
+        state.plans.remove(name)
+
+action Grant(domain: Text, plan: RelayPlanName, expires: Int)
+    apply
+        state.grants.set(domain, plan)
+        state.expires.set(domain, expires)
+        state.disabled.remove(domain)
+
+action Revoke(domain: Text)
+    apply
+        state.grants.remove(domain)
+        state.expires.remove(domain)
+        state.disabled.remove(domain)
+
+action Disable(domain: Text)
+    apply
+        state.disabled.set(domain, true)
+```

@@ -1,0 +1,157 @@
+---
+namespace: std.commerce.availability.item_bucket
+version: 1.0.0
+---
+
+# Commerce Availability Item Bucket (Projection)
+
+Time-bucketed availability for an item at a warehouse and channel.
+This projection is derived and can be rebuilt at any time.
+
+## Shelf-life flags
+- `shelf_life_status` is a summary of batch eligibility.
+- `shelf_life_unverified = true` when availability includes batches with unknown expiry.
+
+## Access control
+Only projection writers may update this subject.
+
+```dhl
+external
+    roles: [projection.writer]
+```
+
+## Code
+
+```dhl
+aggregate ItemAvailabilityBucket
+    state
+        public item_id: Ref<std.commerce.catalog.item>
+        public warehouse_id: Ref<std.commerce.logistics.warehouse>
+        public channel_id: Text(len=64)?
+        public delivery_area: Text(len=64)?
+        public bucket_date: Timestamp?
+        public on_hand_qty: Decimal(scale=6)
+        public inbound_committed_qty: Decimal(scale=6)
+        public reserved_qty: Decimal(scale=6)
+        public available_on_hand_qty: Decimal(scale=6)
+        public available_backorder_qty: Decimal(scale=6)
+        public available_preorder_qty: Decimal(scale=6)
+        public preorder_allowed: Bool
+        public preorder_capacity: Decimal(scale=6)
+        public preorder_unverified: Bool
+        public shelf_life_status: Enum(Ok, Unknown, Insufficient)
+        public shelf_life_unverified: Bool
+        public blocked_reason: Text(len=64)?
+        public as_of: Timestamp?
+
+action Upsert(
+    item_id: Ref<std.commerce.catalog.item>,
+    warehouse_id: Ref<std.commerce.logistics.warehouse>,
+    channel_id: Text(len=64)?,
+    delivery_area: Text(len=64)?,
+    bucket_date: Timestamp?,
+    on_hand_qty: Decimal(scale=6),
+    inbound_committed_qty: Decimal(scale=6),
+    reserved_qty: Decimal(scale=6),
+    available_on_hand_qty: Decimal(scale=6),
+    available_backorder_qty: Decimal(scale=6),
+    available_preorder_qty: Decimal(scale=6),
+    preorder_allowed: Bool,
+    preorder_capacity: Decimal(scale=6),
+    preorder_unverified: Bool,
+    shelf_life_status: Enum(Ok, Unknown, Insufficient),
+    shelf_life_unverified: Bool,
+    blocked_reason: Text(len=64)?,
+    as_of: Timestamp?
+)
+    validate
+        has_role(context.signer, "projection.writer")
+        on_hand_qty >= 0
+        inbound_committed_qty >= 0
+        reserved_qty >= 0
+        preorder_capacity >= 0
+    apply
+        state.item_id = item_id
+        state.warehouse_id = warehouse_id
+        state.channel_id = channel_id
+        state.delivery_area = delivery_area
+        state.bucket_date = bucket_date
+        state.on_hand_qty = on_hand_qty
+        state.inbound_committed_qty = inbound_committed_qty
+        state.reserved_qty = reserved_qty
+        state.available_on_hand_qty = available_on_hand_qty
+        state.available_backorder_qty = available_backorder_qty
+        state.available_preorder_qty = available_preorder_qty
+        state.preorder_allowed = preorder_allowed
+        state.preorder_capacity = preorder_capacity
+        state.preorder_unverified = preorder_unverified
+        state.shelf_life_status = shelf_life_status
+        state.shelf_life_unverified = shelf_life_unverified
+        state.blocked_reason = blocked_reason
+        state.as_of = as_of
+
+action Deactivate()
+    validate
+        has_role(context.signer, "projection.writer")
+    apply
+        state.on_hand_qty = 0
+        state.inbound_committed_qty = 0
+        state.reserved_qty = 0
+        state.available_on_hand_qty = 0
+        state.available_backorder_qty = 0
+        state.available_preorder_qty = 0
+        state.preorder_allowed = false
+        state.preorder_capacity = 0
+        state.preorder_unverified = false
+        state.shelf_life_status = 'Unknown
+        state.shelf_life_unverified = true
+        state.blocked_reason = "out_of_stock"
+        state.as_of = context.timestamp
+```
+
+## Projection
+
+```dhl
+projection ItemAvailabilityByBucket
+    trigger std.commerce.inventory.batch.CreateBatch
+    trigger std.commerce.inventory.batch.MarkInTransit
+    trigger std.commerce.inventory.batch.ReceiveBatch
+    trigger std.commerce.inventory.batch.ReleaseQuarantine
+    trigger std.commerce.inventory.batch.CancelBatch
+    scope item_id = state.item_id
+    batch_window 250ms
+    max_delay 1s
+    source state
+    query
+        std.commerce.inventory.batch
+        | lj std.commerce.catalog.item on item_id=std.commerce.catalog.item.subject
+        | lj std.commerce.availability.reservation_summary on item_id=std.commerce.availability.reservation_summary.item_id, warehouse_id=std.commerce.availability.reservation_summary.warehouse_id
+        | lj std.commerce.availability.item_preorder_terms on item_id=std.commerce.availability.item_preorder_terms.item_id
+        | bucket expected_at 1d
+        | where status != 'Cancelled, status != 'Quarantined, std.commerce.catalog.item.min_remaining_shelf_life_days == null || expiry_date == null || days_between(bucket, expiry_date) >= std.commerce.catalog.item.min_remaining_shelf_life_days
+        | sel item_id, warehouse_id, bucket, qty_received, qty_expected, shelf_life_status, shelf_life_unverified, std.commerce.availability.item_preorder_terms.preorder_allowed, std.commerce.availability.item_preorder_terms.preorder_capacity, std.commerce.availability.item_preorder_terms.preorder_unverified, std.commerce.availability.reservation_summary.reserved_qty
+        | by item_id, warehouse_id, bucket
+        | agg sum(qty_received) as on_hand_qty, sum(qty_expected) as inbound_committed_qty, max(reserved_qty) as reserved_qty, min(shelf_life_status) as shelf_life_status, max(shelf_life_unverified) as shelf_life_unverified, max(preorder_allowed) as preorder_allowed, max(preorder_capacity) as preorder_capacity, max(preorder_unverified) as preorder_unverified
+    emit upsert std.commerce.availability.item_bucket
+        id = proj_id(item_id, warehouse_id, channel_id, delivery_area, bucket)
+        item_id = item_id
+        warehouse_id = warehouse_id
+        channel_id = null
+        delivery_area = null
+        bucket_date = bucket
+        on_hand_qty = on_hand_qty
+        inbound_committed_qty = inbound_committed_qty
+        reserved_qty = reserved_qty
+        available_on_hand_qty = on_hand_qty - reserved_qty
+        available_backorder_qty = (on_hand_qty - reserved_qty) + inbound_committed_qty
+        available_preorder_qty = (on_hand_qty - reserved_qty) + inbound_committed_qty + preorder_capacity
+        preorder_allowed = preorder_allowed == true
+        preorder_capacity = preorder_capacity
+        preorder_unverified = preorder_unverified == true
+        shelf_life_status = shelf_life_status
+        shelf_life_unverified = shelf_life_unverified
+        blocked_reason = null
+        as_of = null
+    prune
+        by (item_id, warehouse_id, channel_id, delivery_area, bucket_date)
+```
