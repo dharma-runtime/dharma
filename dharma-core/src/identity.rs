@@ -4,8 +4,8 @@ use crate::env::Env;
 use crate::error::DharmaError;
 use crate::keystore::KeystoreData;
 use crate::protocols::atlas_identity as atlas_proto;
-use crate::store::Store;
 use crate::store::state::list_assertions;
+use crate::store::Store;
 use crate::types::{ContractId, HpkePublicKey, IdentityKey, SchemaId, SubjectId};
 use crate::value::{expect_array, expect_bytes, expect_int, expect_map, expect_text, map_get};
 use ed25519_dalek::SigningKey;
@@ -33,8 +33,10 @@ pub struct IdentityState {
 
 impl IdentityState {
     pub fn from_keystore(data: KeystoreData) -> Self {
-        let public_key = IdentityKey::from_bytes(data.device_signing_key.verifying_key().to_bytes());
-        let root_public_key = IdentityKey::from_bytes(data.root_signing_key.verifying_key().to_bytes());
+        let public_key =
+            IdentityKey::from_bytes(data.device_signing_key.verifying_key().to_bytes());
+        let root_public_key =
+            IdentityKey::from_bytes(data.root_signing_key.verifying_key().to_bytes());
         Self {
             subject_id: data.identity,
             signing_key: data.device_signing_key,
@@ -64,7 +66,10 @@ pub enum IdentityStatus {
     Revoked,
 }
 
-pub fn root_key_for_identity(env: &dyn Env, subject: &SubjectId) -> Result<Option<IdentityKey>, DharmaError> {
+pub fn root_key_for_identity(
+    env: &dyn Env,
+    subject: &SubjectId,
+) -> Result<Option<IdentityKey>, DharmaError> {
     let records = list_assertions(env, subject)?;
     if records.is_empty() {
         return Ok(None);
@@ -86,7 +91,10 @@ pub fn root_key_for_identity(env: &dyn Env, subject: &SubjectId) -> Result<Optio
         if assertion.header.seq == 1 {
             return Ok(Some(assertion.header.auth));
         }
-        if best.map(|(seq, _)| assertion.header.seq < seq).unwrap_or(true) {
+        if best
+            .map(|(seq, _)| assertion.header.seq < seq)
+            .unwrap_or(true)
+        {
             best = Some((assertion.header.seq, assertion.header.auth));
         }
     }
@@ -169,7 +177,10 @@ fn identity_status_with_root(
     Ok(status)
 }
 
-pub fn load_delegates(env: &dyn Env, subject: &SubjectId) -> Result<Vec<DelegateInfo>, DharmaError> {
+pub fn load_delegates(
+    env: &dyn Env,
+    subject: &SubjectId,
+) -> Result<Vec<DelegateInfo>, DharmaError> {
     let mut out = Vec::new();
     let Some(root_key) = root_key_for_identity(env, subject)? else {
         return Ok(out);
@@ -208,7 +219,8 @@ pub fn load_delegates(env: &dyn Env, subject: &SubjectId) -> Result<Vec<Delegate
                 .ok_or_else(|| DharmaError::Validation("missing delegate".to_string()))?,
         )?;
         let scope = expect_text(
-            map_get(map, "scope").ok_or_else(|| DharmaError::Validation("missing scope".to_string()))?,
+            map_get(map, "scope")
+                .ok_or_else(|| DharmaError::Validation("missing scope".to_string()))?,
         )?;
         let expires = match map_get(map, "expires") {
             Some(val) => {
@@ -388,7 +400,9 @@ pub fn hpke_public_key_for_identity(
                 Ok(map) => map,
                 Err(_) => continue,
             };
-            let Some(val) = map_get(map, "hpke_pk") else { continue };
+            let Some(val) = map_get(map, "hpke_pk") else {
+                continue;
+            };
             let bytes = match expect_bytes(val) {
                 Ok(bytes) => bytes,
                 Err(_) => continue,
@@ -590,7 +604,8 @@ mod tests {
             note: None,
             meta: None,
         };
-        let genesis = AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
+        let genesis =
+            AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
         let genesis_bytes = genesis.to_cbor().unwrap();
         let genesis_id = genesis.assertion_id().unwrap();
         let genesis_env = crypto::envelope_id(&genesis_bytes);
@@ -625,7 +640,10 @@ mod tests {
                 Value::Text("delegate".to_string()),
                 Value::Bytes(device_sk.verifying_key().to_bytes().to_vec()),
             ),
-            (Value::Text("scope".to_string()), Value::Text("all".to_string())),
+            (
+                Value::Text("scope".to_string()),
+                Value::Text("all".to_string()),
+            ),
             (Value::Text("expires".to_string()), Value::Integer(0.into())),
         ]);
         let delegate = AssertionPlaintext::sign(delegate_header, body, &root_sk).unwrap();
@@ -717,10 +735,14 @@ mod tests {
                 Value::Text("delegate".to_string()),
                 Value::Bytes(device_id.as_bytes().to_vec()),
             ),
-            (Value::Text("scope".to_string()), Value::Text("all".to_string())),
+            (
+                Value::Text("scope".to_string()),
+                Value::Text("all".to_string()),
+            ),
             (Value::Text("expires".to_string()), Value::Integer(0.into())),
         ]);
-        let redelegate = AssertionPlaintext::sign(redelegate_header, redelegate_body, &root_sk).unwrap();
+        let redelegate =
+            AssertionPlaintext::sign(redelegate_header, redelegate_body, &root_sk).unwrap();
         let redelegate_bytes = redelegate.to_cbor().unwrap();
         let redelegate_id = redelegate.assertion_id().unwrap();
         let redelegate_env = crypto::envelope_id(&redelegate_bytes);
@@ -770,7 +792,8 @@ mod tests {
             note: None,
             meta: None,
         };
-        let genesis = AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
+        let genesis =
+            AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
         let genesis_bytes = genesis.to_cbor().unwrap();
         let genesis_id = genesis.assertion_id().unwrap();
         let genesis_env = crypto::envelope_id(&genesis_bytes);
@@ -923,8 +946,14 @@ mod tests {
                     Value::Text("delegate".to_string()),
                     Value::Bytes(device_id.as_bytes().to_vec()),
                 ),
-                (Value::Text("scope".to_string()), Value::Text("all".to_string())),
-                (Value::Text("expires".to_string()), Value::Integer(10.into())),
+                (
+                    Value::Text("scope".to_string()),
+                    Value::Text("all".to_string()),
+                ),
+                (
+                    Value::Text("expires".to_string()),
+                    Value::Integer(10.into()),
+                ),
             ]),
         );
 
@@ -1092,7 +1121,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(identity_status(&env, &subject).unwrap(), IdentityStatus::Active);
+        assert_eq!(
+            identity_status(&env, &subject).unwrap(),
+            IdentityStatus::Active
+        );
 
         let suspend_header = AssertionHeader {
             v: crypto::PROTOCOL_VERSION,
@@ -1109,7 +1141,8 @@ mod tests {
             note: None,
             meta: None,
         };
-        let suspend = AssertionPlaintext::sign(suspend_header, Value::Map(vec![]), &root_sk).unwrap();
+        let suspend =
+            AssertionPlaintext::sign(suspend_header, Value::Map(vec![]), &root_sk).unwrap();
         let suspend_bytes = suspend.to_cbor().unwrap();
         let suspend_id = suspend.assertion_id().unwrap();
         let suspend_env = crypto::envelope_id(&suspend_bytes);
@@ -1123,7 +1156,10 @@ mod tests {
             &suspend_bytes,
         )
         .unwrap();
-        assert_eq!(identity_status(&env, &subject).unwrap(), IdentityStatus::Suspended);
+        assert_eq!(
+            identity_status(&env, &subject).unwrap(),
+            IdentityStatus::Suspended
+        );
 
         let activate_header = AssertionHeader {
             v: crypto::PROTOCOL_VERSION,
@@ -1140,7 +1176,8 @@ mod tests {
             note: None,
             meta: None,
         };
-        let activate = AssertionPlaintext::sign(activate_header, Value::Map(vec![]), &root_sk).unwrap();
+        let activate =
+            AssertionPlaintext::sign(activate_header, Value::Map(vec![]), &root_sk).unwrap();
         let activate_bytes = activate.to_cbor().unwrap();
         let activate_id = activate.assertion_id().unwrap();
         let activate_env = crypto::envelope_id(&activate_bytes);
@@ -1154,7 +1191,10 @@ mod tests {
             &activate_bytes,
         )
         .unwrap();
-        assert_eq!(identity_status(&env, &subject).unwrap(), IdentityStatus::Active);
+        assert_eq!(
+            identity_status(&env, &subject).unwrap(),
+            IdentityStatus::Active
+        );
 
         let revoke_header = AssertionHeader {
             v: crypto::PROTOCOL_VERSION,
@@ -1185,7 +1225,10 @@ mod tests {
             &revoke_bytes,
         )
         .unwrap();
-        assert_eq!(identity_status(&env, &subject).unwrap(), IdentityStatus::Revoked);
+        assert_eq!(
+            identity_status(&env, &subject).unwrap(),
+            IdentityStatus::Revoked
+        );
 
         let reactivate_header = AssertionHeader {
             v: crypto::PROTOCOL_VERSION,
@@ -1202,7 +1245,8 @@ mod tests {
             note: None,
             meta: None,
         };
-        let reactivate = AssertionPlaintext::sign(reactivate_header, Value::Map(vec![]), &root_sk).unwrap();
+        let reactivate =
+            AssertionPlaintext::sign(reactivate_header, Value::Map(vec![]), &root_sk).unwrap();
         let reactivate_bytes = reactivate.to_cbor().unwrap();
         let reactivate_id = reactivate.assertion_id().unwrap();
         let reactivate_env = crypto::envelope_id(&reactivate_bytes);
@@ -1216,7 +1260,10 @@ mod tests {
             &reactivate_bytes,
         )
         .unwrap();
-        assert_eq!(identity_status(&env, &subject).unwrap(), IdentityStatus::Revoked);
+        assert_eq!(
+            identity_status(&env, &subject).unwrap(),
+            IdentityStatus::Revoked
+        );
     }
 
     #[test]
@@ -1285,7 +1332,8 @@ mod tests {
             note: None,
             meta: None,
         };
-        let suspend = AssertionPlaintext::sign(suspend_header, Value::Map(vec![]), &root_sk).unwrap();
+        let suspend =
+            AssertionPlaintext::sign(suspend_header, Value::Map(vec![]), &root_sk).unwrap();
         let suspend_bytes = suspend.to_cbor().unwrap();
         let suspend_id = suspend.assertion_id().unwrap();
         let suspend_env = crypto::envelope_id(&suspend_bytes);

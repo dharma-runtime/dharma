@@ -12,6 +12,8 @@ const DEFAULT_LISTEN_PORT: u16 = 3000;
 const DEFAULT_MAX_PEERS: usize = 50;
 const DEFAULT_MAX_CONNECTIONS: usize = 256;
 const DEFAULT_MAX_FRAME_SIZE: usize = 1_048_576;
+const DEFAULT_SYNC_OBJ_CHUNK_BYTES: usize = 256 * 1024;
+const DEFAULT_SYNC_OBJ_BUFFER_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_READ_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_WRITE_TIMEOUT_MS: u64 = 5000;
@@ -54,6 +56,8 @@ pub struct NetworkConfig {
     pub max_peers: usize,
     pub max_connections: usize,
     pub max_frame_size: usize,
+    pub sync_obj_chunk_bytes: usize,
+    pub sync_obj_buffer_bytes: usize,
     pub connect_timeout_ms: u64,
     pub read_timeout_ms: u64,
     pub write_timeout_ms: u64,
@@ -167,6 +171,8 @@ impl Default for Config {
                 max_peers: DEFAULT_MAX_PEERS,
                 max_connections: DEFAULT_MAX_CONNECTIONS,
                 max_frame_size: DEFAULT_MAX_FRAME_SIZE,
+                sync_obj_chunk_bytes: DEFAULT_SYNC_OBJ_CHUNK_BYTES,
+                sync_obj_buffer_bytes: DEFAULT_SYNC_OBJ_BUFFER_BYTES,
                 connect_timeout_ms: DEFAULT_CONNECT_TIMEOUT_MS,
                 read_timeout_ms: DEFAULT_READ_TIMEOUT_MS,
                 write_timeout_ms: DEFAULT_WRITE_TIMEOUT_MS,
@@ -231,6 +237,8 @@ impl Config {
 
     pub fn apply_runtime_defaults(&self) {
         codec::set_max_frame_size(self.network.max_frame_size);
+        crate::net::sync::set_sync_obj_chunk_bytes(self.network.sync_obj_chunk_bytes);
+        crate::net::sync::set_sync_obj_buffer_bytes(self.network.sync_obj_buffer_bytes);
         set_default_limits(VmLimits {
             fuel: self.vm.fuel,
             memory_bytes: self.vm.memory_bytes,
@@ -255,7 +263,10 @@ impl Config {
 
         out.push("[network]".to_string());
         out.push(format!("listen_port = {}", self.network.listen_port));
-        out.push(format!("peers = [{}]", format_string_array(&self.network.peers)));
+        out.push(format!(
+            "peers = [{}]",
+            format_string_array(&self.network.peers)
+        ));
         out.push(format!("max_peers = {}", self.network.max_peers));
         out.push(format!(
             "max_connections = {}",
@@ -263,11 +274,25 @@ impl Config {
         ));
         out.push(format!("max_frame_size = {}", self.network.max_frame_size));
         out.push(format!(
+            "sync_obj_chunk_bytes = {}",
+            self.network.sync_obj_chunk_bytes
+        ));
+        out.push(format!(
+            "sync_obj_buffer_bytes = {}",
+            self.network.sync_obj_buffer_bytes
+        ));
+        out.push(format!(
             "connect_timeout_ms = {}",
             self.network.connect_timeout_ms
         ));
-        out.push(format!("read_timeout_ms = {}", self.network.read_timeout_ms));
-        out.push(format!("write_timeout_ms = {}", self.network.write_timeout_ms));
+        out.push(format!(
+            "read_timeout_ms = {}",
+            self.network.read_timeout_ms
+        ));
+        out.push(format!(
+            "write_timeout_ms = {}",
+            self.network.write_timeout_ms
+        ));
         out.push(String::new());
 
         out.push("[storage]".to_string());
@@ -394,10 +419,7 @@ impl Config {
             "token = \"{}\"",
             self.vault.arweave.token.clone().unwrap_or_default()
         ));
-        out.push(format!(
-            "arlocal = {}",
-            self.vault.arweave.arlocal
-        ));
+        out.push(format!("arlocal = {}", self.vault.arweave.arlocal));
         out.push(String::new());
 
         out.join("\n")
@@ -484,33 +506,44 @@ impl Config {
                     }
                 }
             }
-            "network.max_connections" => {
-                match value {
-                    ConfigValue::Int(val) => {
-                        if val <= 0 {
-                            return Err(DharmaError::Config(
-                                "network.max_connections must be a positive integer".to_string(),
-                            ));
-                        }
-                        let parsed = usize::try_from(val).map_err(|_| {
-                            DharmaError::Config(
-                                "network.max_connections is too large for this platform"
-                                    .to_string(),
-                            )
-                        })?;
-                        self.network.max_connections = parsed;
-                    }
-                    _ => {
+            "network.max_connections" => match value {
+                ConfigValue::Int(val) => {
+                    if val <= 0 {
                         return Err(DharmaError::Config(
                             "network.max_connections must be a positive integer".to_string(),
                         ));
                     }
+                    let parsed = usize::try_from(val).map_err(|_| {
+                        DharmaError::Config(
+                            "network.max_connections is too large for this platform".to_string(),
+                        )
+                    })?;
+                    self.network.max_connections = parsed;
                 }
-            }
+                _ => {
+                    return Err(DharmaError::Config(
+                        "network.max_connections must be a positive integer".to_string(),
+                    ));
+                }
+            },
             "network.max_frame_size" => {
                 if let ConfigValue::Int(val) = value {
                     if val > 0 {
                         self.network.max_frame_size = val as usize;
+                    }
+                }
+            }
+            "network.sync_obj_chunk_bytes" => {
+                if let ConfigValue::Int(val) = value {
+                    if val > 0 {
+                        self.network.sync_obj_chunk_bytes = val as usize;
+                    }
+                }
+            }
+            "network.sync_obj_buffer_bytes" => {
+                if let ConfigValue::Int(val) = value {
+                    if val > 0 {
+                        self.network.sync_obj_buffer_bytes = val as usize;
                     }
                 }
             }
@@ -842,7 +875,9 @@ fn secondary_global_path() -> Result<Option<PathBuf>, DharmaError> {
         Some(home) => home,
         None => return Ok(None),
     };
-    Ok(Some(home.join(".config").join("dharma").join("dharma.toml")))
+    Ok(Some(
+        home.join(".config").join("dharma").join("dharma.toml"),
+    ))
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -876,6 +911,8 @@ fn default_config_template() -> String {
         &format!("max_peers = {}", DEFAULT_MAX_PEERS),
         &format!("max_connections = {}", DEFAULT_MAX_CONNECTIONS),
         &format!("max_frame_size = {}", DEFAULT_MAX_FRAME_SIZE),
+        &format!("sync_obj_chunk_bytes = {}", DEFAULT_SYNC_OBJ_CHUNK_BYTES),
+        &format!("sync_obj_buffer_bytes = {}", DEFAULT_SYNC_OBJ_BUFFER_BYTES),
         &format!("connect_timeout_ms = {}", DEFAULT_CONNECT_TIMEOUT_MS),
         &format!("read_timeout_ms = {}", DEFAULT_READ_TIMEOUT_MS),
         &format!("write_timeout_ms = {}", DEFAULT_WRITE_TIMEOUT_MS),
@@ -905,10 +942,7 @@ fn default_config_template() -> String {
             "max_local_storage_mb = {}",
             DEFAULT_VAULT_MAX_LOCAL_STORAGE_MB
         ),
-        &format!(
-            "disk_pressure_pct = {}",
-            DEFAULT_VAULT_DISK_PRESSURE_PCT
-        ),
+        &format!("disk_pressure_pct = {}", DEFAULT_VAULT_DISK_PRESSURE_PCT),
         &format!(
             "alert_threshold_pct = {}",
             DEFAULT_VAULT_ALERT_THRESHOLD_PCT
@@ -1100,6 +1134,8 @@ mod tests {
 [network]
 listen_port = 4040
 max_connections = 77
+sync_obj_chunk_bytes = 12345
+sync_obj_buffer_bytes = 67890
 peers = ["tcp://a:1", "tcp://b:2"]
 
 [registry.pins]
@@ -1112,6 +1148,8 @@ peers = ["tcp://a:1", "tcp://b:2"]
         }
         assert_eq!(cfg.network.listen_port, 4040);
         assert_eq!(cfg.network.max_connections, 77);
+        assert_eq!(cfg.network.sync_obj_chunk_bytes, 12345);
+        assert_eq!(cfg.network.sync_obj_buffer_bytes, 67890);
         assert_eq!(cfg.network.peers.len(), 2);
         assert_eq!(
             cfg.registry.pins.get("std.finance").cloned(),
@@ -1121,6 +1159,8 @@ peers = ["tcp://a:1", "tcp://b:2"]
         assert!(rendered.contains("[network]"));
         assert!(rendered.contains("max_connections"));
         assert!(rendered.contains("max_frame_size"));
+        assert!(rendered.contains("sync_obj_chunk_bytes"));
+        assert!(rendered.contains("sync_obj_buffer_bytes"));
     }
 
     #[test]

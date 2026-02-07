@@ -2,9 +2,9 @@ use crate::dhlq;
 use crate::error::DharmaError;
 use crate::pdl::ast::{Expr as PdlExpr, Literal as PdlLiteral, Op as PdlOp};
 use crate::pdl::expr::parse_expr;
-use dharma::dhlp::{EmitSpec, PruneSpec, ProjectionPlan, ScopeBinding, TriggerSpec};
-use dharma::reactor::{Expr, Op};
 use ciborium::value::Value;
+use dharma::dhlp::{EmitSpec, ProjectionPlan, PruneSpec, ScopeBinding, TriggerSpec};
+use dharma::reactor::{Expr, Op};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Mode {
@@ -88,7 +88,9 @@ pub fn parse_plan(body: &[String], start_line: usize) -> Result<ProjectionPlan, 
                 if name.is_empty() {
                     continue;
                 }
-                triggers.push(TriggerSpec { name: name.to_string() });
+                triggers.push(TriggerSpec {
+                    name: name.to_string(),
+                });
             }
             continue;
         }
@@ -136,7 +138,10 @@ pub fn parse_plan(body: &[String], start_line: usize) -> Result<ProjectionPlan, 
         if let Some(rest) = raw.strip_prefix("prune ") {
             if !rest.trim().is_empty() {
                 let keys = parse_list(rest, line_no)?;
-                prune = Some(PruneSpec { keys, predicate: None });
+                prune = Some(PruneSpec {
+                    keys,
+                    predicate: None,
+                });
                 continue;
             }
             mode = Mode::Prune;
@@ -175,7 +180,10 @@ pub fn parse_plan(body: &[String], start_line: usize) -> Result<ProjectionPlan, 
     if query_text.trim().is_empty() {
         return Err(DharmaError::Validation("missing query".to_string()));
     }
-    let query_start = query_lines.first().map(|(line, _)| *line).unwrap_or(start_line);
+    let query_start = query_lines
+        .first()
+        .map(|(line, _)| *line)
+        .unwrap_or(start_line);
     let query_plan = dhlq::parse_plan(&query_text, query_start)?;
 
     if triggers.is_empty() {
@@ -259,9 +267,9 @@ fn parse_duration_ms(value: &str, line_no: usize) -> Result<u64, DharmaError> {
         })?;
         return Ok(hours * 60 * 60 * 1000);
     }
-    trimmed.parse::<u64>().map_err(|_| {
-        DharmaError::Validation(format!("line {line_no} col 1: invalid duration"))
-    })
+    trimmed
+        .parse::<u64>()
+        .map_err(|_| DharmaError::Validation(format!("line {line_no} col 1: invalid duration")))
 }
 
 fn parse_emit_header(rest: &str, line_no: usize) -> Result<EmitSpec, DharmaError> {
@@ -333,7 +341,10 @@ fn convert_expr(expr: &PdlExpr) -> Result<Expr, DharmaError> {
     match expr {
         PdlExpr::Literal(lit) => Ok(Expr::Literal(convert_literal(lit)?)),
         PdlExpr::Path(parts) => Ok(Expr::Path(parts.clone())),
-        PdlExpr::UnaryOp(op, inner) => Ok(Expr::Unary(convert_op(*op)?, Box::new(convert_expr(inner)?))),
+        PdlExpr::UnaryOp(op, inner) => Ok(Expr::Unary(
+            convert_op(*op)?,
+            Box::new(convert_expr(inner)?),
+        )),
         PdlExpr::BinaryOp(op, left, right) => Ok(Expr::Binary(
             convert_op(*op)?,
             Box::new(convert_expr(left)?),

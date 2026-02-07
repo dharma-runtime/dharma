@@ -14,7 +14,9 @@ fn recent_from_entries(entries: &[ManifestEntry], limit: usize) -> Vec<SubjectId
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for entry in entries.iter().rev() {
-        let Some(subject) = entry.subject else { continue };
+        let Some(subject) = entry.subject else {
+            continue;
+        };
         if seen.insert(subject) {
             out.push(subject);
             if out.len() >= limit {

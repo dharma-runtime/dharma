@@ -3,13 +3,7 @@ use super::{ProtocolEnumDef, ProtocolId, ProtocolInterface};
 pub const PROTOCOL_NAME: &str = "std.protocol.contacts";
 pub const PROTOCOL_VERSION: u64 = 1;
 
-const REQUIRED_FIELDS: &[&str] = &[
-    "owner",
-    "contact",
-    "relation",
-    "requested_by",
-    "blocked_by",
-];
+const REQUIRED_FIELDS: &[&str] = &["owner", "contact", "relation", "requested_by", "blocked_by"];
 
 const REQUIRED_ACTIONS: &[&str] = &[
     "Create",

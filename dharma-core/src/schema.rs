@@ -44,7 +44,10 @@ impl SchemaManifest {
         }
         let mut entries = vec![
             (Value::Text("v".to_string()), Value::Integer(self.v.into())),
-            (Value::Text("name".to_string()), Value::Text(self.name.clone())),
+            (
+                Value::Text("name".to_string()),
+                Value::Text(self.name.clone()),
+            ),
             (Value::Text("types".to_string()), Value::Map(types)),
         ];
         if !self.implements.is_empty() {
@@ -75,7 +78,10 @@ impl SchemaType {
         Value::Map(vec![
             (Value::Text("body".to_string()), Value::Map(body)),
             (Value::Text("required".to_string()), Value::Array(required)),
-            (Value::Text("allow_extra".to_string()), Value::Bool(self.allow_extra)),
+            (
+                Value::Text("allow_extra".to_string()),
+                Value::Bool(self.allow_extra),
+            ),
         ])
     }
 }
@@ -112,12 +118,16 @@ pub fn parse_schema(bytes: &[u8]) -> Result<SchemaManifest, DharmaError> {
 pub fn parse_schema_value(value: &Value) -> Result<SchemaManifest, DharmaError> {
     let map = expect_map(value)?;
     let v = map_get(map, "v").ok_or_else(|| DharmaError::Schema("missing v".to_string()))?;
-    let name = map_get(map, "name").ok_or_else(|| DharmaError::Schema("missing name".to_string()))?;
-    let types_val = map_get(map, "types").ok_or_else(|| DharmaError::Schema("missing types".to_string()))?;
+    let name =
+        map_get(map, "name").ok_or_else(|| DharmaError::Schema("missing name".to_string()))?;
+    let types_val =
+        map_get(map, "types").ok_or_else(|| DharmaError::Schema("missing types".to_string()))?;
     let implements_val = map_get(map, "implements");
 
     let version = match v {
-        Value::Integer(int) => (*int).try_into().map_err(|_| DharmaError::Schema("invalid v".to_string()))?,
+        Value::Integer(int) => (*int)
+            .try_into()
+            .map_err(|_| DharmaError::Schema("invalid v".to_string()))?,
         _ => return Err(DharmaError::Schema("invalid v".to_string())),
     };
     let name = expect_text(name)?;
@@ -147,9 +157,12 @@ pub fn parse_schema_value(value: &Value) -> Result<SchemaManifest, DharmaError> 
 
 fn parse_schema_type(value: &Value) -> Result<SchemaType, DharmaError> {
     let map = expect_map(value)?;
-    let body_val = map_get(map, "body").ok_or_else(|| DharmaError::Schema("missing body".to_string()))?;
-    let required_val = map_get(map, "required").ok_or_else(|| DharmaError::Schema("missing required".to_string()))?;
-    let allow_extra_val = map_get(map, "allow_extra").ok_or_else(|| DharmaError::Schema("missing allow_extra".to_string()))?;
+    let body_val =
+        map_get(map, "body").ok_or_else(|| DharmaError::Schema("missing body".to_string()))?;
+    let required_val = map_get(map, "required")
+        .ok_or_else(|| DharmaError::Schema("missing required".to_string()))?;
+    let allow_extra_val = map_get(map, "allow_extra")
+        .ok_or_else(|| DharmaError::Schema("missing allow_extra".to_string()))?;
 
     let body_map = expect_map(body_val)?;
     let mut body = BTreeMap::new();
@@ -167,7 +180,11 @@ fn parse_schema_type(value: &Value) -> Result<SchemaType, DharmaError> {
 
     let allow_extra = expect_bool(allow_extra_val)?;
 
-    Ok(SchemaType { body, required, allow_extra })
+    Ok(SchemaType {
+        body,
+        required,
+        allow_extra,
+    })
 }
 
 fn parse_type_desc(value: &Value) -> Result<TypeDesc, DharmaError> {
@@ -291,36 +308,41 @@ mod tests {
     fn schema_value() -> Value {
         Value::Map(vec![
             (Value::Text("v".to_string()), Value::Integer(1.into())),
-            (Value::Text("name".to_string()), Value::Text("demo".to_string())),
+            (
+                Value::Text("name".to_string()),
+                Value::Text("demo".to_string()),
+            ),
             (
                 Value::Text("types".to_string()),
-                Value::Map(vec![
-                    (
-                        Value::Text("task.create".to_string()),
-                        Value::Map(vec![
-                            (
-                                Value::Text("body".to_string()),
-                                Value::Map(vec![
-                                    (Value::Text("title".to_string()), Value::Text("text".to_string())),
-                                    (Value::Text("priority".to_string()), Value::Map(vec![
-                                        (Value::Text("enum".to_string()), Value::Array(vec![
+                Value::Map(vec![(
+                    Value::Text("task.create".to_string()),
+                    Value::Map(vec![
+                        (
+                            Value::Text("body".to_string()),
+                            Value::Map(vec![
+                                (
+                                    Value::Text("title".to_string()),
+                                    Value::Text("text".to_string()),
+                                ),
+                                (
+                                    Value::Text("priority".to_string()),
+                                    Value::Map(vec![(
+                                        Value::Text("enum".to_string()),
+                                        Value::Array(vec![
                                             Value::Text("low".to_string()),
                                             Value::Text("high".to_string()),
-                                        ]))
-                                    ])),
-                                ]),
-                            ),
-                            (
-                                Value::Text("required".to_string()),
-                                Value::Array(vec![Value::Text("title".to_string())]),
-                            ),
-                            (
-                                Value::Text("allow_extra".to_string()),
-                                Value::Bool(false),
-                            ),
-                        ]),
-                    ),
-                ]),
+                                        ]),
+                                    )]),
+                                ),
+                            ]),
+                        ),
+                        (
+                            Value::Text("required".to_string()),
+                            Value::Array(vec![Value::Text("title".to_string())]),
+                        ),
+                        (Value::Text("allow_extra".to_string()), Value::Bool(false)),
+                    ]),
+                )]),
             ),
         ])
     }
@@ -329,8 +351,14 @@ mod tests {
     fn parse_and_validate_schema() {
         let schema = parse_schema_value(&schema_value()).unwrap();
         let body = Value::Map(vec![
-            (Value::Text("title".to_string()), Value::Text("Do".to_string())),
-            (Value::Text("priority".to_string()), Value::Text("low".to_string())),
+            (
+                Value::Text("title".to_string()),
+                Value::Text("Do".to_string()),
+            ),
+            (
+                Value::Text("priority".to_string()),
+                Value::Text("low".to_string()),
+            ),
         ]);
         validate_body(&schema, "task.create", &body).unwrap();
     }
@@ -346,8 +374,14 @@ mod tests {
     fn schema_rejects_extra_field() {
         let schema = parse_schema_value(&schema_value()).unwrap();
         let body = Value::Map(vec![
-            (Value::Text("title".to_string()), Value::Text("Do".to_string())),
-            (Value::Text("extra".to_string()), Value::Text("no".to_string())),
+            (
+                Value::Text("title".to_string()),
+                Value::Text("Do".to_string()),
+            ),
+            (
+                Value::Text("extra".to_string()),
+                Value::Text("no".to_string()),
+            ),
         ]);
         assert!(validate_body(&schema, "task.create", &body).is_err());
     }
@@ -364,11 +398,20 @@ mod tests {
     fn parse_schema_rejects_invalid_type_desc() {
         let mut value = schema_value();
         if let Value::Map(ref mut entries) = value {
-            if let Some((_, types)) = entries.iter_mut().find(|(k, _)| matches!(k, Value::Text(text) if text == "types")) {
+            if let Some((_, types)) = entries
+                .iter_mut()
+                .find(|(k, _)| matches!(k, Value::Text(text) if text == "types"))
+            {
                 if let Value::Map(ref mut types_map) = types {
-                    if let Some((_, schema_type)) = types_map.iter_mut().find(|(k, _)| matches!(k, Value::Text(text) if text == "task.create")) {
+                    if let Some((_, schema_type)) = types_map
+                        .iter_mut()
+                        .find(|(k, _)| matches!(k, Value::Text(text) if text == "task.create"))
+                    {
                         if let Value::Map(ref mut schema_entries) = schema_type {
-                            if let Some((_, body)) = schema_entries.iter_mut().find(|(k, _)| matches!(k, Value::Text(text) if text == "body")) {
+                            if let Some((_, body)) = schema_entries
+                                .iter_mut()
+                                .find(|(k, _)| matches!(k, Value::Text(text) if text == "body"))
+                            {
                                 *body = Value::Text("invalid".to_string());
                             }
                         }

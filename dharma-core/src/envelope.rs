@@ -41,15 +41,24 @@ impl AssertionEnvelope {
     pub fn aad_value(&self) -> Value {
         let mut entries = vec![
             (Value::Text("v".to_string()), Value::Integer(self.v.into())),
-            (Value::Text("suite".to_string()), Value::Integer(self.suite.into())),
-            (Value::Text("kid".to_string()), Value::Bytes(self.kid.as_bytes().to_vec())),
+            (
+                Value::Text("suite".to_string()),
+                Value::Integer(self.suite.into()),
+            ),
+            (
+                Value::Text("kid".to_string()),
+                Value::Bytes(self.kid.as_bytes().to_vec()),
+            ),
             (
                 Value::Text("nonce".to_string()),
                 Value::Bytes(self.nonce.as_bytes().to_vec()),
             ),
         ];
         if let Some(epoch) = self.epoch {
-            entries.push((Value::Text("epoch".to_string()), Value::Integer(epoch.into())));
+            entries.push((
+                Value::Text("epoch".to_string()),
+                Value::Integer(epoch.into()),
+            ));
         }
         Value::Map(entries)
     }
@@ -61,8 +70,14 @@ impl AssertionEnvelope {
     pub fn to_value(&self) -> Value {
         let mut entries = vec![
             (Value::Text("v".to_string()), Value::Integer(self.v.into())),
-            (Value::Text("suite".to_string()), Value::Integer(self.suite.into())),
-            (Value::Text("kid".to_string()), Value::Bytes(self.kid.as_bytes().to_vec())),
+            (
+                Value::Text("suite".to_string()),
+                Value::Integer(self.suite.into()),
+            ),
+            (
+                Value::Text("kid".to_string()),
+                Value::Bytes(self.kid.as_bytes().to_vec()),
+            ),
             (
                 Value::Text("nonce".to_string()),
                 Value::Bytes(self.nonce.as_bytes().to_vec()),
@@ -70,7 +85,10 @@ impl AssertionEnvelope {
             (Value::Text("ct".to_string()), Value::Bytes(self.ct.clone())),
         ];
         if let Some(epoch) = self.epoch {
-            entries.push((Value::Text("epoch".to_string()), Value::Integer(epoch.into())));
+            entries.push((
+                Value::Text("epoch".to_string()),
+                Value::Integer(epoch.into()),
+            ));
         }
         Value::Map(entries)
     }
@@ -82,11 +100,24 @@ impl AssertionEnvelope {
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, DharmaError> {
         let value = cbor::ensure_canonical(bytes)?;
         let map = expect_map(&value)?;
-        let v = expect_uint(map_get(map, "v").ok_or_else(|| DharmaError::Validation("missing v".to_string()))?)?;
-        let suite = expect_uint(map_get(map, "suite").ok_or_else(|| DharmaError::Validation("missing suite".to_string()))?)?;
-        let kid_bytes = expect_bytes(map_get(map, "kid").ok_or_else(|| DharmaError::Validation("missing kid".to_string()))?)?;
-        let nonce_bytes = expect_bytes(map_get(map, "nonce").ok_or_else(|| DharmaError::Validation("missing nonce".to_string()))?)?;
-        let ct = expect_bytes(map_get(map, "ct").ok_or_else(|| DharmaError::Validation("missing ct".to_string()))?)?;
+        let v = expect_uint(
+            map_get(map, "v").ok_or_else(|| DharmaError::Validation("missing v".to_string()))?,
+        )?;
+        let suite = expect_uint(
+            map_get(map, "suite")
+                .ok_or_else(|| DharmaError::Validation("missing suite".to_string()))?,
+        )?;
+        let kid_bytes = expect_bytes(
+            map_get(map, "kid")
+                .ok_or_else(|| DharmaError::Validation("missing kid".to_string()))?,
+        )?;
+        let nonce_bytes = expect_bytes(
+            map_get(map, "nonce")
+                .ok_or_else(|| DharmaError::Validation("missing nonce".to_string()))?,
+        )?;
+        let ct = expect_bytes(
+            map_get(map, "ct").ok_or_else(|| DharmaError::Validation("missing ct".to_string()))?,
+        )?;
         let epoch = match map_get(map, "epoch") {
             Some(val) => Some(expect_uint(val)?),
             None => None,

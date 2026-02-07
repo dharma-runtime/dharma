@@ -1,37 +1,42 @@
 use crate::assertion::{is_overlay, signer_from_meta, AssertionPlaintext};
 use crate::contract::{ContractEngine, ContractStatus, SummaryDecision};
 use crate::crypto;
+use crate::domain::DomainState;
 use crate::env::Env;
 use crate::envelope::{self, AssertionEnvelope};
 use crate::error::DharmaError;
-use crate::metrics;
-use crate::domain::DomainState;
 use crate::identity::{
     delegate_allows, device_key_revoked, roles_for_identity, root_key_for_identity,
     ATLAS_IDENTITY_ACTIVATE, ATLAS_IDENTITY_GENESIS, ATLAS_IDENTITY_REVOKE, ATLAS_IDENTITY_SUSPEND,
 };
+use crate::keys::{hpke_open, key_id_for_key, KeyEnvelope, Keyring};
+use crate::metrics;
 use crate::ownership::{derive_ownership_record, OwnershipState};
 use crate::pdl::schema::{ConcurrencyMode, CqrsSchema};
 use crate::runtime::cqrs::{action_index, encode_args_buffer, load_state, merge_args};
 use crate::schema as generic_schema;
-use crate::keys::{hpke_open, key_id_for_key, KeyEnvelope, Keyring};
 use crate::store::index::FrontierIndex;
 use crate::store::state::{
-    append_assertion, append_overlay, find_assertion_by_id, find_overlay_by_id, load_epoch,
-    load_key_bind, overlays_for_ref, save_epoch, save_key_bind, subject_has_facts, KeyBindRecord,
-    load_ownership, save_ownership, list_assertions,
+    append_assertion, append_overlay, find_assertion_by_id, find_overlay_by_id, list_assertions,
+    load_epoch, load_key_bind, load_ownership, overlays_for_ref, save_epoch, save_key_bind,
+    save_ownership, subject_has_facts, KeyBindRecord,
 };
 use crate::store::Store;
 use crate::types::{AssertionId, ContractId, EnvelopeId, IdentityKey, KeyId, SchemaId, SubjectId};
 use crate::validation::{structural_validate, StructuralStatus};
-use crate::value::{expect_array, expect_bytes, expect_int, expect_map, expect_text, expect_uint, map_get};
+use crate::value::{
+    expect_array, expect_bytes, expect_int, expect_map, expect_text, expect_uint, map_get,
+};
 use crate::vault::DHBOX_VERSION_V1;
 use ciborium::value::Value;
 use tracing::{debug, warn};
 
 #[derive(Debug)]
 pub enum IngestError {
-    MissingDependency { assertion_id: AssertionId, missing: AssertionId },
+    MissingDependency {
+        assertion_id: AssertionId,
+        missing: AssertionId,
+    },
     Pending(String),
     Validation(String),
     Dharma(DharmaError),
@@ -99,7 +104,9 @@ pub fn ingest_object(
     let overlay_flag = is_action && is_overlay(&assertion.header);
     let overlay_ref = if overlay_flag {
         if assertion.header.refs.len() != 1 {
-            return Err(IngestError::Validation("overlay must reference base".to_string()));
+            return Err(IngestError::Validation(
+                "overlay must reference base".to_string(),
+            ));
         }
         assertion.header.refs.first().copied()
     } else {
@@ -155,7 +162,14 @@ pub fn ingest_object(
             }
             Err(err) => return Err(err),
         }
-        match validate_action_contract(store, index, &subject, &assertion, assertion_id, Some(base_ref)) {
+        match validate_action_contract(
+            store,
+            index,
+            &subject,
+            &assertion,
+            assertion_id,
+            Some(base_ref),
+        ) {
             Ok(()) => {}
             Err(IngestError::Pending(reason)) => {
                 index.mark_known(assertion_id);
@@ -296,7 +310,11 @@ pub fn ingest_object(
                 Ok((_prev_env_id, _prev_assertion_id, _prev_subject, prev_assertion)) => {
                     Some(prev_assertion)
                 }
-                Err(_) => return Err(IngestError::Validation("invalid prev assertion".to_string())),
+                Err(_) => {
+                    return Err(IngestError::Validation(
+                        "invalid prev assertion".to_string(),
+                    ))
+                }
             }
         }
         None => None,
@@ -369,11 +387,11 @@ pub fn ingest_object(
     }
     let action_name = assertion.header.typ.clone();
     let plain = assertion.to_cbor()?;
-        append_assertion(
-            env,
-            &subject,
-            assertion.header.seq,
-            assertion_id,
+    append_assertion(
+        env,
+        &subject,
+        assertion.header.seq,
+        assertion_id,
         envelope_id,
         &action_name,
         &plain,
@@ -401,7 +419,10 @@ pub fn ingest_object(
     Ok(IngestStatus::Accepted(assertion_id))
 }
 
-fn enforce_share_permissions(store: &Store, assertion: &AssertionPlaintext) -> Result<(), IngestError> {
+fn enforce_share_permissions(
+    store: &Store,
+    assertion: &AssertionPlaintext,
+) -> Result<(), IngestError> {
     if !assertion.header.typ.starts_with("share.") {
         return Ok(());
     }
@@ -426,7 +447,8 @@ fn enforce_share_permissions(store: &Store, assertion: &AssertionPlaintext) -> R
 }
 
 fn validate_share_body(assertion: &AssertionPlaintext) -> Result<(), IngestError> {
-    let map = expect_map(&assertion.body).map_err(|err| IngestError::Validation(err.to_string()))?;
+    let map =
+        expect_map(&assertion.body).map_err(|err| IngestError::Validation(err.to_string()))?;
     match assertion.header.typ.as_str() {
         "share.grant" | "share.revoke" => {
             let identity = map_get(map, "target_identity")
@@ -438,7 +460,10 @@ fn validate_share_body(assertion: &AssertionPlaintext) -> Result<(), IngestError
                 .transpose()
                 .map_err(|err| IngestError::Validation(err.to_string()))?;
             let has_identity = identity.is_some();
-            let has_role = role.as_ref().map(|value| !value.is_empty()).unwrap_or(false);
+            let has_role = role
+                .as_ref()
+                .map(|value| !value.is_empty())
+                .unwrap_or(false);
             if has_identity == has_role {
                 return Err(IngestError::Validation(
                     "share target must be identity or role".to_string(),
@@ -554,7 +579,8 @@ fn enforce_domain_key_rotate(
     store: &Store,
     assertion: &AssertionPlaintext,
 ) -> Result<(), IngestError> {
-    let map = expect_map(&assertion.body).map_err(|err| IngestError::Validation(err.to_string()))?;
+    let map =
+        expect_map(&assertion.body).map_err(|err| IngestError::Validation(err.to_string()))?;
     let epoch = expect_uint(
         map_get(map, "epoch")
             .ok_or_else(|| IngestError::Validation("missing epoch".to_string()))?,
@@ -587,7 +613,8 @@ fn enforce_subject_key_bind(
     store: &Store,
     assertion: &AssertionPlaintext,
 ) -> Result<(), IngestError> {
-    let map = expect_map(&assertion.body).map_err(|err| IngestError::Validation(err.to_string()))?;
+    let map =
+        expect_map(&assertion.body).map_err(|err| IngestError::Validation(err.to_string()))?;
     let domain_bytes = expect_bytes(
         map_get(map, "domain")
             .ok_or_else(|| IngestError::Validation("missing domain".to_string()))?,
@@ -610,9 +637,7 @@ fn enforce_subject_key_bind(
         .owner
         .ok_or_else(|| IngestError::Pending("missing domain owner".to_string()))?;
     if assertion.header.auth.as_bytes() != owner.as_bytes() {
-        return Err(IngestError::Validation(
-            "unauthorized key bind".to_string(),
-        ));
+        return Err(IngestError::Validation("unauthorized key bind".to_string()));
     }
     let domain_epoch = match load_epoch(store.env(), &domain)? {
         Some(value) => value,
@@ -620,9 +645,7 @@ fn enforce_subject_key_bind(
             if epoch == 0 {
                 0
             } else {
-                return Err(IngestError::Pending(
-                    "missing domain epoch".to_string(),
-                ));
+                return Err(IngestError::Pending("missing domain epoch".to_string()));
             }
         }
     };
@@ -651,7 +674,8 @@ fn enforce_member_key_grant(
     keys: &mut Keyring,
     assertion: &AssertionPlaintext,
 ) -> Result<(), IngestError> {
-    let map = expect_map(&assertion.body).map_err(|err| IngestError::Validation(err.to_string()))?;
+    let map =
+        expect_map(&assertion.body).map_err(|err| IngestError::Validation(err.to_string()))?;
     let member_bytes = expect_bytes(
         map_get(map, "member")
             .ok_or_else(|| IngestError::Validation("missing member".to_string()))?,
@@ -676,8 +700,7 @@ fn enforce_member_key_grant(
     .map_err(|err| IngestError::Validation(err.to_string()))?;
     let sdk_id = KeyId::from_slice(&sdk_id_bytes)?;
     let sdk_bytes = expect_bytes(
-        map_get(map, "sdk")
-            .ok_or_else(|| IngestError::Validation("missing sdk".to_string()))?,
+        map_get(map, "sdk").ok_or_else(|| IngestError::Validation("missing sdk".to_string()))?,
     )
     .map_err(|err| IngestError::Validation(err.to_string()))?;
     let bind = load_key_bind(store.env(), &subject)?
@@ -751,7 +774,9 @@ pub fn ingest_object_relay(
     subject_hint: Option<SubjectId>,
 ) -> Result<RelayIngestStatus, IngestError> {
     if crypto::envelope_id(bytes) != envelope_id {
-        return Err(IngestError::Validation("envelope hash mismatch".to_string()));
+        return Err(IngestError::Validation(
+            "envelope hash mismatch".to_string(),
+        ));
     }
 
     let object_path = store
@@ -768,8 +793,7 @@ pub fn ingest_object_relay(
         if is_new_object {
             if crate::store::state::load_ownership(store.env(), &subject)?.is_none() {
                 if let Ok(record) = derive_ownership_record(store.env(), &assertion) {
-                    if crate::store::state::save_ownership(store.env(), &subject, &record).is_ok()
-                    {
+                    if crate::store::state::save_ownership(store.env(), &subject, &record).is_ok() {
                         seeded_ownership = true;
                     }
                 }
@@ -779,7 +803,9 @@ pub fn ingest_object_relay(
         let overlay_flag = is_action && is_overlay(&assertion.header);
         let overlay_ref = if overlay_flag {
             if assertion.header.refs.len() != 1 {
-                return Err(IngestError::Validation("overlay must reference base".to_string()));
+                return Err(IngestError::Validation(
+                    "overlay must reference base".to_string(),
+                ));
             }
             assertion.header.refs.first().copied()
         } else {
@@ -907,8 +933,9 @@ fn enforce_relay_quota(
     let now = store.env().now();
     let policy = crate::relay::resolve_relay_policy(store, subject, now)
         .map_err(|err| IngestError::Validation(format!("relay policy: {err}")))?;
-    let authorized = crate::relay::relay_identity_authorized(store, &policy.relay_domain, identity, now)
-        .map_err(|err| IngestError::Validation(format!("relay auth: {err}")))?;
+    let authorized =
+        crate::relay::relay_identity_authorized(store, &policy.relay_domain, identity, now)
+            .map_err(|err| IngestError::Validation(format!("relay auth: {err}")))?;
     if !authorized {
         return Err(IngestError::Validation(
             "relay identity not authorized for relay domain".to_string(),
@@ -1123,7 +1150,13 @@ fn validate_action_contract(
     }
 
     let contract_bytes = load_contract_bytes(store, &assertion.header.contract)?;
-    let mut state = load_state(store.env(), subject, &schema, &contract_bytes, assertion.header.ver)?;
+    let mut state = load_state(
+        store.env(),
+        subject,
+        &schema,
+        &contract_bytes,
+        assertion.header.ver,
+    )?;
     let action_idx = action_index(&schema, action_name)?;
     let args_buffer =
         encode_args_buffer(action_schema, &schema.structs, action_idx, &merged, true)?;
@@ -1146,7 +1179,9 @@ fn enforce_sys_vault_checkpoint(
     let end_seq = expect_int(require_map_value(args_map, "end_seq")?)
         .map_err(|err| IngestError::Validation(err.to_string()))?;
     if start_seq < 0 || end_seq < 0 {
-        return Err(IngestError::Validation("checkpoint seq negative".to_string()));
+        return Err(IngestError::Validation(
+            "checkpoint seq negative".to_string(),
+        ));
     }
     if end_seq <= start_seq {
         return Err(IngestError::Validation(
@@ -1156,12 +1191,13 @@ fn enforce_sys_vault_checkpoint(
     ensure_hash_field(args_map, "state_root")?;
 
     let vault_val = require_map_value(args_map, "vault")?;
-    let vault_map = expect_map(vault_val).map_err(|err| IngestError::Validation(err.to_string()))?;
+    let vault_map =
+        expect_map(vault_val).map_err(|err| IngestError::Validation(err.to_string()))?;
 
     let subject_bytes = expect_bytes(require_map_value(vault_map, "subject")?)
         .map_err(|err| IngestError::Validation(err.to_string()))?;
-    let vault_subject =
-        SubjectId::from_slice(&subject_bytes).map_err(|err| IngestError::Validation(err.to_string()))?;
+    let vault_subject = SubjectId::from_slice(&subject_bytes)
+        .map_err(|err| IngestError::Validation(err.to_string()))?;
     if &vault_subject != subject {
         return Err(IngestError::Validation(
             "vault subject mismatch".to_string(),
@@ -1216,7 +1252,8 @@ fn enforce_sys_vault_checkpoint(
     }
     if let Some(value) = map_get(vault_map, "shards") {
         if !matches!(value, Value::Null) {
-            let shards = expect_array(value).map_err(|err| IngestError::Validation(err.to_string()))?;
+            let shards =
+                expect_array(value).map_err(|err| IngestError::Validation(err.to_string()))?;
             for shard in shards {
                 let shard_map =
                     expect_map(shard).map_err(|err| IngestError::Validation(err.to_string()))?;
@@ -1225,14 +1262,12 @@ fn enforce_sys_vault_checkpoint(
                 let shard_total = expect_int(require_map_value(shard_map, "shard_total")?)
                     .map_err(|err| IngestError::Validation(err.to_string()))?;
                 if shard_index < 0 || shard_total <= 0 || shard_index >= shard_total {
-                    return Err(IngestError::Validation(
-                        "invalid shard index".to_string(),
-                    ));
+                    return Err(IngestError::Validation("invalid shard index".to_string()));
                 }
                 ensure_hash_field(shard_map, "hash")?;
                 if let Some(value) = map_get(shard_map, "size") {
-                    let size =
-                        expect_int(value).map_err(|err| IngestError::Validation(err.to_string()))?;
+                    let size = expect_int(value)
+                        .map_err(|err| IngestError::Validation(err.to_string()))?;
                     if size < 0 {
                         return Err(IngestError::Validation("shard size negative".to_string()));
                     }
@@ -1268,13 +1303,15 @@ fn last_checkpoint_end(
         if action_name != "Checkpoint" {
             continue;
         }
-        let map = expect_map(&assertion.body)
-            .map_err(|err| IngestError::Validation(err.to_string()))?;
+        let map =
+            expect_map(&assertion.body).map_err(|err| IngestError::Validation(err.to_string()))?;
         let end_value = require_map_value(map, "end_seq")?;
         let end_seq =
             expect_int(end_value).map_err(|err| IngestError::Validation(err.to_string()))?;
         if end_seq < 0 {
-            return Err(IngestError::Validation("checkpoint end_seq negative".to_string()));
+            return Err(IngestError::Validation(
+                "checkpoint end_seq negative".to_string(),
+            ));
         }
         if last_end.map_or(true, |current| end_seq > current) {
             last_end = Some(end_seq);
@@ -1348,7 +1385,10 @@ fn enforce_identity_lifecycle(
     assertion: &AssertionPlaintext,
 ) -> Result<(), IngestError> {
     let typ = assertion.header.typ.as_str();
-    if typ != ATLAS_IDENTITY_ACTIVATE && typ != ATLAS_IDENTITY_SUSPEND && typ != ATLAS_IDENTITY_REVOKE {
+    if typ != ATLAS_IDENTITY_ACTIVATE
+        && typ != ATLAS_IDENTITY_SUSPEND
+        && typ != ATLAS_IDENTITY_REVOKE
+    {
         return Ok(());
     }
     let Some(root_key) = root_key_for_identity(env, subject)? else {
@@ -1375,17 +1415,20 @@ fn enforce_acting_context(
             let Value::Text(name) = key else { continue };
             match name.as_str() {
                 "acting_identity" => {
-                    let bytes = expect_bytes(value).map_err(|err| IngestError::Validation(err.to_string()))?;
+                    let bytes = expect_bytes(value)
+                        .map_err(|err| IngestError::Validation(err.to_string()))?;
                     let id = SubjectId::from_slice(&bytes).map_err(IngestError::from)?;
                     acting_identity = Some(id);
                 }
                 "acting_domain" => {
-                    let bytes = expect_bytes(value).map_err(|err| IngestError::Validation(err.to_string()))?;
+                    let bytes = expect_bytes(value)
+                        .map_err(|err| IngestError::Validation(err.to_string()))?;
                     let id = SubjectId::from_slice(&bytes).map_err(IngestError::from)?;
                     acting_domain = Some(id);
                 }
                 "acting_role" => {
-                    let role = expect_text(value).map_err(|err| IngestError::Validation(err.to_string()))?;
+                    let role = expect_text(value)
+                        .map_err(|err| IngestError::Validation(err.to_string()))?;
                     if !role.is_empty() {
                         acting_role = Some(role);
                     }
@@ -1413,13 +1456,15 @@ fn enforce_acting_context(
         return Err(IngestError::Pending("missing identity root".to_string()));
     };
     if !subject_has_facts(store.env(), &domain_subject)? {
-        return Err(IngestError::Pending("missing domain membership".to_string()));
+        return Err(IngestError::Pending(
+            "missing domain membership".to_string(),
+        ));
     }
     let state = DomainState::load(store, &domain_subject)?;
     let now = assertion.header.ts.unwrap_or(0);
-    let member = state.member(&root_key, now).ok_or_else(|| {
-        IngestError::Validation("not a domain member".to_string())
-    })?;
+    let member = state
+        .member(&root_key, now)
+        .ok_or_else(|| IngestError::Validation("not a domain member".to_string()))?;
     if let Some(role) = acting_role {
         if !member.roles.iter().any(|r| r == &role) {
             return Err(IngestError::Validation("role not granted".to_string()));
@@ -1460,11 +1505,16 @@ fn enforce_concurrency(
     Ok(())
 }
 
-fn validate_generic_contract(store: &Store, assertion: &AssertionPlaintext) -> Result<(), IngestError> {
+fn validate_generic_contract(
+    store: &Store,
+    assertion: &AssertionPlaintext,
+) -> Result<(), IngestError> {
     let schema = match load_schema_kind(store, &assertion.header.schema)? {
         SchemaKind::Manifest(schema) => schema,
         SchemaKind::Cqrs(_) => {
-            return Err(IngestError::Validation("unexpected cqrs schema".to_string()))
+            return Err(IngestError::Validation(
+                "unexpected cqrs schema".to_string(),
+            ))
         }
     };
     generic_schema::validate_body(&schema, &assertion.header.typ, &assertion.body)
@@ -1479,7 +1529,9 @@ fn validate_generic_contract(store: &Store, assertion: &AssertionPlaintext) -> R
     match result.status {
         ContractStatus::Accept if result.ok => Ok(()),
         ContractStatus::Pending => Err(IngestError::Pending(
-            result.reason.unwrap_or_else(|| "contract pending".to_string()),
+            result
+                .reason
+                .unwrap_or_else(|| "contract pending".to_string()),
         )),
         _ => {
             warn!(
@@ -1487,7 +1539,9 @@ fn validate_generic_contract(store: &Store, assertion: &AssertionPlaintext) -> R
                 "generic contract rejected"
             );
             Err(IngestError::Validation(
-                result.reason.unwrap_or_else(|| "contract rejected".to_string()),
+                result
+                    .reason
+                    .unwrap_or_else(|| "contract rejected".to_string()),
             ))
         }
     }
@@ -1531,14 +1585,18 @@ fn decode_assertion(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assertion::{add_signer_meta, AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION};
+    use crate::assertion::{
+        add_signer_meta, AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION,
+    };
     use crate::contract::{PermissionRule, PermissionSummary, PublicPermissions};
     use crate::crypto;
-    use crate::keys::{hpke_public_key_from_secret, hpke_seal, key_id_for_key};
     use crate::identity::{ATLAS_IDENTITY_GENESIS, ATLAS_IDENTITY_SUSPEND};
+    use crate::keys::{hpke_public_key_from_secret, hpke_seal, key_id_for_key};
     use crate::ownership::{Owner, OwnershipRecord};
+    use crate::pdl::schema::{
+        ActionSchema, ConcurrencyMode, CqrsSchema, FieldSchema, TypeSpec, Visibility,
+    };
     use crate::store::state::save_ownership;
-    use crate::pdl::schema::{ActionSchema, ConcurrencyMode, CqrsSchema, FieldSchema, TypeSpec, Visibility};
     use crate::types::{AssertionId, ContractId, EnvelopeId, Nonce12, SchemaId};
     use ciborium::value::Value;
     use rand::rngs::StdRng;
@@ -1641,7 +1699,10 @@ mod tests {
         let contract = ContractId::from_bytes([2u8; 32]);
 
         let relay_genesis_body = Value::Map(vec![
-            (Value::Text("domain".to_string()), Value::Text(relay_domain.to_string())),
+            (
+                Value::Text("domain".to_string()),
+                Value::Text(relay_domain.to_string()),
+            ),
             (
                 Value::Text("owner".to_string()),
                 Value::Bytes(relay_identity.public_key.as_bytes().to_vec()),
@@ -1672,7 +1733,10 @@ mod tests {
         .unwrap();
 
         let plan_body = Value::Map(vec![
-            (Value::Text("name".to_string()), Value::Text(plan_name.to_string())),
+            (
+                Value::Text("name".to_string()),
+                Value::Text(plan_name.to_string()),
+            ),
             (
                 Value::Text("max_bytes".to_string()),
                 Value::Integer(10_000_000u64.into()),
@@ -1703,8 +1767,14 @@ mod tests {
         .unwrap();
 
         let grant_body = Value::Map(vec![
-            (Value::Text("domain".to_string()), Value::Text(domain_name.to_string())),
-            (Value::Text("plan".to_string()), Value::Text(plan_name.to_string())),
+            (
+                Value::Text("domain".to_string()),
+                Value::Text(domain_name.to_string()),
+            ),
+            (
+                Value::Text("plan".to_string()),
+                Value::Text(plan_name.to_string()),
+            ),
             (Value::Text("expires".to_string()), Value::Integer(0.into())),
         ]);
         let (grant_bytes, grant_id) = make_plain_assertion(
@@ -1732,7 +1802,10 @@ mod tests {
         .unwrap();
 
         let domain_genesis_body = Value::Map(vec![
-            (Value::Text("domain".to_string()), Value::Text(domain_name.to_string())),
+            (
+                Value::Text("domain".to_string()),
+                Value::Text(domain_name.to_string()),
+            ),
             (
                 Value::Text("owner".to_string()),
                 Value::Bytes(domain_owner_id.as_bytes().to_vec()),
@@ -1819,9 +1892,13 @@ mod tests {
         let relay_identity = crate::identity::IdentityState {
             subject_id: SubjectId::from_bytes([7u8; 32]),
             signing_key: signing_key.clone(),
-            public_key: crate::types::IdentityKey::from_bytes(signing_key.verifying_key().to_bytes()),
+            public_key: crate::types::IdentityKey::from_bytes(
+                signing_key.verifying_key().to_bytes(),
+            ),
             root_signing_key: signing_key.clone(),
-            root_public_key: crate::types::IdentityKey::from_bytes(signing_key.verifying_key().to_bytes()),
+            root_public_key: crate::types::IdentityKey::from_bytes(
+                signing_key.verifying_key().to_bytes(),
+            ),
             subject_key: [0u8; 32],
             noise_sk: [1u8; 32],
             schema: SchemaId::from_bytes([1u8; 32]),
@@ -1867,7 +1944,10 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(status, RelayIngestStatus::Accepted(envelope_id, assertion_id));
+        assert_eq!(
+            status,
+            RelayIngestStatus::Accepted(envelope_id, assertion_id)
+        );
     }
 
     #[test]
@@ -1884,9 +1964,13 @@ mod tests {
         let relay_identity = crate::identity::IdentityState {
             subject_id: SubjectId::from_bytes([8u8; 32]),
             signing_key: signing_key.clone(),
-            public_key: crate::types::IdentityKey::from_bytes(signing_key.verifying_key().to_bytes()),
+            public_key: crate::types::IdentityKey::from_bytes(
+                signing_key.verifying_key().to_bytes(),
+            ),
             root_signing_key: signing_key.clone(),
-            root_public_key: crate::types::IdentityKey::from_bytes(signing_key.verifying_key().to_bytes()),
+            root_public_key: crate::types::IdentityKey::from_bytes(
+                signing_key.verifying_key().to_bytes(),
+            ),
             subject_key: [0u8; 32],
             noise_sk: [1u8; 32],
             schema: SchemaId::from_bytes([1u8; 32]),
@@ -1938,9 +2022,13 @@ mod tests {
         let relay_identity = crate::identity::IdentityState {
             subject_id: SubjectId::from_bytes([18u8; 32]),
             signing_key: signing_key.clone(),
-            public_key: crate::types::IdentityKey::from_bytes(signing_key.verifying_key().to_bytes()),
+            public_key: crate::types::IdentityKey::from_bytes(
+                signing_key.verifying_key().to_bytes(),
+            ),
             root_signing_key: signing_key.clone(),
-            root_public_key: crate::types::IdentityKey::from_bytes(signing_key.verifying_key().to_bytes()),
+            root_public_key: crate::types::IdentityKey::from_bytes(
+                signing_key.verifying_key().to_bytes(),
+            ),
             subject_key: [0u8; 32],
             noise_sk: [1u8; 32],
             schema: SchemaId::from_bytes([1u8; 32]),
@@ -2082,7 +2170,7 @@ mod tests {
             fields,
             actions,
             queries: BTreeMap::new(),
-        projections: BTreeMap::new(),
+            projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Allow,
         };
         let schema_bytes = schema.to_cbor().unwrap();
@@ -2090,7 +2178,10 @@ mod tests {
         let contract_bytes = simple_contract_bytes();
         let action_contract_id = ContractId::from_bytes(crypto::sha256(&contract_bytes));
         store
-            .put_object(&EnvelopeId::from_bytes(*action_schema_id.as_bytes()), &schema_bytes)
+            .put_object(
+                &EnvelopeId::from_bytes(*action_schema_id.as_bytes()),
+                &schema_bytes,
+            )
             .unwrap();
         store
             .put_object(
@@ -2200,7 +2291,8 @@ mod tests {
         let (root_sk, root_id) = crypto::generate_identity_keypair(&mut rng);
         let (device_sk, device_id) = crypto::generate_identity_keypair(&mut rng);
         let identity_subject = SubjectId::from_bytes([10u8; 32]);
-        let (identity_schema, identity_contract) = crate::builtins::ensure_note_artifacts(&store).unwrap();
+        let (identity_schema, identity_contract) =
+            crate::builtins::ensure_note_artifacts(&store).unwrap();
 
         let genesis_header = AssertionHeader {
             v: crypto::PROTOCOL_VERSION,
@@ -2217,7 +2309,8 @@ mod tests {
             note: None,
             meta: add_signer_meta(None, &identity_subject),
         };
-        let genesis = AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
+        let genesis =
+            AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
         let genesis_bytes = genesis.to_cbor().unwrap();
         let genesis_id = genesis.assertion_id().unwrap();
         let genesis_env = crypto::envelope_id(&genesis_bytes);
@@ -2262,7 +2355,7 @@ mod tests {
             fields,
             actions,
             queries: BTreeMap::new(),
-        projections: BTreeMap::new(),
+            projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Allow,
         };
         let schema_bytes = schema.to_cbor().unwrap();
@@ -2270,7 +2363,10 @@ mod tests {
         let contract_bytes = simple_contract_bytes();
         let contract_id = ContractId::from_bytes(crypto::sha256(&contract_bytes));
         store
-            .put_object(&EnvelopeId::from_bytes(*schema_id.as_bytes()), &schema_bytes)
+            .put_object(
+                &EnvelopeId::from_bytes(*schema_id.as_bytes()),
+                &schema_bytes,
+            )
             .unwrap();
         store
             .put_object(
@@ -2319,7 +2415,8 @@ mod tests {
         let (root_sk, root_id) = crypto::generate_identity_keypair(&mut rng);
         let (device_sk, device_id) = crypto::generate_identity_keypair(&mut rng);
         let identity_subject = SubjectId::from_bytes([12u8; 32]);
-        let (identity_schema, identity_contract) = crate::builtins::ensure_note_artifacts(&store).unwrap();
+        let (identity_schema, identity_contract) =
+            crate::builtins::ensure_note_artifacts(&store).unwrap();
 
         let genesis_header = AssertionHeader {
             v: crypto::PROTOCOL_VERSION,
@@ -2336,7 +2433,8 @@ mod tests {
             note: None,
             meta: add_signer_meta(None, &identity_subject),
         };
-        let genesis = AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
+        let genesis =
+            AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
         let genesis_bytes = genesis.to_cbor().unwrap();
         let genesis_id = genesis.assertion_id().unwrap();
         let genesis_env = crypto::envelope_id(&genesis_bytes);
@@ -2371,7 +2469,10 @@ mod tests {
                 Value::Text("delegate".to_string()),
                 Value::Bytes(device_id.as_bytes().to_vec()),
             ),
-            (Value::Text("scope".to_string()), Value::Text("all".to_string())),
+            (
+                Value::Text("scope".to_string()),
+                Value::Text("all".to_string()),
+            ),
             (Value::Text("expires".to_string()), Value::Integer(0.into())),
         ]);
         let delegate = AssertionPlaintext::sign(delegate_header, delegate_body, &root_sk).unwrap();
@@ -2419,7 +2520,7 @@ mod tests {
             fields,
             actions,
             queries: BTreeMap::new(),
-        projections: BTreeMap::new(),
+            projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Allow,
         };
         let schema_bytes = schema.to_cbor().unwrap();
@@ -2427,7 +2528,10 @@ mod tests {
         let contract_bytes = simple_contract_bytes();
         let contract_id = ContractId::from_bytes(crypto::sha256(&contract_bytes));
         store
-            .put_object(&EnvelopeId::from_bytes(*schema_id.as_bytes()), &schema_bytes)
+            .put_object(
+                &EnvelopeId::from_bytes(*schema_id.as_bytes()),
+                &schema_bytes,
+            )
             .unwrap();
         store
             .put_object(
@@ -2492,7 +2596,10 @@ mod tests {
             note: None,
             meta: None,
         };
-        let body1 = Value::Map(vec![(Value::Text("text".to_string()), Value::Text("a".to_string()))]);
+        let body1 = Value::Map(vec![(
+            Value::Text("text".to_string()),
+            Value::Text("a".to_string()),
+        )]);
         let assertion1 = AssertionPlaintext::sign(header1, body1, &signing_key).unwrap();
         let bytes1 = assertion1.to_cbor().unwrap();
         let assertion_id1 = assertion1.assertion_id().unwrap();
@@ -2503,7 +2610,10 @@ mod tests {
             prev: Some(assertion_id1),
             ..assertion1.header.clone()
         };
-        let body2 = Value::Map(vec![(Value::Text("text".to_string()), Value::Text("b".to_string()))]);
+        let body2 = Value::Map(vec![(
+            Value::Text("text".to_string()),
+            Value::Text("b".to_string()),
+        )]);
         let assertion2 = AssertionPlaintext::sign(header2, body2, &signing_key).unwrap();
         let bytes2 = assertion2.to_cbor().unwrap();
         let assertion_id2 = assertion2.assertion_id().unwrap();
@@ -2512,7 +2622,10 @@ mod tests {
         let mut keys = Keyring::new();
         let err = ingest_object(&store, &mut index, &bytes2, &mut keys).unwrap_err();
         match err {
-            IngestError::MissingDependency { assertion_id, missing } => {
+            IngestError::MissingDependency {
+                assertion_id,
+                missing,
+            } => {
                 assert_eq!(assertion_id, assertion_id2);
                 assert_eq!(missing, assertion_id1);
             }
@@ -2573,7 +2686,8 @@ mod tests {
         let subject = SubjectId::from_bytes([8u8; 32]);
         let identity_subject = SubjectId::from_bytes([9u8; 32]);
 
-        let (identity_schema, identity_contract) = crate::builtins::ensure_note_artifacts(&store).unwrap();
+        let (identity_schema, identity_contract) =
+            crate::builtins::ensure_note_artifacts(&store).unwrap();
         let genesis_header = AssertionHeader {
             v: crypto::PROTOCOL_VERSION,
             ver: DEFAULT_DATA_VERSION,
@@ -2589,7 +2703,8 @@ mod tests {
             note: None,
             meta: add_signer_meta(None, &identity_subject),
         };
-        let genesis = AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
+        let genesis =
+            AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
         let genesis_bytes = genesis.to_cbor().unwrap();
         let genesis_id = genesis.assertion_id().unwrap();
         let genesis_env = crypto::envelope_id(&genesis_bytes);
@@ -2624,7 +2739,10 @@ mod tests {
                 Value::Text("delegate".to_string()),
                 Value::Bytes(device_id.as_bytes().to_vec()),
             ),
-            (Value::Text("scope".to_string()), Value::Text("all".to_string())),
+            (
+                Value::Text("scope".to_string()),
+                Value::Text("all".to_string()),
+            ),
             (Value::Text("expires".to_string()), Value::Integer(0.into())),
         ]);
         let delegate = AssertionPlaintext::sign(delegate_header, delegate_body, &root_sk).unwrap();
@@ -2672,7 +2790,7 @@ mod tests {
             fields,
             actions,
             queries: BTreeMap::new(),
-        projections: BTreeMap::new(),
+            projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Strict,
         };
         let schema_bytes = schema.to_cbor().unwrap();
@@ -2680,7 +2798,10 @@ mod tests {
         let contract_bytes = simple_contract_bytes();
         let contract_id = ContractId::from_bytes(crypto::sha256(&contract_bytes));
         store
-            .put_object(&EnvelopeId::from_bytes(*schema_id.as_bytes()), &schema_bytes)
+            .put_object(
+                &EnvelopeId::from_bytes(*schema_id.as_bytes()),
+                &schema_bytes,
+            )
             .unwrap();
         store
             .put_object(
@@ -2702,7 +2823,9 @@ mod tests {
         let base_assertion = AssertionPlaintext::from_cbor(&base_bytes).unwrap();
         let base_id = base_assertion.assertion_id().unwrap();
         let base_env = crypto::envelope_id(&base_bytes);
-        store.put_assertion(&subject, &base_env, &base_bytes).unwrap();
+        store
+            .put_assertion(&subject, &base_env, &base_bytes)
+            .unwrap();
         store.record_semantic(&base_id, &base_env).unwrap();
         append_assertion(
             store.env(),
@@ -3051,11 +3174,23 @@ mod tests {
             contract_id,
             genesis_body,
         );
-        append_assertion_bytes(store.env(), identity_subject, 1, ATLAS_IDENTITY_GENESIS, &genesis_bytes);
+        append_assertion_bytes(
+            store.env(),
+            identity_subject,
+            1,
+            ATLAS_IDENTITY_GENESIS,
+            &genesis_bytes,
+        );
 
         let domain_genesis_body = Value::Map(vec![
-            (Value::Text("domain".to_string()), Value::Text("corp.acme".to_string())),
-            (Value::Text("owner".to_string()), Value::Bytes(root_id.as_bytes().to_vec())),
+            (
+                Value::Text("domain".to_string()),
+                Value::Text("corp.acme".to_string()),
+            ),
+            (
+                Value::Text("owner".to_string()),
+                Value::Bytes(root_id.as_bytes().to_vec()),
+            ),
         ]);
         let (domain_genesis_bytes, domain_genesis_id) = make_plain_assertion(
             domain_subject,
@@ -3078,7 +3213,10 @@ mod tests {
         );
 
         let approve_body = Value::Map(vec![
-            (Value::Text("target".to_string()), Value::Bytes(root_id.as_bytes().to_vec())),
+            (
+                Value::Text("target".to_string()),
+                Value::Bytes(root_id.as_bytes().to_vec()),
+            ),
             (
                 Value::Text("roles".to_string()),
                 Value::Array(vec![Value::Text("member".to_string())]),
@@ -3139,7 +3277,7 @@ mod tests {
             fields,
             actions,
             queries: BTreeMap::new(),
-        projections: BTreeMap::new(),
+            projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Allow,
         };
         let schema_bytes = schema.to_cbor().unwrap();
@@ -3147,7 +3285,10 @@ mod tests {
         let contract_bytes = simple_contract_bytes();
         let contract_id = ContractId::from_bytes(crypto::sha256(&contract_bytes));
         store
-            .put_object(&EnvelopeId::from_bytes(*schema_id.as_bytes()), &schema_bytes)
+            .put_object(
+                &EnvelopeId::from_bytes(*schema_id.as_bytes()),
+                &schema_bytes,
+            )
             .unwrap();
         store
             .put_object(
@@ -3162,7 +3303,10 @@ mod tests {
                 Value::Text("acting_domain".to_string()),
                 Value::Bytes(domain_subject.as_bytes().to_vec()),
             ),
-            (Value::Text("acting_role".to_string()), Value::Text("member".to_string())),
+            (
+                Value::Text("acting_role".to_string()),
+                Value::Text("member".to_string()),
+            ),
         ]);
         let header = AssertionHeader {
             v: crypto::PROTOCOL_VERSION,
@@ -3179,7 +3323,10 @@ mod tests {
             note: None,
             meta: add_signer_meta(Some(meta), &identity_subject),
         };
-        let body = Value::Map(vec![(Value::Text("value".to_string()), Value::Integer(1.into()))]);
+        let body = Value::Map(vec![(
+            Value::Text("value".to_string()),
+            Value::Integer(1.into()),
+        )]);
         let assertion = AssertionPlaintext::sign(header, body, &root_sk).unwrap();
         let bytes = assertion.to_cbor().unwrap();
         let mut keys = Keyring::new();
@@ -3224,10 +3371,19 @@ mod tests {
             contract_id,
             genesis_body,
         );
-        append_assertion_bytes(store.env(), identity_subject, 1, ATLAS_IDENTITY_GENESIS, &genesis_bytes);
+        append_assertion_bytes(
+            store.env(),
+            identity_subject,
+            1,
+            ATLAS_IDENTITY_GENESIS,
+            &genesis_bytes,
+        );
 
         let domain_genesis_body = Value::Map(vec![
-            (Value::Text("domain".to_string()), Value::Text("corp.acme".to_string())),
+            (
+                Value::Text("domain".to_string()),
+                Value::Text("corp.acme".to_string()),
+            ),
             (
                 Value::Text("owner".to_string()),
                 Value::Bytes(domain_owner_id.as_bytes().to_vec()),
@@ -3283,7 +3439,7 @@ mod tests {
             fields,
             actions,
             queries: BTreeMap::new(),
-        projections: BTreeMap::new(),
+            projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Allow,
         };
         let schema_bytes = schema.to_cbor().unwrap();
@@ -3291,7 +3447,10 @@ mod tests {
         let contract_bytes = simple_contract_bytes();
         let contract_id = ContractId::from_bytes(crypto::sha256(&contract_bytes));
         store
-            .put_object(&EnvelopeId::from_bytes(*schema_id.as_bytes()), &schema_bytes)
+            .put_object(
+                &EnvelopeId::from_bytes(*schema_id.as_bytes()),
+                &schema_bytes,
+            )
             .unwrap();
         store
             .put_object(
@@ -3306,7 +3465,10 @@ mod tests {
                 Value::Text("acting_domain".to_string()),
                 Value::Bytes(domain_subject.as_bytes().to_vec()),
             ),
-            (Value::Text("acting_role".to_string()), Value::Text("member".to_string())),
+            (
+                Value::Text("acting_role".to_string()),
+                Value::Text("member".to_string()),
+            ),
         ]);
         let header = AssertionHeader {
             v: crypto::PROTOCOL_VERSION,
@@ -3323,7 +3485,10 @@ mod tests {
             note: None,
             meta: add_signer_meta(Some(meta), &identity_subject),
         };
-        let body = Value::Map(vec![(Value::Text("value".to_string()), Value::Integer(1.into()))]);
+        let body = Value::Map(vec![(
+            Value::Text("value".to_string()),
+            Value::Integer(1.into()),
+        )]);
         let assertion = AssertionPlaintext::sign(header, body, &root_sk).unwrap();
         let bytes = assertion.to_cbor().unwrap();
         let mut keys = Keyring::new();
@@ -3342,7 +3507,8 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(55);
         let (root_sk, root_id) = crypto::generate_identity_keypair(&mut rng);
         let identity_subject = SubjectId::from_bytes([41u8; 32]);
-        let (identity_schema, identity_contract) = crate::builtins::ensure_note_artifacts(&store).unwrap();
+        let (identity_schema, identity_contract) =
+            crate::builtins::ensure_note_artifacts(&store).unwrap();
 
         let genesis_header = AssertionHeader {
             v: crypto::PROTOCOL_VERSION,
@@ -3359,7 +3525,8 @@ mod tests {
             note: None,
             meta: add_signer_meta(None, &identity_subject),
         };
-        let genesis = AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
+        let genesis =
+            AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
         let genesis_bytes = genesis.to_cbor().unwrap();
         let genesis_id = genesis.assertion_id().unwrap();
         let genesis_env = crypto::envelope_id(&genesis_bytes);
@@ -3390,7 +3557,10 @@ mod tests {
             meta: add_signer_meta(None, &identity_subject),
         };
         let profile_body = Value::Map(vec![
-            (Value::Text("alias".to_string()), Value::Text("tester".to_string())),
+            (
+                Value::Text("alias".to_string()),
+                Value::Text("tester".to_string()),
+            ),
             (
                 Value::Text("roles".to_string()),
                 Value::Array(vec![Value::Text("finance.approver".to_string())]),
@@ -3441,7 +3611,7 @@ mod tests {
             fields,
             actions,
             queries: BTreeMap::new(),
-        projections: BTreeMap::new(),
+            projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Allow,
         };
         let schema_bytes = schema.to_cbor().unwrap();
@@ -3449,7 +3619,10 @@ mod tests {
         let contract_bytes = simple_contract_bytes();
         let contract_id = ContractId::from_bytes(crypto::sha256(&contract_bytes));
         store
-            .put_object(&EnvelopeId::from_bytes(*schema_id.as_bytes()), &schema_bytes)
+            .put_object(
+                &EnvelopeId::from_bytes(*schema_id.as_bytes()),
+                &schema_bytes,
+            )
             .unwrap();
         store
             .put_object(
@@ -3506,7 +3679,8 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(56);
         let (root_sk, root_id) = crypto::generate_identity_keypair(&mut rng);
         let identity_subject = SubjectId::from_bytes([44u8; 32]);
-        let (identity_schema, identity_contract) = crate::builtins::ensure_note_artifacts(&store).unwrap();
+        let (identity_schema, identity_contract) =
+            crate::builtins::ensure_note_artifacts(&store).unwrap();
 
         let genesis_header = AssertionHeader {
             v: crypto::PROTOCOL_VERSION,
@@ -3523,7 +3697,8 @@ mod tests {
             note: None,
             meta: add_signer_meta(None, &identity_subject),
         };
-        let genesis = AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
+        let genesis =
+            AssertionPlaintext::sign(genesis_header, Value::Map(vec![]), &root_sk).unwrap();
         let genesis_bytes = genesis.to_cbor().unwrap();
         let genesis_id = genesis.assertion_id().unwrap();
         let genesis_env = crypto::envelope_id(&genesis_bytes);
@@ -3554,7 +3729,10 @@ mod tests {
             meta: add_signer_meta(None, &identity_subject),
         };
         let profile_body = Value::Map(vec![
-            (Value::Text("alias".to_string()), Value::Text("tester".to_string())),
+            (
+                Value::Text("alias".to_string()),
+                Value::Text("tester".to_string()),
+            ),
             (
                 Value::Text("roles".to_string()),
                 Value::Array(vec![Value::Text("finance.approver".to_string())]),
@@ -3605,7 +3783,7 @@ mod tests {
             fields,
             actions,
             queries: BTreeMap::new(),
-        projections: BTreeMap::new(),
+            projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Allow,
         };
         let schema_bytes = schema.to_cbor().unwrap();
@@ -3613,7 +3791,10 @@ mod tests {
         let contract_bytes = reject_contract_bytes();
         let contract_id = ContractId::from_bytes(crypto::sha256(&contract_bytes));
         store
-            .put_object(&EnvelopeId::from_bytes(*schema_id.as_bytes()), &schema_bytes)
+            .put_object(
+                &EnvelopeId::from_bytes(*schema_id.as_bytes()),
+                &schema_bytes,
+            )
             .unwrap();
         store
             .put_object(
@@ -4039,10 +4220,7 @@ mod tests {
                 Value::Text("sdk_id".to_string()),
                 Value::Bytes(sdk_id.as_bytes().to_vec()),
             ),
-            (
-                Value::Text("sdk".to_string()),
-                Value::Bytes(sdk_bytes),
-            ),
+            (Value::Text("sdk".to_string()), Value::Bytes(sdk_bytes)),
         ]);
         let (grant_bytes, _grant_id) = make_plain_assertion(
             domain_subject,
@@ -4176,10 +4354,7 @@ mod tests {
                 Value::Text("sdk_id".to_string()),
                 Value::Bytes(sdk0_id.as_bytes().to_vec()),
             ),
-            (
-                Value::Text("sdk".to_string()),
-                Value::Bytes(sdk0_bytes),
-            ),
+            (Value::Text("sdk".to_string()), Value::Bytes(sdk0_bytes)),
         ]);
         let (grant0_bytes, grant0_id) = make_plain_assertion(
             domain_subject,
@@ -4282,10 +4457,7 @@ mod tests {
                 Value::Text("sdk_id".to_string()),
                 Value::Bytes(sdk1_id.as_bytes().to_vec()),
             ),
-            (
-                Value::Text("sdk".to_string()),
-                Value::Bytes(sdk1_bytes),
-            ),
+            (Value::Text("sdk".to_string()), Value::Bytes(sdk1_bytes)),
         ]);
         let (grant1_bytes, _grant1_id) = make_plain_assertion(
             domain_subject,
@@ -4427,10 +4599,7 @@ mod tests {
                 Value::Text("sdk_id".to_string()),
                 Value::Bytes(sdk0_id.as_bytes().to_vec()),
             ),
-            (
-                Value::Text("sdk".to_string()),
-                Value::Bytes(sdk0_bytes),
-            ),
+            (Value::Text("sdk".to_string()), Value::Bytes(sdk0_bytes)),
         ]);
         let (grant0_bytes, _grant0_id) = make_plain_assertion(
             domain_subject,
@@ -4752,7 +4921,7 @@ mod tests {
             fields,
             actions,
             queries: BTreeMap::new(),
-        projections: BTreeMap::new(),
+            projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Allow,
         };
         let schema_bytes = schema.to_cbor().unwrap();
@@ -4760,7 +4929,10 @@ mod tests {
         let contract_bytes = simple_contract_bytes();
         let action_contract_id = ContractId::from_bytes(crypto::sha256(&contract_bytes));
         store
-            .put_object(&EnvelopeId::from_bytes(*action_schema_id.as_bytes()), &schema_bytes)
+            .put_object(
+                &EnvelopeId::from_bytes(*action_schema_id.as_bytes()),
+                &schema_bytes,
+            )
             .unwrap();
         store
             .put_object(
@@ -4801,7 +4973,10 @@ mod tests {
                 Value::Text("delegate".to_string()),
                 Value::Bytes(device_id.as_bytes().to_vec()),
             ),
-            (Value::Text("scope".to_string()), Value::Text("all".to_string())),
+            (
+                Value::Text("scope".to_string()),
+                Value::Text("all".to_string()),
+            ),
             (Value::Text("expires".to_string()), Value::Integer(0.into())),
         ]);
         let (delegate_bytes, delegate_id) = make_plain_assertion(
@@ -4860,7 +5035,10 @@ mod tests {
 
     fn vault_args(subject: SubjectId, start_seq: i64, end_seq: i64) -> Value {
         let vault = Value::Map(vec![
-            (Value::Text("driver".to_string()), Value::Text("Local".to_string())),
+            (
+                Value::Text("driver".to_string()),
+                Value::Text("Local".to_string()),
+            ),
             (
                 Value::Text("location".to_string()),
                 Value::Text("local/vault/chunk.dhbox".to_string()),
@@ -4887,7 +5065,10 @@ mod tests {
                 Value::Text("seq_start".to_string()),
                 Value::Integer(start_seq.into()),
             ),
-            (Value::Text("seq_end".to_string()), Value::Integer(end_seq.into())),
+            (
+                Value::Text("seq_end".to_string()),
+                Value::Integer(end_seq.into()),
+            ),
             (
                 Value::Text("snapshot_hash".to_string()),
                 Value::Bytes(vec![7u8; 32]),
