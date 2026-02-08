@@ -1,0 +1,629 @@
+use crate::config::Config;
+use crate::contract::PermissionSummary;
+use crate::env::Env;
+use crate::error::DharmaError;
+use crate::keys::Keyring;
+use crate::store::state::CqrsReverseEntry;
+use crate::store::Store;
+use crate::types::{AssertionId, ContractId, EnvelopeId, SubjectId};
+use std::io::ErrorKind;
+use std::path::Path;
+
+pub trait StorageCommit {
+    fn put_object_if_absent(
+        &self,
+        envelope_id: &EnvelopeId,
+        bytes: &[u8],
+    ) -> Result<(), DharmaError>;
+    fn put_assertion(
+        &self,
+        subject: &SubjectId,
+        envelope_id: &EnvelopeId,
+        bytes: &[u8],
+    ) -> Result<(), DharmaError>;
+    fn put_permission_summary(&self, summary: &PermissionSummary) -> Result<(), DharmaError>;
+}
+
+pub trait StorageRead {
+    fn get_object(&self, envelope_id: &EnvelopeId) -> Result<Vec<u8>, DharmaError>;
+    fn get_object_any(&self, envelope_id: &EnvelopeId) -> Result<Option<Vec<u8>>, DharmaError>;
+    fn get_assertion(
+        &self,
+        subject: &SubjectId,
+        envelope_id: &EnvelopeId,
+    ) -> Result<Vec<u8>, DharmaError>;
+    fn scan_subject(&self, subject: &SubjectId) -> Result<Vec<AssertionId>, DharmaError>;
+    fn list_subjects(&self) -> Result<Vec<SubjectId>, DharmaError>;
+    fn list_objects(&self) -> Result<Vec<EnvelopeId>, DharmaError>;
+    fn get_permission_summary(
+        &self,
+        contract: &ContractId,
+    ) -> Result<Option<PermissionSummary>, DharmaError>;
+}
+
+pub trait StorageIndex {
+    fn rebuild_subject_views(&self, keys: &Keyring) -> Result<(), DharmaError>;
+    fn record_semantic(
+        &self,
+        assertion_id: &AssertionId,
+        envelope_id: &EnvelopeId,
+    ) -> Result<(), DharmaError>;
+}
+
+pub trait StorageQuery {
+    fn lookup_envelope(
+        &self,
+        assertion_id: &AssertionId,
+    ) -> Result<Option<EnvelopeId>, DharmaError>;
+    fn lookup_cqrs_by_envelope(
+        &self,
+        envelope_id: &EnvelopeId,
+    ) -> Result<Option<CqrsReverseEntry>, DharmaError>;
+    fn lookup_cqrs_by_assertion(
+        &self,
+        assertion_id: &AssertionId,
+    ) -> Result<Option<CqrsReverseEntry>, DharmaError>;
+}
+
+pub trait StorageSpi: StorageCommit + StorageRead + StorageIndex + StorageQuery {}
+
+impl<T> StorageSpi for T where T: StorageCommit + StorageRead + StorageIndex + StorageQuery {}
+
+impl StorageCommit for Store {
+    fn put_object_if_absent(
+        &self,
+        envelope_id: &EnvelopeId,
+        bytes: &[u8],
+    ) -> Result<(), DharmaError> {
+        self.put_object(envelope_id, bytes)
+    }
+
+    fn put_assertion(
+        &self,
+        subject: &SubjectId,
+        envelope_id: &EnvelopeId,
+        bytes: &[u8],
+    ) -> Result<(), DharmaError> {
+        self.put_assertion(subject, envelope_id, bytes)
+    }
+
+    fn put_permission_summary(&self, summary: &PermissionSummary) -> Result<(), DharmaError> {
+        self.put_permission_summary(summary)
+    }
+}
+
+impl StorageRead for Store {
+    fn get_object(&self, envelope_id: &EnvelopeId) -> Result<Vec<u8>, DharmaError> {
+        self.get_object(envelope_id)
+    }
+
+    fn get_object_any(&self, envelope_id: &EnvelopeId) -> Result<Option<Vec<u8>>, DharmaError> {
+        self.get_object_any(envelope_id)
+    }
+
+    fn get_assertion(
+        &self,
+        subject: &SubjectId,
+        envelope_id: &EnvelopeId,
+    ) -> Result<Vec<u8>, DharmaError> {
+        self.get_assertion(subject, envelope_id)
+    }
+
+    fn scan_subject(&self, subject: &SubjectId) -> Result<Vec<AssertionId>, DharmaError> {
+        self.scan_subject(subject)
+    }
+
+    fn list_subjects(&self) -> Result<Vec<SubjectId>, DharmaError> {
+        self.list_subjects()
+    }
+
+    fn list_objects(&self) -> Result<Vec<EnvelopeId>, DharmaError> {
+        self.list_objects()
+    }
+
+    fn get_permission_summary(
+        &self,
+        contract: &ContractId,
+    ) -> Result<Option<PermissionSummary>, DharmaError> {
+        self.get_permission_summary(contract)
+    }
+}
+
+impl StorageIndex for Store {
+    fn rebuild_subject_views(&self, keys: &Keyring) -> Result<(), DharmaError> {
+        self.rebuild_subject_views(keys)
+    }
+
+    fn record_semantic(
+        &self,
+        assertion_id: &AssertionId,
+        envelope_id: &EnvelopeId,
+    ) -> Result<(), DharmaError> {
+        self.record_semantic(assertion_id, envelope_id)
+    }
+}
+
+impl StorageQuery for Store {
+    fn lookup_envelope(
+        &self,
+        assertion_id: &AssertionId,
+    ) -> Result<Option<EnvelopeId>, DharmaError> {
+        self.lookup_envelope(assertion_id)
+    }
+
+    fn lookup_cqrs_by_envelope(
+        &self,
+        envelope_id: &EnvelopeId,
+    ) -> Result<Option<CqrsReverseEntry>, DharmaError> {
+        self.lookup_cqrs_by_envelope(envelope_id)
+    }
+
+    fn lookup_cqrs_by_assertion(
+        &self,
+        assertion_id: &AssertionId,
+    ) -> Result<Option<CqrsReverseEntry>, DharmaError> {
+        self.lookup_cqrs_by_assertion(assertion_id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeMode {
+    Embedded,
+    Server,
+}
+
+impl RuntimeMode {
+    pub fn from_profile_mode(mode: &str) -> Self {
+        match mode.trim().to_ascii_lowercase().as_str() {
+            "server" => RuntimeMode::Server,
+            _ => RuntimeMode::Embedded,
+        }
+    }
+
+    pub fn from_config(config: &Config) -> Self {
+        Self::from_profile_mode(&config.profile.mode)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RuntimeMode::Embedded => "embedded",
+            RuntimeMode::Server => "server",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BackendKind {
+    Sqlite,
+    Postgres,
+    ClickHouse,
+}
+
+impl BackendKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BackendKind::Sqlite => "sqlite",
+            BackendKind::Postgres => "postgresql",
+            BackendKind::ClickHouse => "clickhouse",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageOperation {
+    Commit,
+    Read,
+    Index,
+    Query,
+}
+
+impl StorageOperation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StorageOperation::Commit => "commit",
+            StorageOperation::Read => "read",
+            StorageOperation::Index => "index",
+            StorageOperation::Query => "query",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackendSelection {
+    pub mode: RuntimeMode,
+    pub commit: BackendKind,
+    pub read: BackendKind,
+    pub index: BackendKind,
+    pub query: BackendKind,
+}
+
+impl BackendSelection {
+    pub fn for_mode(mode: RuntimeMode) -> Self {
+        match mode {
+            RuntimeMode::Embedded => BackendSelection {
+                mode,
+                commit: BackendKind::Sqlite,
+                read: BackendKind::Sqlite,
+                index: BackendKind::Sqlite,
+                query: BackendKind::Sqlite,
+            },
+            RuntimeMode::Server => BackendSelection {
+                mode,
+                commit: BackendKind::Postgres,
+                read: BackendKind::Postgres,
+                index: BackendKind::Postgres,
+                query: BackendKind::ClickHouse,
+            },
+        }
+    }
+
+    pub fn from_config(config: &Config) -> Self {
+        Self::for_mode(RuntimeMode::from_config(config))
+    }
+
+    pub fn backend_for(&self, operation: StorageOperation) -> BackendKind {
+        match operation {
+            StorageOperation::Commit => self.commit,
+            StorageOperation::Read => self.read,
+            StorageOperation::Index => self.index,
+            StorageOperation::Query => self.query,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackendCapabilityRow {
+    pub backend: BackendKind,
+    pub commit: bool,
+    pub read: bool,
+    pub index: bool,
+    pub query: bool,
+    pub strong_consistency: bool,
+    pub eventual_consistency: bool,
+}
+
+pub const BACKEND_CAPABILITY_MATRIX: [BackendCapabilityRow; 3] = [
+    BackendCapabilityRow {
+        backend: BackendKind::Sqlite,
+        commit: true,
+        read: true,
+        index: true,
+        query: true,
+        strong_consistency: true,
+        eventual_consistency: false,
+    },
+    BackendCapabilityRow {
+        backend: BackendKind::Postgres,
+        commit: true,
+        read: true,
+        index: true,
+        query: true,
+        strong_consistency: true,
+        eventual_consistency: false,
+    },
+    BackendCapabilityRow {
+        backend: BackendKind::ClickHouse,
+        commit: false,
+        read: false,
+        index: false,
+        query: true,
+        strong_consistency: false,
+        eventual_consistency: true,
+    },
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StorageCompatibilityContract {
+    pub version: &'static str,
+    pub preserves_dhl_syntax: bool,
+    pub preserves_dharmaq_syntax: bool,
+    pub preserves_command_surface: bool,
+    pub preserves_query_surface: bool,
+}
+
+pub const STORAGE_COMPATIBILITY_CONTRACT: StorageCompatibilityContract =
+    StorageCompatibilityContract {
+        version: "dharma-storage-spi-v1",
+        preserves_dhl_syntax: true,
+        preserves_dharmaq_syntax: true,
+        preserves_command_surface: true,
+        preserves_query_surface: true,
+    };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackendErrorClass {
+    Retryable,
+    Fatal,
+}
+
+impl BackendErrorClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BackendErrorClass::Retryable => "retryable",
+            BackendErrorClass::Fatal => "fatal",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackendErrorTaxonomy {
+    pub backend: BackendKind,
+    pub operation: StorageOperation,
+    pub class: BackendErrorClass,
+    pub message: String,
+}
+
+impl BackendErrorTaxonomy {
+    pub fn classify(
+        backend: BackendKind,
+        operation: StorageOperation,
+        error: &DharmaError,
+    ) -> Self {
+        Self {
+            backend,
+            operation,
+            class: classify_backend_error(error),
+            message: error.to_string(),
+        }
+    }
+}
+
+pub fn classify_backend_error(error: &DharmaError) -> BackendErrorClass {
+    match error {
+        DharmaError::Network(_) | DharmaError::LockBusy => BackendErrorClass::Retryable,
+        DharmaError::Io(err) => match err.kind() {
+            ErrorKind::TimedOut
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::BrokenPipe
+            | ErrorKind::NotConnected
+            | ErrorKind::AddrInUse
+            | ErrorKind::AddrNotAvailable
+            | ErrorKind::ConnectionRefused
+            | ErrorKind::WouldBlock
+            | ErrorKind::Interrupted => BackendErrorClass::Retryable,
+            _ => BackendErrorClass::Fatal,
+        },
+        _ => BackendErrorClass::Fatal,
+    }
+}
+
+#[derive(Clone)]
+pub struct StorageFacade {
+    store: Store,
+    selection: BackendSelection,
+}
+
+impl StorageFacade {
+    pub fn new(store: Store, mode: RuntimeMode) -> Self {
+        StorageFacade {
+            store,
+            selection: BackendSelection::for_mode(mode),
+        }
+    }
+
+    pub fn from_env_and_config<E>(env: &E, config: &Config) -> Self
+    where
+        E: Env + Clone + Send + Sync + 'static,
+    {
+        let store = Store::new(env);
+        Self::new(store, RuntimeMode::from_config(config))
+    }
+
+    pub fn from_root_and_config<P: AsRef<Path>>(root: P, config: &Config) -> Self {
+        let store = Store::from_root(root.as_ref());
+        Self::new(store, RuntimeMode::from_config(config))
+    }
+
+    pub fn store(&self) -> Store {
+        self.store.clone()
+    }
+
+    pub fn selection(&self) -> BackendSelection {
+        self.selection
+    }
+
+    pub fn backend_for_operation(&self, operation: StorageOperation) -> BackendKind {
+        self.selection.backend_for(operation)
+    }
+
+    pub fn capability_matrix(&self) -> &'static [BackendCapabilityRow] {
+        &BACKEND_CAPABILITY_MATRIX
+    }
+
+    pub fn compatibility_contract(&self) -> StorageCompatibilityContract {
+        STORAGE_COMPATIBILITY_CONTRACT
+    }
+
+    pub fn classify_error(
+        &self,
+        operation: StorageOperation,
+        error: &DharmaError,
+    ) -> BackendErrorTaxonomy {
+        BackendErrorTaxonomy::classify(self.backend_for_operation(operation), operation, error)
+    }
+}
+
+impl StorageCommit for StorageFacade {
+    fn put_object_if_absent(
+        &self,
+        envelope_id: &EnvelopeId,
+        bytes: &[u8],
+    ) -> Result<(), DharmaError> {
+        self.store.put_object_if_absent(envelope_id, bytes)
+    }
+
+    fn put_assertion(
+        &self,
+        subject: &SubjectId,
+        envelope_id: &EnvelopeId,
+        bytes: &[u8],
+    ) -> Result<(), DharmaError> {
+        self.store.put_assertion(subject, envelope_id, bytes)
+    }
+
+    fn put_permission_summary(&self, summary: &PermissionSummary) -> Result<(), DharmaError> {
+        self.store.put_permission_summary(summary)
+    }
+}
+
+impl StorageRead for StorageFacade {
+    fn get_object(&self, envelope_id: &EnvelopeId) -> Result<Vec<u8>, DharmaError> {
+        self.store.get_object(envelope_id)
+    }
+
+    fn get_object_any(&self, envelope_id: &EnvelopeId) -> Result<Option<Vec<u8>>, DharmaError> {
+        self.store.get_object_any(envelope_id)
+    }
+
+    fn get_assertion(
+        &self,
+        subject: &SubjectId,
+        envelope_id: &EnvelopeId,
+    ) -> Result<Vec<u8>, DharmaError> {
+        self.store.get_assertion(subject, envelope_id)
+    }
+
+    fn scan_subject(&self, subject: &SubjectId) -> Result<Vec<AssertionId>, DharmaError> {
+        self.store.scan_subject(subject)
+    }
+
+    fn list_subjects(&self) -> Result<Vec<SubjectId>, DharmaError> {
+        self.store.list_subjects()
+    }
+
+    fn list_objects(&self) -> Result<Vec<EnvelopeId>, DharmaError> {
+        self.store.list_objects()
+    }
+
+    fn get_permission_summary(
+        &self,
+        contract: &ContractId,
+    ) -> Result<Option<PermissionSummary>, DharmaError> {
+        self.store.get_permission_summary(contract)
+    }
+}
+
+impl StorageIndex for StorageFacade {
+    fn rebuild_subject_views(&self, keys: &Keyring) -> Result<(), DharmaError> {
+        self.store.rebuild_subject_views(keys)
+    }
+
+    fn record_semantic(
+        &self,
+        assertion_id: &AssertionId,
+        envelope_id: &EnvelopeId,
+    ) -> Result<(), DharmaError> {
+        self.store.record_semantic(assertion_id, envelope_id)
+    }
+}
+
+impl StorageQuery for StorageFacade {
+    fn lookup_envelope(
+        &self,
+        assertion_id: &AssertionId,
+    ) -> Result<Option<EnvelopeId>, DharmaError> {
+        self.store.lookup_envelope(assertion_id)
+    }
+
+    fn lookup_cqrs_by_envelope(
+        &self,
+        envelope_id: &EnvelopeId,
+    ) -> Result<Option<CqrsReverseEntry>, DharmaError> {
+        self.store.lookup_cqrs_by_envelope(envelope_id)
+    }
+
+    fn lookup_cqrs_by_assertion(
+        &self,
+        assertion_id: &AssertionId,
+    ) -> Result<Option<CqrsReverseEntry>, DharmaError> {
+        self.store.lookup_cqrs_by_assertion(assertion_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn mode_selection_defaults_to_embedded_sqlite() {
+        let mut config = Config::default();
+        config.profile.mode = "embedded".to_string();
+        let selection = BackendSelection::from_config(&config);
+        assert_eq!(selection.mode, RuntimeMode::Embedded);
+        assert_eq!(selection.commit, BackendKind::Sqlite);
+        assert_eq!(selection.read, BackendKind::Sqlite);
+        assert_eq!(selection.index, BackendKind::Sqlite);
+        assert_eq!(selection.query, BackendKind::Sqlite);
+    }
+
+    #[test]
+    fn mode_selection_server_uses_postgres_and_clickhouse() {
+        let mut config = Config::default();
+        config.profile.mode = "server".to_string();
+        let selection = BackendSelection::from_config(&config);
+        assert_eq!(selection.mode, RuntimeMode::Server);
+        assert_eq!(selection.commit, BackendKind::Postgres);
+        assert_eq!(selection.read, BackendKind::Postgres);
+        assert_eq!(selection.index, BackendKind::Postgres);
+        assert_eq!(selection.query, BackendKind::ClickHouse);
+    }
+
+    #[test]
+    fn capability_matrix_covers_expected_backends() {
+        let sqlite = BACKEND_CAPABILITY_MATRIX
+            .iter()
+            .find(|row| row.backend == BackendKind::Sqlite)
+            .unwrap();
+        assert!(sqlite.commit);
+        assert!(sqlite.read);
+        assert!(sqlite.index);
+        assert!(sqlite.query);
+
+        let clickhouse = BACKEND_CAPABILITY_MATRIX
+            .iter()
+            .find(|row| row.backend == BackendKind::ClickHouse)
+            .unwrap();
+        assert!(clickhouse.query);
+        assert!(!clickhouse.commit);
+        assert!(!clickhouse.strong_consistency);
+        assert!(clickhouse.eventual_consistency);
+    }
+
+    #[test]
+    fn backend_error_taxonomy_marks_transient_failures_as_retryable() {
+        let network = DharmaError::Network("timeout".to_string());
+        assert_eq!(
+            classify_backend_error(&network),
+            BackendErrorClass::Retryable
+        );
+
+        let io_err = DharmaError::Io(io::Error::new(ErrorKind::WouldBlock, "busy"));
+        assert_eq!(
+            classify_backend_error(&io_err),
+            BackendErrorClass::Retryable
+        );
+    }
+
+    #[test]
+    fn backend_error_taxonomy_marks_validation_as_fatal() {
+        let err = DharmaError::Validation("invalid signature".to_string());
+        assert_eq!(classify_backend_error(&err), BackendErrorClass::Fatal);
+    }
+
+    #[test]
+    fn facade_preserves_store_roundtrip_behavior() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::from_root(temp.path());
+        let facade = StorageFacade::new(store, RuntimeMode::Embedded);
+        let envelope_id = EnvelopeId::from_bytes([7u8; 32]);
+        let wasm_bytes = [0x00, 0x61, 0x73, 0x6d, 0x01];
+
+        facade
+            .put_object_if_absent(&envelope_id, &wasm_bytes)
+            .unwrap();
+        let loaded = facade.get_object(&envelope_id).unwrap();
+        assert_eq!(loaded, wasm_bytes);
+    }
+}
