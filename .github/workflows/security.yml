@@ -1,0 +1,78 @@
+name: Security
+
+on:
+  push:
+    branches:
+      - master
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  dependency-and-license-scans:
+    name: Dependency and License Scans
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install security tooling
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny,cargo-license
+
+      - name: Run cargo audit report
+        run: |
+          mkdir -p security-reports
+          # This workflow is the enforcement gate for known vulnerabilities.
+          cargo audit --json > security-reports/cargo-audit.json
+
+      - name: Run dependency policy checks
+        run: cargo deny check --config .github/deny.toml bans sources > security-reports/cargo-deny.txt
+
+      - name: Build license inventory
+        # Inventory/reporting only for now; enforcement can be added once SPDX metadata is aligned.
+        run: cargo license --json > security-reports/cargo-license.json
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: security-reports/*
+
+  codeql:
+    name: CodeQL (Optional)
+    if: vars.ENABLE_CODEQL == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: rust
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3

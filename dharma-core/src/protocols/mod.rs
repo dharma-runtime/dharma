@@ -93,8 +93,8 @@ mod tests {
     use crate::domain::DomainState;
     use crate::env::StdEnv;
     use crate::identity::IdentityStatus;
-    use crate::store::Store;
     use crate::store::state::append_assertion;
+    use crate::store::Store;
     use crate::types::{AssertionId, ContractId, SchemaId, SubjectId};
     use ciborium::value::Value;
     use rand::rngs::StdRng;
@@ -278,7 +278,8 @@ mod tests {
             note: None,
             meta: None,
         };
-        let activate = AssertionPlaintext::sign(activate_header, Value::Map(vec![]), &root_sk).unwrap();
+        let activate =
+            AssertionPlaintext::sign(activate_header, Value::Map(vec![]), &root_sk).unwrap();
         let activate_bytes = activate.to_cbor().unwrap();
         let activate_id = activate.assertion_id().unwrap();
         let activate_env = crypto::envelope_id(&activate_bytes);
@@ -370,7 +371,8 @@ mod tests {
             note: None,
             meta: None,
         };
-        let suspend = AssertionPlaintext::sign(suspend_header, Value::Map(vec![]), &root_sk).unwrap();
+        let suspend =
+            AssertionPlaintext::sign(suspend_header, Value::Map(vec![]), &root_sk).unwrap();
         let suspend_bytes = suspend.to_cbor().unwrap();
         let suspend_id = suspend.assertion_id().unwrap();
         let suspend_env = crypto::envelope_id(&suspend_bytes);
@@ -460,8 +462,14 @@ mod tests {
             owner_id,
             &owner_sk,
             Value::Map(vec![
-                (Value::Text("domain".to_string()), Value::Text("corp.proto".to_string())),
-                (Value::Text("owner".to_string()), Value::Bytes(owner_id.as_bytes().to_vec())),
+                (
+                    Value::Text("domain".to_string()),
+                    Value::Text("corp.proto".to_string()),
+                ),
+                (
+                    Value::Text("owner".to_string()),
+                    Value::Bytes(owner_id.as_bytes().to_vec()),
+                ),
             ]),
         );
 
@@ -470,7 +478,10 @@ mod tests {
             owner_id,
             &owner_sk,
             Value::Map(vec![
-                (Value::Text("target".to_string()), Value::Bytes(member_id.as_bytes().to_vec())),
+                (
+                    Value::Text("target".to_string()),
+                    Value::Bytes(member_id.as_bytes().to_vec()),
+                ),
                 (
                     Value::Text("roles".to_string()),
                     Value::Array(vec![Value::Text("member".to_string())]),
@@ -488,7 +499,10 @@ mod tests {
             owner_id,
             &owner_sk,
             Value::Map(vec![
-                (Value::Text("target".to_string()), Value::Bytes(member_id.as_bytes().to_vec())),
+                (
+                    Value::Text("target".to_string()),
+                    Value::Bytes(member_id.as_bytes().to_vec()),
+                ),
                 (
                     Value::Text("roles".to_string()),
                     Value::Array(vec![Value::Text("member".to_string())]),
@@ -512,7 +526,12 @@ mod tests {
             Value::Text("target".to_string()),
             Value::Bytes(member_id.as_bytes().to_vec()),
         )]);
-        append(atlas_domain::ASSERTION_LEAVE, member_id, &member_sk, leave_body);
+        append(
+            atlas_domain::ASSERTION_LEAVE,
+            member_id,
+            &member_sk,
+            leave_body,
+        );
         let state = DomainState::load(&store, &subject).unwrap();
         assert!(!state.is_member(&member_id, 0));
     }

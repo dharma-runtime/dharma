@@ -42,9 +42,6 @@ pub fn render_prometheus(subject_count: u64) -> String {
 dharma_subject_count {}\n\
 dharma_assertions_ingested {}\n\
 dharma_wasm_executions {}\n",
-        snap.peers_connected,
-        subject_count,
-        snap.assertions_ingested,
-        snap.wasm_executions,
+        snap.peers_connected, subject_count, snap.assertions_ingested, snap.wasm_executions,
     )
 }

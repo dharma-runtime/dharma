@@ -7,6 +7,7 @@ use dharma_core::identity_store;
 #[cfg(feature = "server")]
 use dharma_core::metrics;
 use dharma_core::net;
+use dharma_core::store::spi::StorageFacade;
 use dharma_core::store::state::list_assertions;
 use dharma_core::store::Store;
 use dharma_core::DharmaError;
@@ -74,7 +75,17 @@ async fn run() -> Result<(), DharmaError> {
     let identity = load_identity(&env)?;
     let head = mount_self(&env, &identity)?;
     info!(head_seq = head, "identity unlocked");
-    let store = Store::new(&env);
+    let storage = StorageFacade::from_env_and_config(&env, &config);
+    let selection = storage.selection();
+    info!(
+        storage_mode = selection.mode.as_str(),
+        commit_backend = selection.commit.as_str(),
+        read_backend = selection.read.as_str(),
+        index_backend = selection.index.as_str(),
+        query_backend = selection.query.as_str(),
+        "storage backend facade selected"
+    );
+    let store = storage.store();
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_signal = {
@@ -86,7 +97,6 @@ async fn run() -> Result<(), DharmaError> {
             }
         })
     };
-
     #[cfg(feature = "server")]
     let metrics_handle = match start_metrics_server(
         config.network.listen_port,

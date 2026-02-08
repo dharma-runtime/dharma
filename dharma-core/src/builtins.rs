@@ -77,8 +77,14 @@ pub fn note_schema() -> SchemaManifest {
     );
     let mut domain_invite_body = BTreeMap::new();
     domain_invite_body.insert("target".to_string(), TypeDesc::PubKey32);
-    domain_invite_body.insert("roles".to_string(), TypeDesc::List(Box::new(TypeDesc::Text)));
-    domain_invite_body.insert("scopes".to_string(), TypeDesc::List(Box::new(TypeDesc::Text)));
+    domain_invite_body.insert(
+        "roles".to_string(),
+        TypeDesc::List(Box::new(TypeDesc::Text)),
+    );
+    domain_invite_body.insert(
+        "scopes".to_string(),
+        TypeDesc::List(Box::new(TypeDesc::Text)),
+    );
     domain_invite_body.insert("expires".to_string(), TypeDesc::Int);
     domain_invite_body.insert("note".to_string(), TypeDesc::Text);
     let mut domain_invite_required = BTreeSet::new();
@@ -95,8 +101,14 @@ pub fn note_schema() -> SchemaManifest {
     );
     let mut domain_request_body = BTreeMap::new();
     domain_request_body.insert("target".to_string(), TypeDesc::PubKey32);
-    domain_request_body.insert("roles".to_string(), TypeDesc::List(Box::new(TypeDesc::Text)));
-    domain_request_body.insert("scopes".to_string(), TypeDesc::List(Box::new(TypeDesc::Text)));
+    domain_request_body.insert(
+        "roles".to_string(),
+        TypeDesc::List(Box::new(TypeDesc::Text)),
+    );
+    domain_request_body.insert(
+        "scopes".to_string(),
+        TypeDesc::List(Box::new(TypeDesc::Text)),
+    );
     domain_request_body.insert("note".to_string(), TypeDesc::Text);
     let mut domain_request_required = BTreeSet::new();
     domain_request_required.insert("target".to_string());
@@ -110,8 +122,14 @@ pub fn note_schema() -> SchemaManifest {
     );
     let mut domain_approve_body = BTreeMap::new();
     domain_approve_body.insert("target".to_string(), TypeDesc::PubKey32);
-    domain_approve_body.insert("roles".to_string(), TypeDesc::List(Box::new(TypeDesc::Text)));
-    domain_approve_body.insert("scopes".to_string(), TypeDesc::List(Box::new(TypeDesc::Text)));
+    domain_approve_body.insert(
+        "roles".to_string(),
+        TypeDesc::List(Box::new(TypeDesc::Text)),
+    );
+    domain_approve_body.insert(
+        "scopes".to_string(),
+        TypeDesc::List(Box::new(TypeDesc::Text)),
+    );
     domain_approve_body.insert("expires".to_string(), TypeDesc::Int);
     domain_approve_body.insert("note".to_string(), TypeDesc::Text);
     let mut domain_approve_required = BTreeSet::new();
@@ -259,7 +277,10 @@ pub fn note_schema() -> SchemaManifest {
     let mut share_grant_body = BTreeMap::new();
     share_grant_body.insert("target_identity".to_string(), TypeDesc::PubKey32);
     share_grant_body.insert("target_role".to_string(), TypeDesc::Text);
-    share_grant_body.insert("scopes".to_string(), TypeDesc::List(Box::new(TypeDesc::Text)));
+    share_grant_body.insert(
+        "scopes".to_string(),
+        TypeDesc::List(Box::new(TypeDesc::Text)),
+    );
     share_grant_body.insert("expires".to_string(), TypeDesc::Int);
     share_grant_body.insert("note".to_string(), TypeDesc::Text);
     let mut share_grant_required = BTreeSet::new();
@@ -286,7 +307,10 @@ pub fn note_schema() -> SchemaManifest {
     );
     let mut share_public_body = BTreeMap::new();
     share_public_body.insert("enabled".to_string(), TypeDesc::Bool);
-    share_public_body.insert("scopes".to_string(), TypeDesc::List(Box::new(TypeDesc::Text)));
+    share_public_body.insert(
+        "scopes".to_string(),
+        TypeDesc::List(Box::new(TypeDesc::Text)),
+    );
     share_public_body.insert("expires".to_string(), TypeDesc::Int);
     share_public_body.insert("note".to_string(), TypeDesc::Text);
     types.insert(
@@ -486,7 +510,10 @@ mod tests {
         let body = Value::Map(vec![]);
         assert!(validate_body(&schema, "atlas.domain.genesis", &body).is_err());
         let ok_body = Value::Map(vec![
-            (Value::Text("domain".to_string()), Value::Text("corp.acme".to_string())),
+            (
+                Value::Text("domain".to_string()),
+                Value::Text("corp.acme".to_string()),
+            ),
             (
                 Value::Text("owner".to_string()),
                 Value::Bytes(vec![0u8; 32]),
@@ -536,7 +563,10 @@ mod tests {
                 Value::Text("owner_kind".to_string()),
                 Value::Text("identity".to_string()),
             ),
-            (Value::Text("owner".to_string()), Value::Bytes(vec![0u8; 32])),
+            (
+                Value::Text("owner".to_string()),
+                Value::Bytes(vec![0u8; 32]),
+            ),
         ]);
         assert!(validate_body(&schema, "subject.transfer", &ok_body).is_ok());
         assert!(validate_body(&schema, "subject.transfer.propose", &ok_body).is_ok());

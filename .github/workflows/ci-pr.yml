@@ -39,17 +39,17 @@ jobs:
         with:
           files: |
             **/*.rs
-          separator: "\n"
+          separator: ","
           safe_output: false
 
       - name: Check formatting on changed Rust files
         if: steps.changed-rs.outputs.any_changed == 'true'
-        env:
-          CHANGED_RS_FILES: ${{ steps.changed-rs.outputs.all_changed_files }}
         run: |
           # Incremental formatter check: full `cargo fmt --check` is currently too noisy
           # due existing workspace formatting drift.
-          while IFS= read -r file; do
+          changed_files="${{ steps.changed-rs.outputs.all_changed_files }}"
+          IFS=',' read -r -a files <<< "${changed_files}"
+          for file in "${files[@]}"; do
             [ -z "${file}" ] && continue
 
             # Guard against escaped line continuations leaking from action output.
@@ -73,8 +73,8 @@ jobs:
               fi
             fi
 
-            rustfmt --edition "${edition}" --check "${file}"
-          done <<< "${CHANGED_RS_FILES}"
+            rustfmt --edition "${edition}" --config skip_children=true --check "${file}"
+          done
 
       - name: Run clippy (no deps)
         run: cargo clippy --workspace --exclude dharma-ui --all-targets --no-deps

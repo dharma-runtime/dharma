@@ -65,3 +65,19 @@ The REPL supports profiles via `:set profile`:
 - `highsec`
 
 Highsec adds confirmation prompts and safety checks.
+
+---
+
+## 4) Large Artifact Sync
+
+- Transport safety guard stays in `network.max_frame_size` (default `1048576` bytes).
+- When peers advertise `sync.obj.chunk`, oversized sync objects are streamed in chunks.
+- Non-core chunk controls:
+  - `network.sync_obj_chunk_bytes` (default `262144`)
+  - `network.sync_obj_buffer_bytes` (default `33554432`)
+- Environment overrides:
+  - `DHARMA_SYNC_OBJ_CHUNK_BYTES`
+  - `DHARMA_SYNC_OBJ_BUFFER_BYTES`
+- Rationale:
+  - Chunk payload default stays comfortably below the frame guard after encryption/CBOR overhead.
+  - Buffer default bounds in-flight reassembly memory per connection.

@@ -1,0 +1,130 @@
+name: CI Main
+
+on:
+  push:
+    branches:
+      - master
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-main-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  full-deep-ci:
+    name: Full Deterministic Deep CI
+    runs-on: ubuntu-latest
+    # Deep deterministic CI (especially scheduled chaos mode) can run for hours.
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        # Jobs run on isolated runners; rebuild here for deterministic packaging.
+        run: cargo build -p dharma-cli -p dharma-runtime --release
+
+      - name: Run full deep CI
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            ./target/release/dh test --deep --chaos --ci
+          else
+            ./target/release/dh test --deep --ci
+          fi
+
+      - name: Upload failure tickets (if any)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dharma-failure-tickets-main
+          if-no-files-found: ignore
+          path: tests/failures/DHARMA-FAILURE-*.md
+
+  artifact-build:
+    name: Build Artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    needs:
+      - full-deep-ci
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build -p dharma-cli -p dharma-runtime --release
+
+      - name: Package Linux artifacts
+        run: |
+          mkdir -p dist
+          cp target/release/dh dist/dh
+          cp target/release/dhd dist/dhd
+          tar -czf dist/dharma-linux-amd64.tar.gz -C dist dh dhd
+          (
+            cd dist
+            sha256sum dh dhd dharma-linux-amd64.tar.gz > SHA256SUMS.txt
+          )
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-build-artifacts
+          path: dist/*
+
+  sbom-and-depscan:
+    name: SBOM and Dependency Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    needs:
+      - full-deep-ci
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install SBOM and audit tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-cyclonedx,cargo-audit
+
+      - name: Generate workspace SBOM files
+        run: |
+          mkdir -p sbom
+          cargo cyclonedx --format json --override-filename dharma-sbom --all
+          find dharma-* -maxdepth 1 -type f -name 'dharma-sbom.json' -exec cp {} sbom/ \;
+
+      - name: Run dependency audit report
+        run: cargo audit --json > sbom/cargo-audit.json || true
+
+      - name: Attach SBOM and audit reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-and-audit
+          path: sbom/*
