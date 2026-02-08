@@ -7,6 +7,7 @@ use crate::error::DharmaError;
 use crate::keys::Keyring;
 pub mod index;
 pub mod pending;
+pub mod spi;
 pub mod state;
 use crate::types::{AssertionId, ContractId, EnvelopeId, SubjectId};
 use std::collections::HashMap;
