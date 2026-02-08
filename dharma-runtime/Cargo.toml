@@ -11,6 +11,7 @@ path = "src/main.rs"
 dharma-core = { path = "../dharma-core" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "signal"] }
 
 [features]
 server = []

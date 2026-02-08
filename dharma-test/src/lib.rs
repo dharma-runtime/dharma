@@ -1,46 +1,53 @@
-use dharma_core::assertion::{add_signer_meta, AssertionHeader, AssertionPlaintext};
+use ciborium::value::Value;
 use dharma_core::assertion::DEFAULT_DATA_VERSION;
-use dharma_core::cbor;
-use dharma_core::contract::{PermissionRule, PermissionSummary, PublicPermissions};
-use dharma_core::contacts::{contact_subject_id, relation as contact_relation, ContactRelation};
-use dharma_core::crypto;
+use dharma_core::assertion::{add_signer_meta, AssertionHeader, AssertionPlaintext};
 use dharma_core::builtins;
+use dharma_core::cbor;
+use dharma_core::contacts::{contact_subject_id, relation as contact_relation, ContactRelation};
+use dharma_core::contract::{PermissionRule, PermissionSummary, PublicPermissions};
+use dharma_core::crypto;
+use dharma_core::dharmaq::{self, CmpOp, Filter, Predicate, QueryPlan};
 use dharma_core::domain::DomainState;
+use dharma_core::env::{Env, StdEnv};
 use dharma_core::envelope;
 use dharma_core::fabric::auth::{CapToken, Flag, Op, Scope};
 use dharma_core::fabric::directory::{DirectoryClient, DirectoryState};
-use dharma_core::fabric::protocol::{dispatch, ExecStats, FabricDispatcher, FabricOp, FabricRequest, FabricResponse};
+use dharma_core::fabric::protocol::{
+    dispatch, ExecStats, FabricDispatcher, FabricOp, FabricRequest, FabricResponse,
+};
 use dharma_core::fabric::types::{AdStore, Advertisement, Endpoint, ShardAd};
+use dharma_core::identity::{
+    self, IdentityStatus, ATLAS_IDENTITY_ACTIVATE, ATLAS_IDENTITY_GENESIS, ATLAS_IDENTITY_REVOKE,
+    ATLAS_IDENTITY_SUSPEND,
+};
+use dharma_core::identity_store;
 use dharma_core::keys::{hpke_public_key_from_secret, hpke_seal, key_id_for_key, Keyring};
 use dharma_core::net::handshake::{client_handshake, server_handshake};
 use dharma_core::net::ingest::{ingest_object, IngestStatus};
 use dharma_core::net::policy::{OverlayAccess, OverlayPolicy, PeerClaims};
 use dharma_core::net::sync::{sync_loop_with, SyncOptions};
-use dharma_core::dharmaq::{self, CmpOp, Filter, Predicate, QueryPlan};
+use dharma_core::net::{self, server};
 use dharma_core::pdl::schema::{
     ActionSchema, ConcurrencyMode, CqrsSchema, FieldSchema, TypeSpec, Visibility,
 };
-use dharma_core::runtime::cqrs::{decode_state, load_state, filter_state_value};
+use dharma_core::runtime::cqrs::{decode_state, filter_state_value, load_state};
 use dharma_core::share::FieldAccess;
 use dharma_core::store::index::FrontierIndex;
 use dharma_core::store::pending;
 use dharma_core::store::state::{append_assertion, list_assertions, load_epoch};
 use dharma_core::store::Store;
-use dharma_core::types::{AssertionId, ContractId, EnvelopeId, IdentityKey, KeyId, Nonce12, SchemaId, SubjectId};
+use dharma_core::sync::Subscriptions;
+use dharma_core::types::{
+    AssertionId, ContractId, EnvelopeId, IdentityKey, KeyId, Nonce12, SchemaId, SubjectId,
+};
 use dharma_core::validation::{order_assertions, structural_validate, StructuralStatus};
 use dharma_core::{DharmaError, IdentityState};
-use dharma_core::env::{Env, StdEnv};
-use dharma_core::identity_store;
-use dharma_core::identity::{self, ATLAS_IDENTITY_ACTIVATE, ATLAS_IDENTITY_GENESIS, ATLAS_IDENTITY_REVOKE, ATLAS_IDENTITY_SUSPEND, IdentityStatus};
-use dharma_core::net::{self, server};
-use dharma_core::sync::Subscriptions;
 use dharma_sim::{
     ClockFaultConfig, FaultConfig, FaultEvent, FaultTimeline, FsFaultConfig, NodeId, SimEnv,
     SimHub, TraceSink,
 };
 use rand_chacha::ChaCha20Rng;
 use rand_core::{RngCore, SeedableRng};
-use ciborium::value::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::IsTerminal;
@@ -48,13 +55,13 @@ use std::io::IsTerminal;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "external")]
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::sync::mpsc;
-#[cfg(feature = "external")]
-use std::process::{Child, Command, Stdio};
 use tempfile::TempDir;
 
 mod renderer;
@@ -84,7 +91,11 @@ impl TestOptions {
     }
 
     pub fn iterations(&self) -> usize {
-        if self.deep { 200 } else { 25 }
+        if self.deep {
+            200
+        } else {
+            25
+        }
     }
 }
 
@@ -339,10 +350,7 @@ fn random_seed() -> u64 {
     u64::from_le_bytes(buf)
 }
 
-fn run_external_tests(
-    renderer: &mut dyn Renderer,
-    status: &mut Status,
-) -> Result<(), TestFailure> {
+fn run_external_tests(renderer: &mut dyn Renderer, status: &mut Status) -> Result<(), TestFailure> {
     if !cfg!(feature = "external") {
         let _ = renderer;
         let _ = status;
@@ -474,20 +482,18 @@ admin_token = \"{}\"\n",
             details: format!("garage launch failed: {err}"),
             trace: None,
         })?;
-        wait_for_port("127.0.0.1", 3901, Duration::from_secs(10))
-            .map_err(|err| TestFailure {
-                property: "EXTERNAL-S3-000",
-                seed: 0,
-                details: format!("garage rpc not ready: {err}"),
-                trace: None,
-            })?;
-        wait_for_port("127.0.0.1", 3900, Duration::from_secs(10))
-            .map_err(|err| TestFailure {
-                property: "EXTERNAL-S3-000",
-                seed: 0,
-                details: format!("garage s3 not ready: {err}"),
-                trace: None,
-            })?;
+        wait_for_port("127.0.0.1", 3901, Duration::from_secs(10)).map_err(|err| TestFailure {
+            property: "EXTERNAL-S3-000",
+            seed: 0,
+            details: format!("garage rpc not ready: {err}"),
+            trace: None,
+        })?;
+        wait_for_port("127.0.0.1", 3900, Duration::from_secs(10)).map_err(|err| TestFailure {
+            property: "EXTERNAL-S3-000",
+            seed: 0,
+            details: format!("garage s3 not ready: {err}"),
+            trace: None,
+        })?;
         self.garage = Some(child);
         self.garage_dir = Some(dir);
         self.garage_config = Some(config_path);
@@ -606,20 +612,20 @@ admin_token = \"{}\"\n",
             details: format!("arlocal launch failed: {err}"),
             trace: None,
         })?;
-        wait_for_port("127.0.0.1", port, Duration::from_secs(10))
-            .map_err(|err| TestFailure {
-                property: "EXTERNAL-ARWEAVE-000",
-                seed: 0,
-                details: format!("arlocal not ready: {err}"),
-                trace: None,
-            })?;
-        wait_for_http_ok("127.0.0.1", port, "/info", Duration::from_secs(10))
-            .map_err(|err| TestFailure {
+        wait_for_port("127.0.0.1", port, Duration::from_secs(10)).map_err(|err| TestFailure {
+            property: "EXTERNAL-ARWEAVE-000",
+            seed: 0,
+            details: format!("arlocal not ready: {err}"),
+            trace: None,
+        })?;
+        wait_for_http_ok("127.0.0.1", port, "/info", Duration::from_secs(10)).map_err(|err| {
+            TestFailure {
                 property: "EXTERNAL-ARWEAVE-000",
                 seed: 0,
                 details: format!("arlocal /info not ready: {err}"),
                 trace: None,
-            })?;
+            }
+        })?;
         renderer.log(&format!("arlocal ready on 127.0.0.1:{port}"));
         self.arlocal = Some(child);
         self.arlocal_dir = Some(dir);
@@ -649,10 +655,10 @@ fn external_s3_test(
     status: &mut Status,
     services: &ExternalServices,
 ) -> Result<(), TestFailure> {
-    use dharma_core::vault::drivers::S3Driver;
-    use dharma_core::vault::{VaultDictionaryRef, VaultDriver, VaultItem, VaultSegment};
     use dharma_core::types::{ContractId, SchemaId, SubjectId};
     use dharma_core::vault::drivers::s3::S3Options;
+    use dharma_core::vault::drivers::S3Driver;
+    use dharma_core::vault::{VaultDictionaryRef, VaultDriver, VaultItem, VaultSegment};
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
 
@@ -667,7 +673,10 @@ fn external_s3_test(
     let subject = SubjectId::from_bytes([1u8; 32]);
     let schema = SchemaId::from_bytes([2u8; 32]);
     let contract = ContractId::from_bytes([3u8; 32]);
-    let assertions = vec![VaultItem { seq: 1, bytes: b"ext-s3".to_vec() }];
+    let assertions = vec![VaultItem {
+        seq: 1,
+        bytes: b"ext-s3".to_vec(),
+    }];
     let segment = VaultSegment::new(subject, schema, contract, assertions, b"snap".to_vec())
         .map_err(|err| TestFailure {
             property: "EXTERNAL-S3-001",
@@ -677,7 +686,8 @@ fn external_s3_test(
         })?;
     let mut rng = ChaCha20Rng::seed_from_u64(99);
     let svk = [9u8; 32];
-    let chunk = segment.seal(&svk, VaultDictionaryRef::None, &mut rng)
+    let chunk = segment
+        .seal(&svk, VaultDictionaryRef::None, &mut rng)
         .map_err(|err| TestFailure {
             property: "EXTERNAL-S3-001",
             seed: 0,
@@ -711,8 +721,8 @@ fn external_s3_test(
         force_path_style: true,
         region: Some("garage".to_string()),
     };
-    let driver = S3Driver::new_with_options(bucket, "vault", options)
-        .map_err(|err| TestFailure {
+    let driver =
+        S3Driver::new_with_options(bucket, "vault", options).map_err(|err| TestFailure {
             property: "EXTERNAL-S3-001",
             seed: 0,
             details: format!("driver init failed: {err}"),
@@ -742,9 +752,9 @@ fn external_arweave_test(
     status: &mut Status,
     services: &ExternalServices,
 ) -> Result<(), TestFailure> {
+    use dharma_core::types::{ContractId, SchemaId, SubjectId};
     use dharma_core::vault::drivers::ArweaveDriver;
     use dharma_core::vault::{VaultDictionaryRef, VaultDriver, VaultItem, VaultSegment};
-    use dharma_core::types::{ContractId, SchemaId, SubjectId};
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
 
@@ -759,7 +769,10 @@ fn external_arweave_test(
     let subject = SubjectId::from_bytes([4u8; 32]);
     let schema = SchemaId::from_bytes([5u8; 32]);
     let contract = ContractId::from_bytes([6u8; 32]);
-    let assertions = vec![VaultItem { seq: 1, bytes: b"ext-arweave".to_vec() }];
+    let assertions = vec![VaultItem {
+        seq: 1,
+        bytes: b"ext-arweave".to_vec(),
+    }];
     let segment = VaultSegment::new(subject, schema, contract, assertions, b"snap".to_vec())
         .map_err(|err| TestFailure {
             property: "EXTERNAL-ARWEAVE-001",
@@ -769,7 +782,8 @@ fn external_arweave_test(
         })?;
     let mut rng = ChaCha20Rng::seed_from_u64(55);
     let svk = [7u8; 32];
-    let chunk = segment.seal(&svk, VaultDictionaryRef::None, &mut rng)
+    let chunk = segment
+        .seal(&svk, VaultDictionaryRef::None, &mut rng)
         .map_err(|err| TestFailure {
             property: "EXTERNAL-ARWEAVE-001",
             seed: 0,
@@ -777,12 +791,13 @@ fn external_arweave_test(
             trace: None,
         })?;
 
-    let driver = ArweaveDriver::new_arlocal(services.arweave_endpoint.clone())
-    .map_err(|err| TestFailure {
-        property: "EXTERNAL-ARWEAVE-001",
-        seed: 0,
-        details: format!("driver init failed: {err}"),
-        trace: None,
+    let driver = ArweaveDriver::new_arlocal(services.arweave_endpoint.clone()).map_err(|err| {
+        TestFailure {
+            property: "EXTERNAL-ARWEAVE-001",
+            seed: 0,
+            details: format!("driver init failed: {err}"),
+            trace: None,
+        }
     })?;
     driver
         .put_chunk_verified(&chunk, &svk, None)
@@ -809,7 +824,10 @@ fn command_exists(cmd: &str) -> bool {
 #[cfg(feature = "external")]
 fn command_exists_with(cmd: &str, args: &[&str]) -> bool {
     let mut command = Command::new(cmd);
-    command.args(args).stdout(Stdio::null()).stderr(Stdio::null());
+    command
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     command.status().is_ok()
 }
 
@@ -1014,7 +1032,10 @@ fn run_relay_properties(
     status: &mut Status,
 ) -> Result<(), TestFailure> {
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    let properties: &[(&str, fn(&mut ChaCha20Rng, &mut Vec<String>) -> Result<(), String>)] = &[
+    let properties: &[(
+        &str,
+        fn(&mut ChaCha20Rng, &mut Vec<String>) -> Result<(), String>,
+    )] = &[
         ("P-RELAY-001", prop_relay_baseline),
         ("P-RELAY-002", prop_relay_identity_root),
     ];
@@ -1300,9 +1321,8 @@ fn sim_convergence(
     }
 
     for node in &mut nodes {
-        let (schema_id, contract_id) =
-            store_cqrs_artifacts(&node.store)
-                .map_err(|e| (e, merge_trace(&trace_extra, &hub, trace_ref)))?;
+        let (schema_id, contract_id) = store_cqrs_artifacts(&node.store)
+            .map_err(|e| (e, merge_trace(&trace_extra, &hub, trace_ref)))?;
         node.schema_id = Some(schema_id);
         node.contract_id = Some(contract_id);
     }
@@ -1334,7 +1354,11 @@ fn sim_convergence(
         record_trace(
             &mut trace_extra,
             renderer,
-            format!("node_chain node={} subject={} count=3", nodes[idx].id, subject.to_hex()),
+            format!(
+                "node_chain node={} subject={} count=3",
+                nodes[idx].id,
+                subject.to_hex()
+            ),
         );
     }
 
@@ -1414,13 +1438,23 @@ fn sim_convergence(
         while running_runner.load(Ordering::SeqCst) {
             let stepped = hub_runner.step();
             let now = hub_runner.now();
-            apply_timeline(&mut timeline_runner, now, &hub_runner, &timeline_nodes_runner);
+            apply_timeline(
+                &mut timeline_runner,
+                now,
+                &hub_runner,
+                &timeline_nodes_runner,
+            );
             if !stepped {
                 thread::yield_now();
             }
         }
         let now = hub_runner.now();
-        apply_timeline(&mut timeline_runner, now, &hub_runner, &timeline_nodes_runner);
+        apply_timeline(
+            &mut timeline_runner,
+            now,
+            &hub_runner,
+            &timeline_nodes_runner,
+        );
         hub_runner.step();
     });
 
@@ -1473,9 +1507,12 @@ fn sim_convergence(
     }
 
     running.store(false, Ordering::SeqCst);
-    runner
-        .join()
-        .map_err(|_| ("net runner failed".to_string(), merge_trace(&trace_extra, &hub, trace_ref)))?;
+    runner.join().map_err(|_| {
+        (
+            "net runner failed".to_string(),
+            merge_trace(&trace_extra, &hub, trace_ref),
+        )
+    })?;
 
     let expected =
         snapshot_env(&nodes[0].env).map_err(|e| (e, merge_trace(&trace_extra, &hub, trace_ref)))?;
@@ -1664,7 +1701,8 @@ impl SimNode {
                 subject.to_hex(),
                 self.identity.subject_id.to_hex(),
                 seq,
-                prev.map(|id| id.to_hex()).unwrap_or_else(|| "-".to_string())
+                prev.map(|id| id.to_hex())
+                    .unwrap_or_else(|| "-".to_string())
             ));
             let header = AssertionHeader {
                 v: crypto::PROTOCOL_VERSION,
@@ -1685,7 +1723,8 @@ impl SimNode {
                 ciborium::value::Value::Text("text".to_string()),
                 ciborium::value::Value::Text(format!("value {}", seq)),
             )]);
-            let assertion = AssertionPlaintext::sign(header, body, sk).map_err(|e| e.to_string())?;
+            let assertion =
+                AssertionPlaintext::sign(header, body, sk).map_err(|e| e.to_string())?;
             let bytes = assertion.to_cbor().map_err(|e| e.to_string())?;
             let mut index = self.index.lock().unwrap();
             let assertion_id = assertion.assertion_id().map_err(|e| e.to_string())?;
@@ -1726,7 +1765,8 @@ fn sync_pair_real(
     hub: Arc<SimHub>,
     timeout: Duration,
 ) -> Result<(), String> {
-    let (mut stream_a, mut stream_b, control) = dharma_sim::SimStream::pair(hub.clone(), a.id, b.id);
+    let (mut stream_a, mut stream_b, control) =
+        dharma_sim::SimStream::pair(hub.clone(), a.id, b.id);
     let ready = Arc::new(AtomicUsize::new(0));
     let store_a = a.store.clone();
     let identity_a = a.identity.clone();
@@ -1845,8 +1885,12 @@ fn sync_pair_real(
         }
         thread::yield_now();
     }
-    let res_a = thread_a.join().map_err(|_| "sync thread A failed".to_string())?;
-    let res_b = thread_b.join().map_err(|_| "sync thread B failed".to_string())?;
+    let res_a = thread_a
+        .join()
+        .map_err(|_| "sync thread A failed".to_string())?;
+    let res_b = thread_b
+        .join()
+        .map_err(|_| "sync thread B failed".to_string())?;
     sync_result?;
     res_a?;
     res_b?;
@@ -2002,10 +2046,7 @@ fn meta_data_path(meta_path: &Path, meta: &VectorMeta) -> Result<PathBuf, Dharma
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| DharmaError::Validation("invalid meta file".to_string()))?;
-    let ext = meta
-        .data_ext
-        .clone()
-        .unwrap_or_else(|| "cbor".to_string());
+    let ext = meta.data_ext.clone().unwrap_or_else(|| "cbor".to_string());
     let data = meta_path.with_file_name(format!("{stem}.{ext}"));
     Ok(data)
 }
@@ -2061,8 +2102,8 @@ fn vector_envelope(bytes: &[u8], meta: &VectorMeta) -> Result<(), String> {
         .clone()
         .ok_or_else(|| "missing key".to_string())?;
     let key_bytes = hex::decode(key_hex).map_err(|e| e.to_string())?;
-    let key = <[u8; 32]>::try_from(key_bytes.as_slice())
-        .map_err(|_| "invalid key length".to_string())?;
+    let key =
+        <[u8; 32]>::try_from(key_bytes.as_slice()).map_err(|_| "invalid key length".to_string())?;
     let out = envelope::decrypt_assertion(&env, &key);
     match meta.expect.as_str() {
         "decrypt" => {
@@ -2132,7 +2173,10 @@ fn prop_cbor_roundtrip(rng: &mut ChaCha20Rng, iterations: usize) -> Result<(), S
     Ok(())
 }
 
-fn prop_cbor_rejects_noncanonical(_rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
+fn prop_cbor_rejects_noncanonical(
+    _rng: &mut ChaCha20Rng,
+    _iterations: usize,
+) -> Result<(), String> {
     let bytes = vec![0xbf, 0x61, 0x61, 0x01, 0xff];
     if cbor::ensure_canonical(&bytes).is_ok() {
         return Err("non-canonical bytes accepted".to_string());
@@ -2249,7 +2293,8 @@ fn prop_envelope_roundtrip(rng: &mut ChaCha20Rng, iterations: usize) -> Result<(
         let kid = KeyId::from_bytes(rand_bytes32(rng));
         let nonce = Nonce12::from_bytes(rand_nonce(rng));
         let plaintext = rand_bytes(rng, 32);
-        let env = envelope::encrypt_assertion(&plaintext, kid, &key, nonce).map_err(|e| e.to_string())?;
+        let env =
+            envelope::encrypt_assertion(&plaintext, kid, &key, nonce).map_err(|e| e.to_string())?;
         let out = envelope::decrypt_assertion(&env, &key).map_err(|e| e.to_string())?;
         if out != plaintext {
             return Err("envelope roundtrip mismatch".to_string());
@@ -2267,7 +2312,8 @@ fn prop_envelope_wrong_key(rng: &mut ChaCha20Rng, iterations: usize) -> Result<(
         let kid = KeyId::from_bytes(rand_bytes32(rng));
         let nonce = Nonce12::from_bytes(rand_nonce(rng));
         let plaintext = rand_bytes(rng, 16);
-        let env = envelope::encrypt_assertion(&plaintext, kid, &key, nonce).map_err(|e| e.to_string())?;
+        let env =
+            envelope::encrypt_assertion(&plaintext, kid, &key, nonce).map_err(|e| e.to_string())?;
         if envelope::decrypt_assertion(&env, &bad).is_ok() {
             return Err("decrypt succeeded with wrong key".to_string());
         }
@@ -2285,7 +2331,8 @@ fn prop_envelope_id_changes_on_mutation(
         let kid = KeyId::from_bytes(rand_bytes32(rng));
         let nonce = Nonce12::from_bytes(rand_nonce(rng));
         let plaintext = rand_bytes(rng, 16);
-        let env = envelope::encrypt_assertion(&plaintext, kid, &key, nonce).map_err(|e| e.to_string())?;
+        let env =
+            envelope::encrypt_assertion(&plaintext, kid, &key, nonce).map_err(|e| e.to_string())?;
         let bytes = env.to_cbor().map_err(|e| e.to_string())?;
         let id = crypto::envelope_id(&bytes);
         let mut mutated = bytes.clone();
@@ -2300,7 +2347,10 @@ fn prop_envelope_id_changes_on_mutation(
     Ok(())
 }
 
-fn prop_dag_ordering_respects_deps(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
+fn prop_dag_ordering_respects_deps(
+    rng: &mut ChaCha20Rng,
+    _iterations: usize,
+) -> Result<(), String> {
     let (sk, pk) = crypto::generate_identity_keypair(rng);
     let subject = SubjectId::from_bytes(rand_bytes32(rng));
     let mut map = HashMap::new();
@@ -2384,10 +2434,7 @@ fn prop_dag_detects_cycle(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(
     Ok(())
 }
 
-fn prop_store_ingest_idempotent(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_store_ingest_idempotent(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let env = SimEnv::new(rng.next_u64(), 0);
     let store = Store::new(&env);
     let (schema_id, contract_id) = store_cqrs_artifacts(&store)?;
@@ -2396,12 +2443,20 @@ fn prop_store_ingest_idempotent(
     let (assertion, subject_key) = make_assertion(rng, 1, None, schema_id, contract_id)?;
     let bytes = wrap_envelope(&assertion, &subject_key)?;
     keys.insert_sdk(assertion.header.sub, 0, subject_key);
-    let first = ingest_object(&store, &mut index, &bytes, &mut keys).map_err(|e| format!("{e:?}"))?;
-    if !matches!(first, IngestStatus::Accepted(_) | IngestStatus::Pending(_, _)) {
+    let first =
+        ingest_object(&store, &mut index, &bytes, &mut keys).map_err(|e| format!("{e:?}"))?;
+    if !matches!(
+        first,
+        IngestStatus::Accepted(_) | IngestStatus::Pending(_, _)
+    ) {
         return Err("first ingest unexpected status".to_string());
     }
-    let second = ingest_object(&store, &mut index, &bytes, &mut keys).map_err(|e| format!("{e:?}"))?;
-    if !matches!(second, IngestStatus::Accepted(_) | IngestStatus::Pending(_, _)) {
+    let second =
+        ingest_object(&store, &mut index, &bytes, &mut keys).map_err(|e| format!("{e:?}"))?;
+    if !matches!(
+        second,
+        IngestStatus::Accepted(_) | IngestStatus::Pending(_, _)
+    ) {
         return Err("second ingest unexpected status".to_string());
     }
     Ok(())
@@ -2466,8 +2521,16 @@ fn prop_replay_deterministic(rng: &mut ChaCha20Rng, _iterations: usize) -> Resul
         let bytes = assertion.to_cbor().map_err(|e| e.to_string())?;
         let assertion_id = assertion.assertion_id().map_err(|e| e.to_string())?;
         let env_id = crypto::envelope_id(&bytes);
-        append_assertion(&env_a, &subject, seq, assertion_id, env_id, "action.Set", &bytes)
-            .map_err(|e| e.to_string())?;
+        append_assertion(
+            &env_a,
+            &subject,
+            seq,
+            assertion_id,
+            env_id,
+            "action.Set",
+            &bytes,
+        )
+        .map_err(|e| e.to_string())?;
         prev = Some(assertion_id);
     }
     for record in list_assertions(&env_a, &subject).map_err(|e| e.to_string())? {
@@ -2526,8 +2589,16 @@ fn prop_convergence(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), Str
             let bytes = assertion.to_cbor().map_err(|e| e.to_string())?;
             let assertion_id = assertion.assertion_id().map_err(|e| e.to_string())?;
             let env_id = crypto::envelope_id(&bytes);
-            append_assertion(&env, &subject, seq, assertion_id, env_id, "action.Note", &bytes)
-                .map_err(|e| e.to_string())?;
+            append_assertion(
+                &env,
+                &subject,
+                seq,
+                assertion_id,
+                env_id,
+                "action.Note",
+                &bytes,
+            )
+            .map_err(|e| e.to_string())?;
         }
         nodes.push(Node { env, subject });
     }
@@ -2561,10 +2632,7 @@ fn prop_convergence(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), Str
     Ok(())
 }
 
-fn prop_identity_genesis_race(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_identity_genesis_race(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let store = Store::from_root(temp.path());
     let mut keys = Keyring::new();
@@ -2602,8 +2670,8 @@ fn prop_identity_genesis_race(
                 Value::Bytes(root_id.as_bytes().to_vec()),
             ),
         ]);
-        let assertion = AssertionPlaintext::sign(header, body, root_sk)
-            .map_err(|e| e.to_string())?;
+        let assertion =
+            AssertionPlaintext::sign(header, body, root_sk).map_err(|e| e.to_string())?;
         assertion.to_cbor().map_err(|e| e.to_string())
     };
 
@@ -2690,12 +2758,8 @@ fn prop_identity_lifecycle_requires_root(
         note: None,
         meta: add_signer_meta(None, &subject),
     };
-    let suspend = AssertionPlaintext::sign(
-        suspend_header,
-        Value::Map(vec![]),
-        &device_sk,
-    )
-    .map_err(|e| e.to_string())?;
+    let suspend = AssertionPlaintext::sign(suspend_header, Value::Map(vec![]), &device_sk)
+        .map_err(|e| e.to_string())?;
     let suspend_bytes = suspend.to_cbor().map_err(|e| e.to_string())?;
     let err = ingest_object(&store, &mut index, &suspend_bytes, &mut keys).unwrap_err();
     match err {
@@ -2709,10 +2773,7 @@ fn prop_identity_lifecycle_requires_root(
     Ok(())
 }
 
-fn prop_identity_revoked_terminal(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_identity_revoked_terminal(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let store = Store::from_root(temp.path());
     let mut keys = Keyring::new();
@@ -2875,8 +2936,14 @@ fn prop_identity_peer_verification(
         meta: add_signer_meta(None, &subject),
     };
     let profile_body = Value::Map(vec![
-        (Value::Text("alias".to_string()), Value::Text("alice".to_string())),
-        (Value::Text("org".to_string()), Value::Text("acme".to_string())),
+        (
+            Value::Text("alias".to_string()),
+            Value::Text("alice".to_string()),
+        ),
+        (
+            Value::Text("org".to_string()),
+            Value::Text("acme".to_string()),
+        ),
         (
             Value::Text("roles".to_string()),
             Value::Array(vec![Value::Text("Admin".to_string())]),
@@ -2891,8 +2958,8 @@ fn prop_identity_peer_verification(
         other => return Err(format!("expected accepted profile, got {other:?}")),
     }
 
-    let claims = verify_peer_identity(store.env(), &subject, &root_id)
-        .map_err(|e| e.to_string())?;
+    let claims =
+        verify_peer_identity(store.env(), &subject, &root_id).map_err(|e| e.to_string())?;
     if claims.is_none() {
         return Err("expected verified identity claims".to_string());
     }
@@ -2920,8 +2987,8 @@ fn prop_identity_peer_verification(
         Ok(IngestStatus::Accepted(_)) => {}
         other => return Err(format!("expected accepted suspend, got {other:?}")),
     }
-    let claims = verify_peer_identity(store.env(), &subject, &root_id)
-        .map_err(|e| e.to_string())?;
+    let claims =
+        verify_peer_identity(store.env(), &subject, &root_id).map_err(|e| e.to_string())?;
     if claims.is_some() {
         return Err("expected suspended identity to be unverified".to_string());
     }
@@ -2949,8 +3016,8 @@ fn prop_identity_peer_verification(
         Ok(IngestStatus::Accepted(_)) => {}
         other => return Err(format!("expected accepted activate, got {other:?}")),
     }
-    let claims = verify_peer_identity(store.env(), &subject, &root_id)
-        .map_err(|e| e.to_string())?;
+    let claims =
+        verify_peer_identity(store.env(), &subject, &root_id).map_err(|e| e.to_string())?;
     if claims.is_none() {
         return Err("expected re-activated identity claims".to_string());
     }
@@ -2977,18 +3044,15 @@ fn prop_identity_peer_verification(
         Ok(IngestStatus::Accepted(_)) => {}
         other => return Err(format!("expected accepted revoke, got {other:?}")),
     }
-    let claims = verify_peer_identity(store.env(), &subject, &root_id)
-        .map_err(|e| e.to_string())?;
+    let claims =
+        verify_peer_identity(store.env(), &subject, &root_id).map_err(|e| e.to_string())?;
     if claims.is_some() {
         return Err("expected revoked identity to be unverified".to_string());
     }
     Ok(())
 }
 
-fn prop_identity_root_recovery(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_identity_root_recovery(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let env = SimEnv::new(rng.next_u64(), 0);
     let store = Store::new(&env);
     let (schema_id, contract_id) = store_cqrs_artifacts(&store)?;
@@ -3123,8 +3187,9 @@ fn prop_domain_membership_ordering(
             Value::Bytes(owner_id.as_bytes().to_vec()),
         ),
     ]);
-    let owner_genesis = AssertionPlaintext::sign(owner_genesis_header, owner_genesis_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let owner_genesis =
+        AssertionPlaintext::sign(owner_genesis_header, owner_genesis_body, &owner_sk)
+            .map_err(|e| e.to_string())?;
     let owner_genesis_bytes = owner_genesis.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &owner_genesis_bytes, &mut keys) {
         Ok(IngestStatus::Accepted(_)) => {}
@@ -3155,8 +3220,9 @@ fn prop_domain_membership_ordering(
             Value::Bytes(owner_id.as_bytes().to_vec()),
         ),
     ]);
-    let domain_genesis = AssertionPlaintext::sign(domain_genesis_header, domain_genesis_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let domain_genesis =
+        AssertionPlaintext::sign(domain_genesis_header, domain_genesis_body, &owner_sk)
+            .map_err(|e| e.to_string())?;
     let domain_genesis_bytes = domain_genesis.to_cbor().map_err(|e| e.to_string())?;
     let domain_genesis_id = domain_genesis.assertion_id().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &domain_genesis_bytes, &mut keys) {
@@ -3219,8 +3285,8 @@ fn prop_domain_membership_ordering(
         note: None,
         meta: add_signer_meta(None, &owner_subject),
     };
-    let first = AssertionPlaintext::sign(first_header, first_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let first =
+        AssertionPlaintext::sign(first_header, first_body, &owner_sk).map_err(|e| e.to_string())?;
     let first_bytes = first.to_cbor().map_err(|e| e.to_string())?;
     let first_id = first.assertion_id().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &first_bytes, &mut keys) {
@@ -3270,10 +3336,7 @@ fn prop_domain_membership_ordering(
     Ok(())
 }
 
-fn prop_domain_acting_context(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_domain_acting_context(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let store = Store::from_root(temp.path());
     let mut keys = Keyring::new();
@@ -3309,8 +3372,9 @@ fn prop_domain_acting_context(
             Value::Bytes(actor_id.as_bytes().to_vec()),
         ),
     ]);
-    let actor_genesis = AssertionPlaintext::sign(actor_genesis_header, actor_genesis_body, &actor_sk)
-        .map_err(|e| e.to_string())?;
+    let actor_genesis =
+        AssertionPlaintext::sign(actor_genesis_header, actor_genesis_body, &actor_sk)
+            .map_err(|e| e.to_string())?;
     let actor_genesis_bytes = actor_genesis.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &actor_genesis_bytes, &mut keys) {
         Ok(IngestStatus::Accepted(_)) => {}
@@ -3344,8 +3408,9 @@ fn prop_domain_acting_context(
             Value::Bytes(owner_id.as_bytes().to_vec()),
         ),
     ]);
-    let owner_genesis = AssertionPlaintext::sign(owner_genesis_header, owner_genesis_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let owner_genesis =
+        AssertionPlaintext::sign(owner_genesis_header, owner_genesis_body, &owner_sk)
+            .map_err(|e| e.to_string())?;
     let owner_genesis_bytes = owner_genesis.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &owner_genesis_bytes, &mut keys) {
         Ok(IngestStatus::Accepted(_)) => {}
@@ -3369,14 +3434,18 @@ fn prop_domain_acting_context(
         meta: add_signer_meta(None, &owner_subject),
     };
     let domain_genesis_body = Value::Map(vec![
-        (Value::Text("domain".to_string()), Value::Text("corp.acme".to_string())),
+        (
+            Value::Text("domain".to_string()),
+            Value::Text("corp.acme".to_string()),
+        ),
         (
             Value::Text("owner".to_string()),
             Value::Bytes(owner_id.as_bytes().to_vec()),
         ),
     ]);
-    let domain_genesis = AssertionPlaintext::sign(domain_genesis_header, domain_genesis_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let domain_genesis =
+        AssertionPlaintext::sign(domain_genesis_header, domain_genesis_body, &owner_sk)
+            .map_err(|e| e.to_string())?;
     let domain_genesis_bytes = domain_genesis.to_cbor().map_err(|e| e.to_string())?;
     let domain_genesis_id = domain_genesis.assertion_id().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &domain_genesis_bytes, &mut keys) {
@@ -3390,7 +3459,10 @@ fn prop_domain_acting_context(
             Value::Text("acting_domain".to_string()),
             Value::Bytes(domain_subject.as_bytes().to_vec()),
         ),
-        (Value::Text("acting_role".to_string()), Value::Text("member".to_string())),
+        (
+            Value::Text("acting_role".to_string()),
+            Value::Text("member".to_string()),
+        ),
     ]);
     let action_header = AssertionHeader {
         v: crypto::PROTOCOL_VERSION,
@@ -3468,7 +3540,10 @@ fn prop_domain_acting_context(
             Value::Text("acting_domain".to_string()),
             Value::Bytes(domain_subject.as_bytes().to_vec()),
         ),
-        (Value::Text("acting_role".to_string()), Value::Text("admin".to_string())),
+        (
+            Value::Text("acting_role".to_string()),
+            Value::Text("admin".to_string()),
+        ),
     ]);
     let action_header = AssertionHeader {
         v: crypto::PROTOCOL_VERSION,
@@ -3507,7 +3582,10 @@ fn prop_domain_acting_context(
             Value::Text("acting_domain".to_string()),
             Value::Bytes(domain_subject.as_bytes().to_vec()),
         ),
-        (Value::Text("acting_role".to_string()), Value::Text("member".to_string())),
+        (
+            Value::Text("acting_role".to_string()),
+            Value::Text("member".to_string()),
+        ),
     ]);
     let action_header = AssertionHeader {
         v: crypto::PROTOCOL_VERSION,
@@ -3554,37 +3632,40 @@ fn prop_directory_parent_authorization(
     let parent_domain = format!("corp{}", rng.next_u32());
     let child_domain = format!("{}.eng", parent_domain);
 
-    let append_signed = |subject,
-                         seq,
-                         prev,
-                         typ: &str,
-                         auth,
-                         sk,
-                         body|
-     -> Result<AssertionId, String> {
-        let header = AssertionHeader {
-            v: crypto::PROTOCOL_VERSION,
-            ver: DEFAULT_DATA_VERSION,
-            sub: subject,
-            typ: typ.to_string(),
-            auth,
-            seq,
-            prev,
-            refs: prev.into_iter().collect(),
-            ts: None,
-            schema: schema_id,
-            contract: contract_id,
-            note: None,
-            meta: None,
-        };
-        let assertion = AssertionPlaintext::sign(header, body, sk).map_err(|e| e.to_string())?;
-        let bytes = assertion.to_cbor().map_err(|e| e.to_string())?;
-        let assertion_id = assertion.assertion_id().map_err(|e| e.to_string())?;
-        let envelope_id = crypto::envelope_id(&bytes);
-        append_assertion(store.env(), &subject, seq, assertion_id, envelope_id, typ, &bytes)
+    let append_signed =
+        |subject, seq, prev, typ: &str, auth, sk, body| -> Result<AssertionId, String> {
+            let header = AssertionHeader {
+                v: crypto::PROTOCOL_VERSION,
+                ver: DEFAULT_DATA_VERSION,
+                sub: subject,
+                typ: typ.to_string(),
+                auth,
+                seq,
+                prev,
+                refs: prev.into_iter().collect(),
+                ts: None,
+                schema: schema_id,
+                contract: contract_id,
+                note: None,
+                meta: None,
+            };
+            let assertion =
+                AssertionPlaintext::sign(header, body, sk).map_err(|e| e.to_string())?;
+            let bytes = assertion.to_cbor().map_err(|e| e.to_string())?;
+            let assertion_id = assertion.assertion_id().map_err(|e| e.to_string())?;
+            let envelope_id = crypto::envelope_id(&bytes);
+            append_assertion(
+                store.env(),
+                &subject,
+                seq,
+                assertion_id,
+                envelope_id,
+                typ,
+                &bytes,
+            )
             .map_err(|e| e.to_string())?;
-        Ok(assertion_id)
-    };
+            Ok(assertion_id)
+        };
 
     let _parent_genesis_id = append_signed(
         parent_subject,
@@ -3594,7 +3675,10 @@ fn prop_directory_parent_authorization(
         parent_id,
         &parent_sk,
         Value::Map(vec![
-            (Value::Text("domain".to_string()), Value::Text(parent_domain.clone())),
+            (
+                Value::Text("domain".to_string()),
+                Value::Text(parent_domain.clone()),
+            ),
             (
                 Value::Text("owner".to_string()),
                 Value::Bytes(parent_id.as_bytes().to_vec()),
@@ -3609,7 +3693,10 @@ fn prop_directory_parent_authorization(
         child_id,
         &child_sk,
         Value::Map(vec![
-            (Value::Text("domain".to_string()), Value::Text(child_domain.clone())),
+            (
+                Value::Text("domain".to_string()),
+                Value::Text(child_domain.clone()),
+            ),
             (
                 Value::Text("owner".to_string()),
                 Value::Bytes(child_id.as_bytes().to_vec()),
@@ -3637,7 +3724,10 @@ fn prop_directory_parent_authorization(
         parent_id,
         &parent_sk,
         Value::Map(vec![
-            (Value::Text("domain".to_string()), Value::Text(parent_domain.clone())),
+            (
+                Value::Text("domain".to_string()),
+                Value::Text(parent_domain.clone()),
+            ),
             (
                 Value::Text("owner".to_string()),
                 Value::Bytes(parent_id.as_bytes().to_vec()),
@@ -3649,7 +3739,10 @@ fn prop_directory_parent_authorization(
         child_id,
         &child_sk,
         Value::Map(vec![
-            (Value::Text("domain".to_string()), Value::Text(child_domain.clone())),
+            (
+                Value::Text("domain".to_string()),
+                Value::Text(child_domain.clone()),
+            ),
             (
                 Value::Text("owner".to_string()),
                 Value::Bytes(child_id.as_bytes().to_vec()),
@@ -3661,7 +3754,10 @@ fn prop_directory_parent_authorization(
         child_id,
         &child_sk,
         Value::Map(vec![
-            (Value::Text("domain".to_string()), Value::Text(child_domain.clone())),
+            (
+                Value::Text("domain".to_string()),
+                Value::Text(child_domain.clone()),
+            ),
             (
                 Value::Text("owner".to_string()),
                 Value::Bytes(child_id.as_bytes().to_vec()),
@@ -3679,8 +3775,14 @@ fn prop_directory_parent_authorization(
         parent_id,
         &parent_sk,
         Value::Map(vec![
-            (Value::Text("domain".to_string()), Value::Text(child_domain.clone())),
-            (Value::Text("parent".to_string()), Value::Text(parent_domain.clone())),
+            (
+                Value::Text("domain".to_string()),
+                Value::Text(child_domain.clone()),
+            ),
+            (
+                Value::Text("parent".to_string()),
+                Value::Text(parent_domain.clone()),
+            ),
             (
                 Value::Text("authorized_owner".to_string()),
                 Value::Bytes(child_id.as_bytes().to_vec()),
@@ -3692,7 +3794,10 @@ fn prop_directory_parent_authorization(
         child_id,
         &child_sk,
         Value::Map(vec![
-            (Value::Text("domain".to_string()), Value::Text(child_domain.clone())),
+            (
+                Value::Text("domain".to_string()),
+                Value::Text(child_domain.clone()),
+            ),
             (
                 Value::Text("owner".to_string()),
                 Value::Bytes(child_id.as_bytes().to_vec()),
@@ -3714,7 +3819,10 @@ fn prop_directory_parent_authorization(
         parent_id,
         &parent_sk,
         Value::Map(vec![
-            (Value::Text("domain".to_string()), Value::Text(child_domain.clone())),
+            (
+                Value::Text("domain".to_string()),
+                Value::Text(child_domain.clone()),
+            ),
             (
                 Value::Text("owner".to_string()),
                 Value::Bytes(parent_id.as_bytes().to_vec()),
@@ -3730,10 +3838,7 @@ fn prop_directory_parent_authorization(
     Ok(())
 }
 
-fn prop_key_epoch_monotonic(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_key_epoch_monotonic(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let store = Store::from_root(temp.path());
     let mut keys = Keyring::new();
@@ -3768,8 +3873,8 @@ fn prop_key_epoch_monotonic(
             Value::Bytes(owner_id.as_bytes().to_vec()),
         ),
     ]);
-    let owner_genesis = AssertionPlaintext::sign(owner_header, owner_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let owner_genesis =
+        AssertionPlaintext::sign(owner_header, owner_body, &owner_sk).map_err(|e| e.to_string())?;
     let owner_bytes = owner_genesis.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &owner_bytes, &mut keys) {
         Ok(IngestStatus::Accepted(_)) => {}
@@ -3881,8 +3986,8 @@ fn prop_key_epoch_monotonic(
             Value::Bytes(kek_id.as_bytes().to_vec()),
         ),
     ]);
-    let bad = AssertionPlaintext::sign(bad_header, bad_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let bad =
+        AssertionPlaintext::sign(bad_header, bad_body, &owner_sk).map_err(|e| e.to_string())?;
     let bad_bytes = bad.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &bad_bytes, &mut keys) {
         Err(dharma_core::net::ingest::IngestError::Validation(reason)) => {
@@ -3900,10 +4005,7 @@ fn prop_key_epoch_monotonic(
     Ok(())
 }
 
-fn prop_key_grant_requires_member(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_key_grant_requires_member(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let store = Store::from_root(temp.path());
     let mut keys = Keyring::new();
@@ -3938,8 +4040,8 @@ fn prop_key_grant_requires_member(
             Value::Bytes(owner_id.as_bytes().to_vec()),
         ),
     ]);
-    let owner_genesis = AssertionPlaintext::sign(owner_header, owner_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let owner_genesis =
+        AssertionPlaintext::sign(owner_header, owner_body, &owner_sk).map_err(|e| e.to_string())?;
     let owner_bytes = owner_genesis.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &owner_bytes, &mut keys) {
         Ok(IngestStatus::Accepted(_)) => {}
@@ -4011,8 +4113,8 @@ fn prop_key_grant_requires_member(
             Value::Bytes(sdk_id.as_bytes().to_vec()),
         ),
     ]);
-    let bind = AssertionPlaintext::sign(bind_header, bind_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let bind =
+        AssertionPlaintext::sign(bind_header, bind_body, &owner_sk).map_err(|e| e.to_string())?;
     let bind_bytes = bind.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &bind_bytes, &mut keys) {
         Ok(IngestStatus::Accepted(_)) => {}
@@ -4055,13 +4157,10 @@ fn prop_key_grant_requires_member(
             Value::Text("sdk_id".to_string()),
             Value::Bytes(sdk_id.as_bytes().to_vec()),
         ),
-        (
-            Value::Text("sdk".to_string()),
-            Value::Bytes(sdk_bytes),
-        ),
+        (Value::Text("sdk".to_string()), Value::Bytes(sdk_bytes)),
     ]);
-    let grant = AssertionPlaintext::sign(grant_header, grant_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let grant =
+        AssertionPlaintext::sign(grant_header, grant_body, &owner_sk).map_err(|e| e.to_string())?;
     let grant_bytes = grant.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &grant_bytes, &mut keys) {
         Err(dharma_core::net::ingest::IngestError::Validation(reason)) => {
@@ -4077,10 +4176,7 @@ fn prop_key_grant_requires_member(
     Ok(())
 }
 
-fn prop_key_revoked_boundary(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_key_revoked_boundary(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let store = Store::from_root(temp.path());
     let mut keys = Keyring::new();
@@ -4115,8 +4211,8 @@ fn prop_key_revoked_boundary(
             Value::Bytes(owner_id.as_bytes().to_vec()),
         ),
     ]);
-    let owner_genesis = AssertionPlaintext::sign(owner_header, owner_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let owner_genesis =
+        AssertionPlaintext::sign(owner_header, owner_body, &owner_sk).map_err(|e| e.to_string())?;
     let owner_bytes = owner_genesis.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &owner_bytes, &mut keys) {
         Ok(IngestStatus::Accepted(_)) => {}
@@ -4232,8 +4328,8 @@ fn prop_key_revoked_boundary(
             Value::Bytes(sdk0_id.as_bytes().to_vec()),
         ),
     ]);
-    let bind0 = AssertionPlaintext::sign(bind0_header, bind0_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let bind0 =
+        AssertionPlaintext::sign(bind0_header, bind0_body, &owner_sk).map_err(|e| e.to_string())?;
     let bind0_bytes = bind0.to_cbor().map_err(|e| e.to_string())?;
     let bind0_id = bind0.assertion_id().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &bind0_bytes, &mut keys) {
@@ -4272,10 +4368,7 @@ fn prop_key_revoked_boundary(
             Value::Text("sdk_id".to_string()),
             Value::Bytes(sdk0_id.as_bytes().to_vec()),
         ),
-        (
-            Value::Text("sdk".to_string()),
-            Value::Bytes(sdk0_bytes),
-        ),
+        (Value::Text("sdk".to_string()), Value::Bytes(sdk0_bytes)),
     ]);
     let grant0 = AssertionPlaintext::sign(grant0_header, grant0_body, &owner_sk)
         .map_err(|e| e.to_string())?;
@@ -4384,8 +4477,8 @@ fn prop_key_revoked_boundary(
             Value::Bytes(sdk1_id.as_bytes().to_vec()),
         ),
     ]);
-    let bind1 = AssertionPlaintext::sign(bind1_header, bind1_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let bind1 =
+        AssertionPlaintext::sign(bind1_header, bind1_body, &owner_sk).map_err(|e| e.to_string())?;
     let bind1_bytes = bind1.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &bind1_bytes, &mut keys) {
         Ok(IngestStatus::Accepted(_)) => {}
@@ -4423,10 +4516,7 @@ fn prop_key_revoked_boundary(
             Value::Text("sdk_id".to_string()),
             Value::Bytes(sdk1_id.as_bytes().to_vec()),
         ),
-        (
-            Value::Text("sdk".to_string()),
-            Value::Bytes(sdk1_bytes),
-        ),
+        (Value::Text("sdk".to_string()), Value::Bytes(sdk1_bytes)),
     ]);
     let grant1 = AssertionPlaintext::sign(grant1_header, grant1_body, &owner_sk)
         .map_err(|e| e.to_string())?;
@@ -4487,8 +4577,8 @@ fn prop_key_grant_tampered_envelope(
             Value::Bytes(owner_id.as_bytes().to_vec()),
         ),
     ]);
-    let owner_genesis = AssertionPlaintext::sign(owner_header, owner_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let owner_genesis =
+        AssertionPlaintext::sign(owner_header, owner_body, &owner_sk).map_err(|e| e.to_string())?;
     let owner_bytes = owner_genesis.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &owner_bytes, &mut keys) {
         Ok(IngestStatus::Accepted(_)) => {}
@@ -4604,8 +4694,8 @@ fn prop_key_grant_tampered_envelope(
             Value::Bytes(sdk_id.as_bytes().to_vec()),
         ),
     ]);
-    let bind = AssertionPlaintext::sign(bind_header, bind_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let bind =
+        AssertionPlaintext::sign(bind_header, bind_body, &owner_sk).map_err(|e| e.to_string())?;
     let bind_bytes = bind.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &bind_bytes, &mut keys) {
         Ok(IngestStatus::Accepted(_)) => {}
@@ -4650,13 +4740,10 @@ fn prop_key_grant_tampered_envelope(
             Value::Text("sdk_id".to_string()),
             Value::Bytes(sdk_id.as_bytes().to_vec()),
         ),
-        (
-            Value::Text("sdk".to_string()),
-            Value::Bytes(sdk_bytes),
-        ),
+        (Value::Text("sdk".to_string()), Value::Bytes(sdk_bytes)),
     ]);
-    let grant = AssertionPlaintext::sign(grant_header, grant_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let grant =
+        AssertionPlaintext::sign(grant_header, grant_body, &owner_sk).map_err(|e| e.to_string())?;
     let grant_bytes = grant.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &grant_bytes, &mut keys) {
         Ok(IngestStatus::Accepted(_)) => {}
@@ -4668,10 +4755,7 @@ fn prop_key_grant_tampered_envelope(
     Ok(())
 }
 
-fn prop_emergency_freeze_blocks(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_emergency_freeze_blocks(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let store = Store::from_root(temp.path());
     let mut keys = Keyring::new();
@@ -4706,8 +4790,8 @@ fn prop_emergency_freeze_blocks(
             Value::Bytes(owner_id.as_bytes().to_vec()),
         ),
     ]);
-    let owner_genesis = AssertionPlaintext::sign(owner_header, owner_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let owner_genesis =
+        AssertionPlaintext::sign(owner_header, owner_body, &owner_sk).map_err(|e| e.to_string())?;
     let owner_bytes = owner_genesis.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &owner_bytes, &mut keys) {
         Ok(IngestStatus::Accepted(_)) => {}
@@ -4764,8 +4848,10 @@ fn prop_emergency_freeze_blocks(
         note: None,
         meta: add_signer_meta(None, &owner_subject),
     };
-    let freeze_body =
-        Value::Map(vec![(Value::Text("reason".to_string()), Value::Text("incident".to_string()))]);
+    let freeze_body = Value::Map(vec![(
+        Value::Text("reason".to_string()),
+        Value::Text("incident".to_string()),
+    )]);
     let freeze = AssertionPlaintext::sign(freeze_header, freeze_body, &owner_sk)
         .map_err(|e| e.to_string())?;
     let freeze_bytes = freeze.to_cbor().map_err(|e| e.to_string())?;
@@ -4856,8 +4942,8 @@ fn prop_emergency_unfreeze_compromise(
             Value::Bytes(owner_id.as_bytes().to_vec()),
         ),
     ]);
-    let owner_genesis = AssertionPlaintext::sign(owner_header, owner_body, &owner_sk)
-        .map_err(|e| e.to_string())?;
+    let owner_genesis =
+        AssertionPlaintext::sign(owner_header, owner_body, &owner_sk).map_err(|e| e.to_string())?;
     let owner_bytes = owner_genesis.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &owner_bytes, &mut keys) {
         Ok(IngestStatus::Accepted(_)) => {}
@@ -4983,7 +5069,11 @@ fn prop_emergency_unfreeze_compromise(
     let invite_bytes = invite.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &invite_bytes, &mut keys) {
         Ok(IngestStatus::Accepted(_)) => {}
-        other => return Err(format!("expected invite accepted after unfreeze, got {other:?}")),
+        other => {
+            return Err(format!(
+                "expected invite accepted after unfreeze, got {other:?}"
+            ))
+        }
     }
 
     let compromised_header = AssertionHeader {
@@ -5053,10 +5143,7 @@ fn prop_emergency_unfreeze_compromise(
     Ok(())
 }
 
-fn prop_emergency_device_revoke(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_emergency_device_revoke(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let store = Store::from_root(temp.path());
     let mut keys = Keyring::new();
@@ -5123,7 +5210,10 @@ fn prop_emergency_device_revoke(
             Value::Text("delegate".to_string()),
             Value::Bytes(device_id.as_bytes().to_vec()),
         ),
-        (Value::Text("scope".to_string()), Value::Text("all".to_string())),
+        (
+            Value::Text("scope".to_string()),
+            Value::Text("all".to_string()),
+        ),
         (Value::Text("expires".to_string()), Value::Integer(0.into())),
     ]);
     let delegate = AssertionPlaintext::sign(delegate_header, delegate_body, &root_sk)
@@ -5259,7 +5349,10 @@ fn prop_permission_summary_denies_fast_reject(
         meta: add_signer_meta(None, &identity_subject),
     };
     let profile_body = Value::Map(vec![
-        (Value::Text("alias".to_string()), Value::Text("tester".to_string())),
+        (
+            Value::Text("alias".to_string()),
+            Value::Text("tester".to_string()),
+        ),
         (
             Value::Text("roles".to_string()),
             Value::Array(vec![Value::Text("finance.approver".to_string())]),
@@ -5293,7 +5386,9 @@ fn prop_permission_summary_denies_fast_reject(
         role_scopes: BTreeMap::new(),
         public: PublicPermissions::default(),
     };
-    store.put_permission_summary(&summary).map_err(|e| e.to_string())?;
+    store
+        .put_permission_summary(&summary)
+        .map_err(|e| e.to_string())?;
 
     let action_subject = SubjectId::from_bytes(rand_bytes32(rng));
     let action_header = AssertionHeader {
@@ -5392,7 +5487,10 @@ fn prop_permission_summary_allows_contract_reject(
         meta: add_signer_meta(None, &identity_subject),
     };
     let profile_body = Value::Map(vec![
-        (Value::Text("alias".to_string()), Value::Text("tester".to_string())),
+        (
+            Value::Text("alias".to_string()),
+            Value::Text("tester".to_string()),
+        ),
         (
             Value::Text("roles".to_string()),
             Value::Array(vec![Value::Text("finance.approver".to_string())]),
@@ -5410,7 +5508,10 @@ fn prop_permission_summary_allows_contract_reject(
     let schema_bytes = schema.to_cbor().map_err(|e| e.to_string())?;
     let schema_id = SchemaId::from_bytes(crypto::sha256(&schema_bytes));
     store
-        .put_object(&EnvelopeId::from_bytes(*schema_id.as_bytes()), &schema_bytes)
+        .put_object(
+            &EnvelopeId::from_bytes(*schema_id.as_bytes()),
+            &schema_bytes,
+        )
         .map_err(|e| e.to_string())?;
     let contract_bytes = reject_contract_bytes();
     let contract_id = ContractId::from_bytes(crypto::sha256(&contract_bytes));
@@ -5440,7 +5541,9 @@ fn prop_permission_summary_allows_contract_reject(
         role_scopes: BTreeMap::new(),
         public: PublicPermissions::default(),
     };
-    store.put_permission_summary(&summary).map_err(|e| e.to_string())?;
+    store
+        .put_permission_summary(&summary)
+        .map_err(|e| e.to_string())?;
 
     let action_subject = SubjectId::from_bytes(rand_bytes32(rng));
     let action_header = AssertionHeader {
@@ -5559,7 +5662,11 @@ fn prop_permission_summary_corrupt_fallback(
     let action_bytes = action.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &action_bytes, &mut keys) {
         Ok(IngestStatus::Accepted(_)) => {}
-        other => return Err(format!("expected accepted with corrupt summary, got {other:?}")),
+        other => {
+            return Err(format!(
+                "expected accepted with corrupt summary, got {other:?}"
+            ))
+        }
     }
     Ok(())
 }
@@ -5630,7 +5737,9 @@ fn prop_permission_summary_version_mismatch(
         role_scopes: BTreeMap::new(),
         public: PublicPermissions::default(),
     };
-    store.put_permission_summary(&summary).map_err(|e| e.to_string())?;
+    store
+        .put_permission_summary(&summary)
+        .map_err(|e| e.to_string())?;
 
     let action_subject = SubjectId::from_bytes(rand_bytes32(rng));
     let action_header = AssertionHeader {
@@ -5657,15 +5766,16 @@ fn prop_permission_summary_version_mismatch(
     let action_bytes = action.to_cbor().map_err(|e| e.to_string())?;
     match ingest_object(&store, &mut index, &action_bytes, &mut keys) {
         Ok(IngestStatus::Accepted(_)) => {}
-        other => return Err(format!("expected accepted with summary ver mismatch, got {other:?}")),
+        other => {
+            return Err(format!(
+                "expected accepted with summary ver mismatch, got {other:?}"
+            ))
+        }
     }
     Ok(())
 }
 
-fn prop_fabric_ad_tamper(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_fabric_ad_tamper(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let (sk, pk) = crypto::generate_identity_keypair(rng);
     let ad = Advertisement {
         v: 1,
@@ -5703,10 +5813,7 @@ fn prop_fabric_ad_tamper(
     Ok(())
 }
 
-fn prop_fabric_token_scope(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_fabric_token_scope(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     struct DummyDispatcher {
         now: u64,
     }
@@ -5779,7 +5886,11 @@ fn prop_fabric_token_scope(
                 provenance: None,
             })
         }
-        fn fetch(&self, req: &FabricRequest, _id: &EnvelopeId) -> Result<FabricResponse, DharmaError> {
+        fn fetch(
+            &self,
+            req: &FabricRequest,
+            _id: &EnvelopeId,
+        ) -> Result<FabricResponse, DharmaError> {
             Ok(FabricResponse {
                 req_id: req.req_id,
                 status: 200,
@@ -5883,46 +5994,50 @@ fn prop_fabric_directory_split_brain(
     let hex_a = hex::encode(hash_a);
     let hex_b = hex::encode(hash_b);
 
-    let append_policy = |store: &Store, seq: u64, policy_hex: &str| -> Result<AssertionId, String> {
-        let header = AssertionHeader {
-            v: crypto::PROTOCOL_VERSION,
-            ver: DEFAULT_DATA_VERSION,
-            sub: subject,
-            typ: "fabric.domain.policy".to_string(),
-            auth: owner_id,
-            seq,
-            prev: None,
-            refs: Vec::new(),
-            ts: None,
-            schema: schema_id,
-            contract: contract_id,
-            note: None,
-            meta: None,
-        };
-        let body = Value::Map(vec![
-            (Value::Text("domain".to_string()), Value::Text(domain.clone())),
-            (
-                Value::Text("policy_hash".to_string()),
-                Value::Text(policy_hex.to_string()),
-            ),
-        ]);
-        let assertion = AssertionPlaintext::sign(header, body, &signing_key)
+    let append_policy =
+        |store: &Store, seq: u64, policy_hex: &str| -> Result<AssertionId, String> {
+            let header = AssertionHeader {
+                v: crypto::PROTOCOL_VERSION,
+                ver: DEFAULT_DATA_VERSION,
+                sub: subject,
+                typ: "fabric.domain.policy".to_string(),
+                auth: owner_id,
+                seq,
+                prev: None,
+                refs: Vec::new(),
+                ts: None,
+                schema: schema_id,
+                contract: contract_id,
+                note: None,
+                meta: None,
+            };
+            let body = Value::Map(vec![
+                (
+                    Value::Text("domain".to_string()),
+                    Value::Text(domain.clone()),
+                ),
+                (
+                    Value::Text("policy_hash".to_string()),
+                    Value::Text(policy_hex.to_string()),
+                ),
+            ]);
+            let assertion =
+                AssertionPlaintext::sign(header, body, &signing_key).map_err(|e| e.to_string())?;
+            let bytes = assertion.to_cbor().map_err(|e| e.to_string())?;
+            let assertion_id = assertion.assertion_id().map_err(|e| e.to_string())?;
+            let envelope_id = crypto::envelope_id(&bytes);
+            append_assertion(
+                store.env(),
+                &subject,
+                seq,
+                assertion_id,
+                envelope_id,
+                "fabric.domain.policy",
+                &bytes,
+            )
             .map_err(|e| e.to_string())?;
-        let bytes = assertion.to_cbor().map_err(|e| e.to_string())?;
-        let assertion_id = assertion.assertion_id().map_err(|e| e.to_string())?;
-        let envelope_id = crypto::envelope_id(&bytes);
-        append_assertion(
-            store.env(),
-            &subject,
-            seq,
-            assertion_id,
-            envelope_id,
-            "fabric.domain.policy",
-            &bytes,
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(assertion_id)
-    };
+            Ok(assertion_id)
+        };
 
     let id_a = append_policy(&store_a, 1, &hex_a)?;
     let id_b = append_policy(&store_a, 1, &hex_b)?;
@@ -5947,10 +6062,7 @@ fn prop_fabric_directory_split_brain(
     Ok(())
 }
 
-fn prop_fabric_ad_expiry_ttl(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_fabric_ad_expiry_ttl(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let (_sk, pk) = crypto::generate_identity_keypair(rng);
     let ad = Advertisement {
         v: 1,
@@ -5982,10 +6094,7 @@ fn prop_fabric_ad_expiry_ttl(
     Ok(())
 }
 
-fn prop_fabric_token_expiry(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_fabric_token_expiry(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     struct DummyDispatcher {
         now: u64,
     }
@@ -6058,7 +6167,11 @@ fn prop_fabric_token_expiry(
                 provenance: None,
             })
         }
-        fn fetch(&self, req: &FabricRequest, _id: &EnvelopeId) -> Result<FabricResponse, DharmaError> {
+        fn fetch(
+            &self,
+            req: &FabricRequest,
+            _id: &EnvelopeId,
+        ) -> Result<FabricResponse, DharmaError> {
             Ok(FabricResponse {
                 req_id: req.req_id,
                 status: 200,
@@ -6273,8 +6386,16 @@ fn append_contact_action(
     let bytes = assertion.to_cbor().map_err(|e| e.to_string())?;
     let assertion_id = assertion.assertion_id().map_err(|e| e.to_string())?;
     let envelope_id = crypto::envelope_id(&bytes);
-    append_assertion(store.env(), subject, seq, assertion_id, envelope_id, &assertion.header.typ, &bytes)
-        .map_err(|e| e.to_string())?;
+    append_assertion(
+        store.env(),
+        subject,
+        seq,
+        assertion_id,
+        envelope_id,
+        &assertion.header.typ,
+        &bytes,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(assertion_id)
 }
 
@@ -6390,10 +6511,7 @@ fn seed_contact_relation(
     Ok(())
 }
 
-fn prop_iam_owner_visibility(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_iam_owner_visibility(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let store = Store::from_root(temp.path());
     let (_sk, owner) = crypto::generate_identity_keypair(rng);
@@ -6409,16 +6527,16 @@ fn prop_iam_owner_visibility(
     Ok(())
 }
 
-fn prop_iam_contact_visibility(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_iam_contact_visibility(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let store = Store::from_root(temp.path());
     let (owner_sk, owner_id) = crypto::generate_identity_keypair(rng);
     let (viewer_sk, viewer_id) = crypto::generate_identity_keypair(rng);
-    let sign_owner = |header, body| AssertionPlaintext::sign(header, body, &owner_sk).map_err(|e| e.to_string());
-    let sign_viewer = |header, body| AssertionPlaintext::sign(header, body, &viewer_sk).map_err(|e| e.to_string());
+    let sign_owner =
+        |header, body| AssertionPlaintext::sign(header, body, &owner_sk).map_err(|e| e.to_string());
+    let sign_viewer = |header, body| {
+        AssertionPlaintext::sign(header, body, &viewer_sk).map_err(|e| e.to_string())
+    };
     seed_contact_relation(
         &store,
         owner_id,
@@ -6439,10 +6557,7 @@ fn prop_iam_contact_visibility(
     Ok(())
 }
 
-fn prop_iam_non_contact_redaction(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_iam_non_contact_redaction(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let temp = tempfile::tempdir().map_err(|e| e.to_string())?;
     let store = Store::from_root(temp.path());
     let (owner_sk, owner_id) = crypto::generate_identity_keypair(rng);
@@ -6453,8 +6568,11 @@ fn prop_iam_non_contact_redaction(
     } else {
         ContactRelation::Pending
     };
-    let sign_owner = |header, body| AssertionPlaintext::sign(header, body, &owner_sk).map_err(|e| e.to_string());
-    let sign_viewer = |header, body| AssertionPlaintext::sign(header, body, &viewer_sk).map_err(|e| e.to_string());
+    let sign_owner =
+        |header, body| AssertionPlaintext::sign(header, body, &owner_sk).map_err(|e| e.to_string());
+    let sign_viewer = |header, body| {
+        AssertionPlaintext::sign(header, body, &viewer_sk).map_err(|e| e.to_string())
+    };
     seed_contact_relation(
         &store,
         owner_id,
@@ -6487,8 +6605,12 @@ fn prop_iam_declined_blocked_redaction(
         let store = Store::from_root(temp.path());
         let (owner_sk, owner_id) = crypto::generate_identity_keypair(rng);
         let (viewer_sk, viewer_id) = crypto::generate_identity_keypair(rng);
-        let sign_owner = |header, body| AssertionPlaintext::sign(header, body, &owner_sk).map_err(|e| e.to_string());
-        let sign_viewer = |header, body| AssertionPlaintext::sign(header, body, &viewer_sk).map_err(|e| e.to_string());
+        let sign_owner = |header, body| {
+            AssertionPlaintext::sign(header, body, &owner_sk).map_err(|e| e.to_string())
+        };
+        let sign_viewer = |header, body| {
+            AssertionPlaintext::sign(header, body, &viewer_sk).map_err(|e| e.to_string())
+        };
         seed_contact_relation(
             &store,
             owner_id,
@@ -6511,10 +6633,7 @@ fn prop_iam_declined_blocked_redaction(
     Ok(())
 }
 
-fn prop_cqrs_replay_deterministic(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_cqrs_replay_deterministic(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let env = SimEnv::new(rng.next_u64(), 0);
     let (schema, wasm) = cqrs_schema_and_wasm();
     let subject = SubjectId::from_bytes(rand_bytes32(rng));
@@ -6544,8 +6663,16 @@ fn prop_cqrs_replay_deterministic(
         let bytes = assertion.to_cbor().map_err(|e| e.to_string())?;
         let assertion_id = assertion.assertion_id().map_err(|e| e.to_string())?;
         let env_id = crypto::envelope_id(&bytes);
-        append_assertion(&env, &subject, seq, assertion_id, env_id, "action.Set", &bytes)
-            .map_err(|e| e.to_string())?;
+        append_assertion(
+            &env,
+            &subject,
+            seq,
+            assertion_id,
+            env_id,
+            "action.Set",
+            &bytes,
+        )
+        .map_err(|e| e.to_string())?;
         prev = Some(assertion_id);
     }
     let state_a = load_state(&env, &subject, &schema, &wasm, 1).map_err(|e| e.to_string())?;
@@ -6556,10 +6683,7 @@ fn prop_cqrs_replay_deterministic(
     Ok(())
 }
 
-fn prop_cqrs_decode_deterministic(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_cqrs_decode_deterministic(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let env = SimEnv::new(rng.next_u64(), 0);
     let (schema, wasm) = cqrs_schema_and_wasm();
     let subject = SubjectId::from_bytes(rand_bytes32(rng));
@@ -6587,8 +6711,16 @@ fn prop_cqrs_decode_deterministic(
     let bytes = assertion.to_cbor().map_err(|e| e.to_string())?;
     let assertion_id = assertion.assertion_id().map_err(|e| e.to_string())?;
     let env_id = crypto::envelope_id(&bytes);
-    append_assertion(&env, &subject, 1, assertion_id, env_id, "action.Set", &bytes)
-        .map_err(|e| e.to_string())?;
+    append_assertion(
+        &env,
+        &subject,
+        1,
+        assertion_id,
+        env_id,
+        "action.Set",
+        &bytes,
+    )
+    .map_err(|e| e.to_string())?;
     let state = load_state(&env, &subject, &schema, &wasm, 1).map_err(|e| e.to_string())?;
     let decoded_a = decode_state(&state.memory, &schema).map_err(|e| e.to_string())?;
     let decoded_b = decode_state(&state.memory, &schema).map_err(|e| e.to_string())?;
@@ -6629,8 +6761,16 @@ fn prop_dharmaq_rebuild_deterministic(
         let bytes = assertion.to_cbor().map_err(|e| e.to_string())?;
         let assertion_id = assertion.assertion_id().map_err(|e| e.to_string())?;
         let env_id = crypto::envelope_id(&bytes);
-        append_assertion(&env, &subject, seq, assertion_id, env_id, "action.Note", &bytes)
-            .map_err(|e| e.to_string())?;
+        append_assertion(
+            &env,
+            &subject,
+            seq,
+            assertion_id,
+            env_id,
+            "action.Note",
+            &bytes,
+        )
+        .map_err(|e| e.to_string())?;
     }
     dharmaq::rebuild_env(&env).map_err(|e| e.to_string())?;
     let results_a = dharmaq::search_env(&env, "hello", 10).map_err(|e| e.to_string())?;
@@ -6642,10 +6782,7 @@ fn prop_dharmaq_rebuild_deterministic(
     Ok(())
 }
 
-fn prop_dharmaq_and_commutative(
-    rng: &mut ChaCha20Rng,
-    _iterations: usize,
-) -> Result<(), String> {
+fn prop_dharmaq_and_commutative(rng: &mut ChaCha20Rng, _iterations: usize) -> Result<(), String> {
     let env = SimEnv::new(rng.next_u64(), 0);
     let subject = SubjectId::from_bytes(rand_bytes32(rng));
     let (sk, pk) = crypto::generate_identity_keypair(rng);
@@ -6670,8 +6807,16 @@ fn prop_dharmaq_and_commutative(
         let bytes = assertion.to_cbor().map_err(|e| e.to_string())?;
         let assertion_id = assertion.assertion_id().map_err(|e| e.to_string())?;
         let env_id = crypto::envelope_id(&bytes);
-        append_assertion(&env, &subject, seq, assertion_id, env_id, "action.Note", &bytes)
-            .map_err(|e| e.to_string())?;
+        append_assertion(
+            &env,
+            &subject,
+            seq,
+            assertion_id,
+            env_id,
+            "action.Note",
+            &bytes,
+        )
+        .map_err(|e| e.to_string())?;
     }
     dharmaq::rebuild_env(&env).map_err(|e| e.to_string())?;
     let plan_a = QueryPlan {
@@ -6860,8 +7005,7 @@ fn rand_text(rng: &mut ChaCha20Rng, max: usize) -> String {
 }
 
 fn rows_key(rows: &[dharmaq::QueryRow]) -> Vec<(AssertionId, SubjectId, u64, u32)> {
-    rows
-        .iter()
+    rows.iter()
         .map(|row| (row.assertion_id, row.subject, row.seq, row.score))
         .collect()
 }
@@ -7054,10 +7198,9 @@ impl TestNode {
     fn new(name: &str, rng: &mut ChaCha20Rng) -> Result<Self, String> {
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
         let env = StdEnv::new(dir.path());
-        identity_store::init_identity(&env, name, "test-pass")
-            .map_err(|e| e.to_string())?;
-        let identity = identity_store::load_identity(&env, "test-pass")
-            .map_err(|e| e.to_string())?;
+        identity_store::init_identity(&env, name, "test-pass").map_err(|e| e.to_string())?;
+        let identity =
+            identity_store::load_identity(&env, "test-pass").map_err(|e| e.to_string())?;
         let store = Store::new(&env);
         let (schema_id, contract_id) = store_cqrs_artifacts(&store)?;
         let mut subjects = HashMap::new();
@@ -7086,11 +7229,7 @@ impl TestNode {
     }
 
     fn write_set(&mut self, subject: SubjectId, value: i64) -> Result<AssertionId, String> {
-        let (seq, prev) = self
-            .subjects
-            .get(&subject)
-            .copied()
-            .unwrap_or((0, None));
+        let (seq, prev) = self.subjects.get(&subject).copied().unwrap_or((0, None));
         let next_seq = seq + 1;
         let header = AssertionHeader {
             v: crypto::PROTOCOL_VERSION,
@@ -7132,7 +7271,8 @@ impl TestNode {
             &bytes,
         )
         .map_err(|e| e.to_string())?;
-        self.subjects.insert(subject, (next_seq, Some(assertion_id)));
+        self.subjects
+            .insert(subject, (next_seq, Some(assertion_id)));
         Ok(assertion_id)
     }
 
@@ -7145,6 +7285,9 @@ impl TestNode {
     ) -> thread::JoinHandle<()> {
         let addr = format!("127.0.0.1:{port}");
         let listener = TcpListener::bind(&addr).expect("bind relay");
+        listener
+            .set_nonblocking(true)
+            .expect("set relay listener nonblocking");
         let identity = self.identity.clone();
         let store = self.store.clone();
         let options = server::ServerOptions {
@@ -7154,7 +7297,14 @@ impl TestNode {
             ..Default::default()
         };
         thread::spawn(move || {
-            let _ = server::listen_with_shutdown(listener, identity, store, options, shutdown);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build relay runtime");
+            let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+            let _ = runtime.block_on(async {
+                server::listen_with_shutdown(listener, identity, store, options, shutdown).await
+            });
         })
     }
 
@@ -7377,7 +7527,10 @@ fn prop_relay_identity_root(rng: &mut ChaCha20Rng, trace: &mut Vec<String>) -> R
             return Err("full sync yielded no assertions".to_string());
         }
         if !pending_after_full.is_empty() {
-            trace.push(format!("pending_after_full_sync {}", pending_after_full.len()));
+            trace.push(format!(
+                "pending_after_full_sync {}",
+                pending_after_full.len()
+            ));
             return Err("pending objects remain after full sync".to_string());
         }
 
@@ -7429,11 +7582,7 @@ fn assert_converged(nodes: &[&TestNode], trace: &mut Vec<String>) -> Result<(), 
                 baseline_subjects.len(),
                 baseline_list
             ));
-            trace.push(format!(
-                "node_subjects={} [{}]",
-                subjects.len(),
-                node_list
-            ));
+            trace.push(format!("node_subjects={} [{}]", subjects.len(), node_list));
             return Err("subject count mismatch".to_string());
         }
         for subject in &baseline_subjects {
@@ -7483,8 +7632,7 @@ fn is_identity_subject(store: &Store, subject: &SubjectId) -> bool {
                 }
             }
         }
-        if assertion.header.typ.starts_with("identity.")
-            || assertion.header.typ.starts_with("iam.")
+        if assertion.header.typ.starts_with("identity.") || assertion.header.typ.starts_with("iam.")
         {
             return true;
         }

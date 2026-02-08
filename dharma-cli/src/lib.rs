@@ -31,6 +31,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -444,6 +446,13 @@ fn export_identity() -> Result<(), DharmaError> {
 }
 
 fn boot_and_listen(relay: bool, verbose: bool) -> Result<(), DharmaError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(boot_and_listen_async(relay, verbose))
+}
+
+async fn boot_and_listen_async(relay: bool, verbose: bool) -> Result<(), DharmaError> {
     let root = env::current_dir()?;
     let config = dharma::config::Config::load(&root)?;
     let data_dir = ensure_data_dir()?;
@@ -454,7 +463,6 @@ fn boot_and_listen(relay: bool, verbose: bool) -> Result<(), DharmaError> {
     let identity = load_identity(&env)?;
     let head = mount_self(&env, &identity)?;
     info!(head_seq = head, "identity unlocked");
-    reactor::spawn_daemon(data_dir.clone(), identity.clone());
     let store = Store::new(&env);
     let addr = format!("0.0.0.0:{}", config.network.listen_port);
     let options = net::server::ServerOptions {
@@ -463,8 +471,32 @@ fn boot_and_listen(relay: bool, verbose: bool) -> Result<(), DharmaError> {
         max_connections: config.network.max_connections,
         ..Default::default()
     };
-    net::server::listen_with_options(&addr, identity, store, options)?;
-    Ok(())
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let daemon_shutdown = Arc::clone(&shutdown);
+    let daemon =
+        reactor::spawn_daemon_with_shutdown(data_dir.clone(), identity.clone(), daemon_shutdown);
+    let signal_shutdown = Arc::clone(&shutdown);
+    let signal_task = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            signal_shutdown.store(true, Ordering::SeqCst);
+        }
+    });
+    let result = net::server::listen_with_shutdown(
+        listener,
+        identity,
+        store,
+        options,
+        Arc::clone(&shutdown),
+    )
+    .await;
+    shutdown.store(true, Ordering::SeqCst);
+    let _ = daemon.await;
+    if !signal_task.is_finished() {
+        signal_task.abort();
+    }
+    let _ = signal_task.await;
+    result
 }
 
 fn connect(addr: &str, verbose: bool) -> Result<(), DharmaError> {

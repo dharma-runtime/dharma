@@ -29,6 +29,7 @@ nom = { version = "7", optional = true }
 wasm-encoder = { version = "0.30", optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1.37", features = ["rt-multi-thread", "net", "signal"] }
 
 [features]
 default = ["compiler"]
