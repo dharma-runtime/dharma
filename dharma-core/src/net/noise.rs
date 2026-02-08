@@ -45,7 +45,9 @@ impl HandshakeState {
     }
 
     pub fn write_message2(&mut self, payload: &[u8]) -> Result<Vec<u8>, DharmaError> {
-        let re = self.re.ok_or_else(|| DharmaError::Validation("missing re".to_string()))?;
+        let re = self
+            .re
+            .ok_or_else(|| DharmaError::Validation("missing re".to_string()))?;
         let e = StaticSecret::random_from_rng(OsRng);
         let e_pub = PublicKey::from(&e);
         self.e = Some(e);
@@ -71,13 +73,20 @@ impl HandshakeState {
         let re = PublicKey::from(array_32(&msg[..32])?);
         self.re = Some(re);
         self.mix_hash(re.as_bytes());
-        let dh = self.e.as_ref().ok_or_else(|| DharmaError::Validation("missing e".to_string()))?.diffie_hellman(&re);
+        let dh = self
+            .e
+            .as_ref()
+            .ok_or_else(|| DharmaError::Validation("missing e".to_string()))?
+            .diffie_hellman(&re);
         self.mix_key(dh.as_bytes());
         let ct_s = &msg[32..80];
         let rs_bytes = self.decrypt_and_hash(ct_s)?;
         let rs = PublicKey::from(array_32(&rs_bytes)?);
         self.rs = Some(rs);
-        let e = self.e.as_ref().ok_or_else(|| DharmaError::Validation("missing e".to_string()))?;
+        let e = self
+            .e
+            .as_ref()
+            .ok_or_else(|| DharmaError::Validation("missing e".to_string()))?;
         let dh = e.diffie_hellman(&rs);
         self.mix_key(dh.as_bytes());
         let ct_payload = &msg[80..];
@@ -86,8 +95,12 @@ impl HandshakeState {
     }
 
     pub fn write_message3(&mut self, payload: &[u8]) -> Result<Vec<u8>, DharmaError> {
-        let re = self.re.ok_or_else(|| DharmaError::Validation("missing re".to_string()))?;
-        let rs = self.rs.ok_or_else(|| DharmaError::Validation("missing rs".to_string()))?;
+        let re = self
+            .re
+            .ok_or_else(|| DharmaError::Validation("missing re".to_string()))?;
+        let rs = self
+            .rs
+            .ok_or_else(|| DharmaError::Validation("missing rs".to_string()))?;
         let s_pub = self.s_pub.as_bytes().to_vec();
         let ct_s = self.encrypt_and_hash(&s_pub)?;
         let dh = self.s.diffie_hellman(&re);
@@ -109,7 +122,10 @@ impl HandshakeState {
         let rs_bytes = self.decrypt_and_hash(ct_s)?;
         let rs = PublicKey::from(array_32(&rs_bytes)?);
         self.rs = Some(rs);
-        let e = self.e.as_ref().ok_or_else(|| DharmaError::Validation("missing e".to_string()))?;
+        let e = self
+            .e
+            .as_ref()
+            .ok_or_else(|| DharmaError::Validation("missing e".to_string()))?;
         let dh = e.diffie_hellman(&rs);
         self.mix_key(dh.as_bytes());
         let dh = self.s.diffie_hellman(&rs);

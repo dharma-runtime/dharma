@@ -30,9 +30,7 @@ pub fn key_id_from_key(key: &[u8; 32]) -> KeyId {
     KeyId::from_bytes(sha256(key))
 }
 
-pub fn generate_identity_keypair<R: RngCore + CryptoRng>(
-    rng: &mut R,
-) -> (SigningKey, IdentityKey) {
+pub fn generate_identity_keypair<R: RngCore + CryptoRng>(rng: &mut R) -> (SigningKey, IdentityKey) {
     let signing_key = SigningKey::generate(rng);
     let verifying_key = signing_key.verifying_key();
     let id = IdentityKey::from_bytes(verifying_key.to_bytes());
@@ -48,9 +46,10 @@ pub fn verify(identity_key: &IdentityKey, message: &[u8], sig: &[u8]) -> Result<
         return Ok(false);
     }
     let verifying_key = VerifyingKey::from_bytes(identity_key.as_bytes())?;
-    let sig_bytes: [u8; 64] = sig
-        .try_into()
-        .map_err(|_| DharmaError::InvalidLength { expected: 64, actual: sig.len() })?;
+    let sig_bytes: [u8; 64] = sig.try_into().map_err(|_| DharmaError::InvalidLength {
+        expected: 64,
+        actual: sig.len(),
+    })?;
     let signature = Signature::from_bytes(&sig_bytes);
     Ok(verifying_key.verify_strict(message, &signature).is_ok())
 }
@@ -64,7 +63,10 @@ pub fn aead_encrypt(
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
     Ok(cipher.encrypt(
         Nonce::from_slice(nonce),
-        chacha20poly1305::aead::Payload { msg: plaintext, aad },
+        chacha20poly1305::aead::Payload {
+            msg: plaintext,
+            aad,
+        },
     )?)
 }
 
@@ -77,7 +79,10 @@ pub fn aead_decrypt(
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
     Ok(cipher.decrypt(
         Nonce::from_slice(nonce),
-        chacha20poly1305::aead::Payload { msg: ciphertext, aad },
+        chacha20poly1305::aead::Payload {
+            msg: ciphertext,
+            aad,
+        },
     )?)
 }
 
