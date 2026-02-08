@@ -1,0 +1,143 @@
+name: CI PR
+
+on:
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: ci-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pr-quality:
+    name: PR Quality and Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Detect changed Rust files
+        id: changed-rs
+        uses: tj-actions/changed-files@v46
+        with:
+          files: |
+            **/*.rs
+          separator: ","
+          safe_output: false
+
+      - name: Check formatting on changed Rust files
+        if: steps.changed-rs.outputs.any_changed == 'true'
+        run: |
+          # Incremental formatter check: full `cargo fmt --check` is currently too noisy
+          # due existing workspace formatting drift.
+          changed_files="${{ steps.changed-rs.outputs.all_changed_files }}"
+          IFS=',' read -r -a files <<< "${changed_files}"
+          for file in "${files[@]}"; do
+            [ -z "${file}" ] && continue
+
+            dir="$(dirname "${file}")"
+            manifest=""
+            while [ "${dir}" != "." ] && [ "${dir}" != "/" ]; do
+              if [ -f "${dir}/Cargo.toml" ]; then
+                manifest="${dir}/Cargo.toml"
+                break
+              fi
+              dir="$(dirname "${dir}")"
+            done
+
+            edition="2021"
+            if [ -n "${manifest}" ]; then
+              detected="$(awk -F'\"' '/^[[:space:]]*edition[[:space:]]*=/{print $2; exit}' "${manifest}")"
+              if [ -n "${detected}" ]; then
+                edition="${detected}"
+              fi
+            fi
+
+            rustfmt --edition "${edition}" --config skip_children=true --check "${file}"
+          done
+
+      - name: Run clippy (no deps)
+        run: cargo clippy --workspace --exclude dharma-ui --all-targets --no-deps
+
+      - name: Run unit and integration tests
+        run: cargo test --workspace --exclude dharma-ui
+
+      - name: Build release binaries for deterministic replay checks
+        run: cargo build -p dharma-cli -p dharma-runtime --release
+
+      - name: Run deterministic deep subset (replay seeds)
+        run: |
+          for seed in 7 11 42; do
+            echo "Running deep replay seed ${seed}"
+            ./target/release/dh test --deep --ci --replay "SEED=${seed}"
+          done
+
+      - name: Upload failure tickets (if any)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dharma-failure-tickets-pr
+          if-no-files-found: ignore
+          path: tests/failures/DHARMA-FAILURE-*.md
+
+  pr-coverage:
+    name: PR Coverage Summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    needs:
+      - pr-quality
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Generate coverage artifacts
+        run: cargo llvm-cov --workspace --exclude dharma-ui --lcov --summary-only --output-path lcov.info
+
+      - name: Publish coverage summary
+        run: |
+          cargo llvm-cov report --summary-only > coverage-summary.txt
+          {
+            echo "## Coverage Summary"
+            echo
+            echo '```text'
+            tail -n 3 coverage-summary.txt
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-coverage
+          path: |
+            lcov.info
+            coverage-summary.txt
