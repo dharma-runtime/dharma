@@ -17,6 +17,8 @@ use dharma::vault::drain_archive_queue;
 use dharma::{IdentityState, Store};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -28,13 +30,29 @@ pub fn spawn_daemon(data_dir: PathBuf, identity: IdentityState) {
     let _ = thread::Builder::new()
         .name("dharma-reactor".to_string())
         .spawn(move || {
-            if let Err(err) = run_daemon(&data_dir, &identity) {
+            if let Err(err) = run_daemon(&data_dir, &identity, None) {
                 eprintln!("Reactor daemon error: {err}");
             }
         });
 }
 
-fn run_daemon(data_dir: &Path, identity: &IdentityState) -> Result<(), DharmaError> {
+pub fn spawn_daemon_with_shutdown(
+    data_dir: PathBuf,
+    identity: IdentityState,
+    shutdown: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_blocking(move || {
+        if let Err(err) = run_daemon(&data_dir, &identity, Some(shutdown)) {
+            eprintln!("Reactor daemon error: {err}");
+        }
+    })
+}
+
+fn run_daemon(
+    data_dir: &Path,
+    identity: &IdentityState,
+    shutdown: Option<Arc<AtomicBool>>,
+) -> Result<(), DharmaError> {
     let store = Store::from_root(data_dir);
     let env = StdEnv::new(data_dir);
     let reactor_ids = load_reactor_ids(data_dir)?;
@@ -69,6 +87,9 @@ fn run_daemon(data_dir: &Path, identity: &IdentityState) -> Result<(), DharmaErr
     let mut last_reserve_check: i64 = 0;
 
     loop {
+        if shutdown_requested(&shutdown) {
+            return Ok(());
+        }
         let now_ts = crate::cmd::action::now_timestamp() as i64;
         let minute_stamp = now_ts.div_euclid(60);
         for subject in store.list_subjects()? {
@@ -331,8 +352,18 @@ fn run_daemon(data_dir: &Path, identity: &IdentityState) -> Result<(), DharmaErr
                 }
             }
         }
+        if shutdown_requested(&shutdown) {
+            return Ok(());
+        }
         thread::sleep(Duration::from_millis(500));
     }
+}
+
+fn shutdown_requested(shutdown: &Option<Arc<AtomicBool>>) -> bool {
+    shutdown
+        .as_ref()
+        .map(|flag| flag.load(Ordering::SeqCst))
+        .unwrap_or(false)
 }
 
 fn trigger_matches(trigger: Option<&str>, typ: &str) -> bool {

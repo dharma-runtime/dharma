@@ -7285,6 +7285,9 @@ impl TestNode {
     ) -> thread::JoinHandle<()> {
         let addr = format!("127.0.0.1:{port}");
         let listener = TcpListener::bind(&addr).expect("bind relay");
+        listener
+            .set_nonblocking(true)
+            .expect("set relay listener nonblocking");
         let identity = self.identity.clone();
         let store = self.store.clone();
         let options = server::ServerOptions {
@@ -7294,7 +7297,14 @@ impl TestNode {
             ..Default::default()
         };
         thread::spawn(move || {
-            let _ = server::listen_with_shutdown(listener, identity, store, options, shutdown);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build relay runtime");
+            let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
+            let _ = runtime.block_on(async {
+                server::listen_with_shutdown(listener, identity, store, options, shutdown).await
+            });
         })
     }
 

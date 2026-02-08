@@ -52,6 +52,9 @@ jobs:
           for file in "${files[@]}"; do
             [ -z "${file}" ] && continue
 
+            # Guard against escaped line continuations leaking from action output.
+            file="${file%\\}"
+
             dir="$(dirname "${file}")"
             manifest=""
             while [ "${dir}" != "." ] && [ "${dir}" != "/" ]; do

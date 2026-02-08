@@ -12,12 +12,19 @@ use dharma_core::store::state::list_assertions;
 use dharma_core::store::Store;
 use dharma_core::DharmaError;
 use std::fs;
-#[cfg(feature = "server")]
-use std::io::Read;
 use std::io::{self, Write};
-#[cfg(feature = "server")]
-use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+#[cfg(feature = "server")]
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+#[cfg(feature = "server")]
+use tokio::net::TcpStream;
+#[cfg(feature = "server")]
+use tokio::task::JoinHandle;
+#[cfg(feature = "server")]
+use tokio::time::{timeout, Duration};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -29,10 +36,14 @@ const APP_BANNER: &str = r#"       ____
                                          
 "#;
 
-fn main() {
+#[cfg(feature = "server")]
+const METRICS_ACCEPT_POLL_DELAY: Duration = Duration::from_millis(100);
+
+#[tokio::main(flavor = "multi_thread")]
+async fn main() {
     init_tracing("dharma_runtime=info,dharma_core=info,warn");
     info!(banner = APP_BANNER.trim_end(), "runtime banner");
-    if let Err(err) = run() {
+    if let Err(err) = run().await {
         error!(error = %err, "runtime exited with error");
         std::process::exit(1);
     }
@@ -52,7 +63,7 @@ fn init_tracing(default_directive: &str) {
     }
 }
 
-fn run() -> Result<(), DharmaError> {
+async fn run() -> Result<(), DharmaError> {
     let relay = std::env::args().any(|arg| arg == "--relay");
     let root = std::env::current_dir()?;
     let config = Config::load(&root)?;
@@ -75,44 +86,132 @@ fn run() -> Result<(), DharmaError> {
         "storage backend facade selected"
     );
     let store = storage.store();
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_signal = {
+        let shutdown = Arc::clone(&shutdown);
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                shutdown.store(true, Ordering::SeqCst);
+                info!("shutdown signal received");
+            }
+        })
+    };
     #[cfg(feature = "server")]
+    let metrics_handle = match start_metrics_server(
+        config.network.listen_port,
+        store.clone(),
+        Arc::clone(&shutdown),
+    )
+    .await
     {
-        if let Err(err) = start_metrics_server(config.network.listen_port, store.clone()) {
+        Ok(handle) => handle,
+        Err(err) => {
             tracing::warn!(error = %err, "metrics disabled");
+            None
         }
-    }
+    };
+
     let addr = format!("0.0.0.0:{}", config.network.listen_port);
     let options = net::server::ServerOptions {
         relay,
         max_connections: config.network.max_connections,
         ..Default::default()
     };
-    net::server::listen_with_options(&addr, identity, store, options)?;
+
+    #[cfg(feature = "server")]
+    {
+        let listener = TcpListener::bind(&addr).await?;
+        info!(listen_addr = %addr, "runtime server listening");
+        let serve_result = net::server::listen_with_shutdown(
+            listener,
+            identity,
+            store,
+            options,
+            Arc::clone(&shutdown),
+        )
+        .await;
+
+        shutdown.store(true, Ordering::SeqCst);
+        if let Some(handle) = metrics_handle {
+            let _ = handle.await;
+        }
+        if !shutdown_signal.is_finished() {
+            shutdown_signal.abort();
+        }
+        let _ = shutdown_signal.await;
+        serve_result?;
+    }
+
+    #[cfg(not(feature = "server"))]
+    {
+        let listener = TcpListener::bind(&addr).await?;
+        info!(listen_addr = %addr, "runtime server listening");
+        let serve_result = net::server::listen_with_shutdown(
+            listener,
+            identity,
+            store,
+            options,
+            Arc::clone(&shutdown),
+        )
+        .await;
+        shutdown.store(true, Ordering::SeqCst);
+        if !shutdown_signal.is_finished() {
+            shutdown_signal.abort();
+        }
+        let _ = shutdown_signal.await;
+        serve_result?;
+    }
+
     Ok(())
 }
 
 #[cfg(feature = "server")]
-fn start_metrics_server(listen_port: u16, store: Store) -> Result<(), DharmaError> {
+async fn start_metrics_server(
+    listen_port: u16,
+    store: Store,
+    shutdown: Arc<AtomicBool>,
+) -> Result<Option<JoinHandle<()>>, DharmaError> {
     let Some(metrics_port) = listen_port.checked_add(1) else {
-        return Ok(());
+        return Ok(None);
     };
     let addr = format!("0.0.0.0:{metrics_port}");
-    let listener = TcpListener::bind(&addr)?;
+    let listener = TcpListener::bind(&addr).await?;
     info!(listen_addr = %addr, "metrics listening");
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            if let Ok(stream) = stream {
-                let _ = handle_metrics(stream, &store);
+
+    let handle = tokio::spawn(async move {
+        loop {
+            if shutdown.load(Ordering::SeqCst) {
+                return;
             }
+
+            let accepted = match timeout(METRICS_ACCEPT_POLL_DELAY, listener.accept()).await {
+                Ok(result) => result,
+                Err(_) => continue,
+            };
+
+            let (stream, _) = match accepted {
+                Ok(pair) => pair,
+                Err(err) => {
+                    tracing::warn!(error = %err, "metrics accept error");
+                    continue;
+                }
+            };
+
+            let store = store.clone();
+            tokio::spawn(async move {
+                let _ = handle_metrics(stream, store).await;
+            });
         }
     });
-    Ok(())
+
+    Ok(Some(handle))
 }
 
 #[cfg(feature = "server")]
-fn handle_metrics(mut stream: TcpStream, store: &Store) -> Result<(), DharmaError> {
+async fn handle_metrics(mut stream: TcpStream, store: Store) -> Result<(), DharmaError> {
     let mut buf = [0u8; 1024];
-    let n = stream.read(&mut buf)?;
+    let n = stream.read(&mut buf).await?;
     if n == 0 {
         return Ok(());
     }
@@ -127,7 +226,7 @@ fn handle_metrics(mut stream: TcpStream, store: &Store) -> Result<(), DharmaErro
             body.len(),
             body
         );
-        stream.write_all(resp.as_bytes())?;
+        stream.write_all(resp.as_bytes()).await?;
         return Ok(());
     }
     let subject_count = store.list_subjects().map(|s| s.len()).unwrap_or(0) as u64;
@@ -137,7 +236,7 @@ fn handle_metrics(mut stream: TcpStream, store: &Store) -> Result<(), DharmaErro
         body.len(),
         body
     );
-    stream.write_all(resp.as_bytes())?;
+    stream.write_all(resp.as_bytes()).await?;
     Ok(())
 }
 
