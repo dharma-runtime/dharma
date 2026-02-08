@@ -47,7 +47,12 @@ impl BufferModel {
         }
     }
 
-    pub fn create(&mut self, title: impl Into<String>, kind: BufferKind, contents: impl Into<String>) -> BufferId {
+    pub fn create(
+        &mut self,
+        title: impl Into<String>,
+        kind: BufferKind,
+        contents: impl Into<String>,
+    ) -> BufferId {
         let id = BufferId(self.next_id);
         self.next_id += 1;
         let buffer = Buffer {

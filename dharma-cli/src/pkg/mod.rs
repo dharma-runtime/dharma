@@ -167,7 +167,10 @@ where
     Ok(manifest)
 }
 
-pub fn verify_manifest(root: &Path, manifest: &PackageManifest) -> Result<VerifyReport, DharmaError> {
+pub fn verify_manifest(
+    root: &Path,
+    manifest: &PackageManifest,
+) -> Result<VerifyReport, DharmaError> {
     let mut missing = Vec::new();
     let mut mismatched = Vec::new();
     for version in manifest.versions.values() {
@@ -179,8 +182,7 @@ pub fn verify_manifest(root: &Path, manifest: &PackageManifest) -> Result<Verify
     }
 
     let mut registry_sig_ok = None;
-    if let (Some(subject), Some(object_id)) =
-        (manifest.registry_subject, manifest.registry_object)
+    if let (Some(subject), Some(object_id)) = (manifest.registry_subject, manifest.registry_object)
     {
         let store = Store::from_root(root);
         if let Ok(bytes) = store.get_object(&object_id) {
@@ -206,7 +208,10 @@ pub struct VerifyReport {
     pub registry_sig_ok: Option<bool>,
 }
 
-pub fn update_config_for_manifest(root: &Path, manifest: &PackageManifest) -> Result<(), DharmaError> {
+pub fn update_config_for_manifest(
+    root: &Path,
+    manifest: &PackageManifest,
+) -> Result<(), DharmaError> {
     let path = root.join("dharma.toml");
     let mut lines = Vec::new();
     if path.exists() {
@@ -227,7 +232,10 @@ pub fn update_config_for_manifest(root: &Path, manifest: &PackageManifest) -> Re
         let contract_key = format!("contract_v{}", version.ver);
         let reactor_key = format!("reactor_v{}", version.ver);
         lines.push(format!("{schema_key} = \"{}\"", version.schema.to_hex()));
-        lines.push(format!("{contract_key} = \"{}\"", version.contract.to_hex()));
+        lines.push(format!(
+            "{contract_key} = \"{}\"",
+            version.contract.to_hex()
+        ));
         if let Some(reactor) = version.reactor {
             lines.push(format!("{reactor_key} = \"{}\"", reactor.to_hex()));
         }
@@ -243,7 +251,11 @@ pub fn update_config_for_manifest(root: &Path, manifest: &PackageManifest) -> Re
     Ok(())
 }
 
-pub fn remove_manifest(root: &Path, manifest: &PackageManifest, keep_cache: bool) -> Result<(), DharmaError> {
+pub fn remove_manifest(
+    root: &Path,
+    manifest: &PackageManifest,
+    keep_cache: bool,
+) -> Result<(), DharmaError> {
     remove_config_entries(root, manifest)?;
     if !keep_cache {
         let path = packages_root(root).join(&manifest.name);
@@ -361,8 +373,10 @@ fn parse_manifest(value: &Value) -> Result<PackageManifest, DharmaError> {
     let mut versions = BTreeMap::new();
     for (k, v) in versions_map {
         let key = expect_text(k)?;
-        let ver = parse_version_key(&key).ok_or_else(|| DharmaError::Validation("bad version".to_string()))?;
-        let entry = parse_version_entry(v).ok_or_else(|| DharmaError::Validation("bad version entry".to_string()))?;
+        let ver = parse_version_key(&key)
+            .ok_or_else(|| DharmaError::Validation("bad version".to_string()))?;
+        let entry = parse_version_entry(v)
+            .ok_or_else(|| DharmaError::Validation("bad version entry".to_string()))?;
         let mut entry = entry;
         entry.ver = ver;
         versions.insert(ver, entry);
@@ -393,45 +407,76 @@ fn parse_manifest(value: &Value) -> Result<PackageManifest, DharmaError> {
 fn manifest_to_value(manifest: &PackageManifest) -> Value {
     let mut versions = Vec::new();
     for (ver, entry) in &manifest.versions {
-        versions.push((
-            Value::Text(ver.to_string()),
-            version_to_value(entry),
-        ));
+        versions.push((Value::Text(ver.to_string()), version_to_value(entry)));
     }
     let mut map = Vec::new();
-    map.push((Value::Text("name".to_string()), Value::Text(manifest.name.clone())));
+    map.push((
+        Value::Text("name".to_string()),
+        Value::Text(manifest.name.clone()),
+    ));
     map.push((Value::Text("versions".to_string()), Value::Map(versions)));
     if let Some(pinned) = manifest.pinned {
-        map.push((Value::Text("pinned".to_string()), Value::Integer((pinned as i64).into())));
+        map.push((
+            Value::Text("pinned".to_string()),
+            Value::Integer((pinned as i64).into()),
+        ));
     }
     if let Some(subject) = manifest.registry_subject {
-        map.push((Value::Text("registry_subject".to_string()), Value::Bytes(subject.as_bytes().to_vec())));
+        map.push((
+            Value::Text("registry_subject".to_string()),
+            Value::Bytes(subject.as_bytes().to_vec()),
+        ));
     }
     if let Some(object) = manifest.registry_object {
-        map.push((Value::Text("registry_object".to_string()), Value::Bytes(object.as_bytes().to_vec())));
+        map.push((
+            Value::Text("registry_object".to_string()),
+            Value::Bytes(object.as_bytes().to_vec()),
+        ));
     }
     if let Some(publisher) = manifest.publisher {
-        map.push((Value::Text("publisher".to_string()), Value::Bytes(publisher.as_bytes().to_vec())));
+        map.push((
+            Value::Text("publisher".to_string()),
+            Value::Bytes(publisher.as_bytes().to_vec()),
+        ));
     }
     Value::Map(map)
 }
 
 fn version_to_value(version: &PackageVersion) -> Value {
     let mut map = Vec::new();
-    map.push((Value::Text("schema".to_string()), Value::Bytes(version.schema.as_bytes().to_vec())));
-    map.push((Value::Text("contract".to_string()), Value::Bytes(version.contract.as_bytes().to_vec())));
+    map.push((
+        Value::Text("schema".to_string()),
+        Value::Bytes(version.schema.as_bytes().to_vec()),
+    ));
+    map.push((
+        Value::Text("contract".to_string()),
+        Value::Bytes(version.contract.as_bytes().to_vec()),
+    ));
     if let Some(reactor) = version.reactor {
-        map.push((Value::Text("reactor".to_string()), Value::Bytes(reactor.as_bytes().to_vec())));
+        map.push((
+            Value::Text("reactor".to_string()),
+            Value::Bytes(reactor.as_bytes().to_vec()),
+        ));
     }
     if !version.deps.is_empty() {
-        let deps = version.deps.iter().map(|dep| {
-            let mut dep_map = Vec::new();
-            dep_map.push((Value::Text("name".to_string()), Value::Text(dep.name.clone())));
-            if let Some(ver) = dep.ver {
-                dep_map.push((Value::Text("ver".to_string()), Value::Integer((ver as i64).into())));
-            }
-            Value::Map(dep_map)
-        }).collect();
+        let deps = version
+            .deps
+            .iter()
+            .map(|dep| {
+                let mut dep_map = Vec::new();
+                dep_map.push((
+                    Value::Text("name".to_string()),
+                    Value::Text(dep.name.clone()),
+                ));
+                if let Some(ver) = dep.ver {
+                    dep_map.push((
+                        Value::Text("ver".to_string()),
+                        Value::Integer((ver as i64).into()),
+                    ));
+                }
+                Value::Map(dep_map)
+            })
+            .collect();
         map.push((Value::Text("deps".to_string()), Value::Array(deps)));
     }
     Value::Map(map)
@@ -460,10 +505,7 @@ where
     }
 }
 
-pub fn missing_artifacts<'a, I>(
-    root: &Path,
-    versions: I,
-) -> Result<Vec<EnvelopeId>, DharmaError>
+pub fn missing_artifacts<'a, I>(root: &Path, versions: I) -> Result<Vec<EnvelopeId>, DharmaError>
 where
     I: IntoIterator<Item = &'a PackageVersion>,
 {
@@ -486,7 +528,9 @@ where
 }
 
 fn object_exists(store: &Store, envelope_id: &EnvelopeId) -> bool {
-    let path = store.objects_dir().join(format!("{}.obj", envelope_id.to_hex()));
+    let path = store
+        .objects_dir()
+        .join(format!("{}.obj", envelope_id.to_hex()));
     store.env().exists(&path)
 }
 
@@ -615,7 +659,10 @@ where
         }
         let registries = find_registry_packages(root, &dep.name, registry_subject)?;
         let Some(registry) = registries.first() else {
-            return Err(DharmaError::Validation(format!("missing dependency {}", dep.name)));
+            return Err(DharmaError::Validation(format!(
+                "missing dependency {}",
+                dep.name
+            )));
         };
         let manifest = install_from_registry_with_fetch(root, registry, dep.ver, fetch)?;
         update_config_for_manifest(root, &manifest)?;
@@ -639,8 +686,8 @@ mod tests {
     use crate::crypto;
     use crate::types::{ContractId, SchemaId};
     use ciborium::value::Value;
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
     use tempfile::tempdir;
 
     #[test]
@@ -675,14 +722,23 @@ mod tests {
         let schema = EnvelopeId::from_bytes([1u8; 32]);
         let contract = EnvelopeId::from_bytes([2u8; 32]);
         let body = Value::Map(vec![
-            (Value::Text("name".to_string()), Value::Text("std.demo".to_string())),
+            (
+                Value::Text("name".to_string()),
+                Value::Text("std.demo".to_string()),
+            ),
             (
                 Value::Text("versions".to_string()),
                 Value::Map(vec![(
                     Value::Text("1".to_string()),
                     Value::Map(vec![
-                        (Value::Text("schema".to_string()), Value::Bytes(schema.as_bytes().to_vec())),
-                        (Value::Text("contract".to_string()), Value::Bytes(contract.as_bytes().to_vec())),
+                        (
+                            Value::Text("schema".to_string()),
+                            Value::Bytes(schema.as_bytes().to_vec()),
+                        ),
+                        (
+                            Value::Text("contract".to_string()),
+                            Value::Bytes(contract.as_bytes().to_vec()),
+                        ),
                     ]),
                 )]),
             ),

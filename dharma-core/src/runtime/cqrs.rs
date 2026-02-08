@@ -2,8 +2,8 @@ use crate::assertion::{signer_from_meta, AssertionPlaintext};
 use crate::env::Env;
 use crate::error::DharmaError;
 use crate::pdl::schema::{
-    layout_action, layout_private, layout_public, list_capacity, map_capacity, type_size, ActionSchema,
-    CqrsSchema, TypeSpec, DEFAULT_TEXT_LEN,
+    layout_action, layout_private, layout_public, list_capacity, map_capacity, type_size,
+    ActionSchema, CqrsSchema, TypeSpec, DEFAULT_TEXT_LEN,
 };
 use crate::runtime::vm::{RuntimeVm, OVERLAY_BASE, STATE_SIZE};
 use crate::share::FieldAccess;
@@ -285,7 +285,9 @@ pub fn load_state_until(
         }
     }
     if !found_stop {
-        return Err(DharmaError::Validation("stop-at object not found".to_string()));
+        return Err(DharmaError::Validation(
+            "stop-at object not found".to_string(),
+        ));
     }
 
     if stop_at.is_none() && last_seq != 0 && last_seq % SNAPSHOT_INTERVAL == 0 {
@@ -333,10 +335,7 @@ pub fn decode_state(memory: &[u8], schema: &CqrsSchema) -> Result<Value, DharmaE
         &mut out,
         &schema.structs,
     )?;
-    let entries = out
-        .into_iter()
-        .map(|(k, v)| (Value::Text(k), v))
-        .collect();
+    let entries = out.into_iter().map(|(k, v)| (Value::Text(k), v)).collect();
     Ok(Value::Map(entries))
 }
 
@@ -486,7 +485,9 @@ fn decode_value_at(
             len_buf.copy_from_slice(&memory[offset..offset + 4]);
             let len = u32::from_le_bytes(len_buf) as usize;
             if len > cap {
-                return Err(DharmaError::Validation("list length exceeds capacity".to_string()));
+                return Err(DharmaError::Validation(
+                    "list length exceeds capacity".to_string(),
+                ));
             }
             let mut out = Vec::with_capacity(len);
             let mut cursor = offset + 4;
@@ -505,7 +506,9 @@ fn decode_value_at(
             len_buf.copy_from_slice(&memory[offset..offset + 4]);
             let len = u32::from_le_bytes(len_buf) as usize;
             if len > cap {
-                return Err(DharmaError::Validation("map length exceeds capacity".to_string()));
+                return Err(DharmaError::Validation(
+                    "map length exceeds capacity".to_string(),
+                ));
             }
             let mut out = Vec::with_capacity(len);
             let mut cursor = offset + 4;
@@ -539,9 +542,10 @@ fn resolve_path_offset(
     let Some(root) = parts.next() else {
         return Err(DharmaError::Validation("empty path".to_string()));
     };
-    let field = schema.fields.get(root).ok_or_else(|| {
-        DharmaError::Validation("unknown field".to_string())
-    })?;
+    let field = schema
+        .fields
+        .get(root)
+        .ok_or_else(|| DharmaError::Validation("unknown field".to_string()))?;
     let base = match field.visibility {
         crate::pdl::schema::Visibility::Public => 0usize,
         crate::pdl::schema::Visibility::Private => OVERLAY_BASE,
@@ -561,7 +565,9 @@ fn resolve_path_offset(
     for part in parts {
         if let TypeSpec::Optional(inner) = typ {
             if memory.get(absolute).copied().unwrap_or(0) == 0 {
-                return Err(DharmaError::Validation("optional field missing".to_string()));
+                return Err(DharmaError::Validation(
+                    "optional field missing".to_string(),
+                ));
             }
             absolute += 1;
             typ = *inner;
@@ -670,10 +676,11 @@ fn encode_value_at(
                 _ => return Err(DharmaError::Validation("invalid list".to_string())),
             };
             if items.len() > cap {
-                return Err(DharmaError::Validation("list length exceeds capacity".to_string()));
+                return Err(DharmaError::Validation(
+                    "list length exceeds capacity".to_string(),
+                ));
             }
-            buffer[offset..offset + 4]
-                .copy_from_slice(&(items.len() as u32).to_le_bytes());
+            buffer[offset..offset + 4].copy_from_slice(&(items.len() as u32).to_le_bytes());
             let mut cursor = offset + 4;
             for item in items {
                 encode_value_at(inner, item, buffer, cursor, structs)?;
@@ -697,10 +704,11 @@ fn encode_value_at(
                 _ => return Err(DharmaError::Validation("invalid map".to_string())),
             };
             if entries.len() > cap {
-                return Err(DharmaError::Validation("map length exceeds capacity".to_string()));
+                return Err(DharmaError::Validation(
+                    "map length exceeds capacity".to_string(),
+                ));
             }
-            buffer[offset..offset + 4]
-                .copy_from_slice(&(entries.len() as u32).to_le_bytes());
+            buffer[offset..offset + 4].copy_from_slice(&(entries.len() as u32).to_le_bytes());
             let mut cursor = offset + 4;
             for (k, v) in entries {
                 encode_value_at(key, k, buffer, cursor, structs)?;
@@ -752,7 +760,9 @@ fn encode_value_at(
                 .ok_or_else(|| DharmaError::Validation("subject_ref missing seq".to_string()))?;
             let id_bytes = crate::value::expect_bytes(id_val)?;
             if id_bytes.len() != 32 {
-                return Err(DharmaError::Validation("invalid subject_ref id".to_string()));
+                return Err(DharmaError::Validation(
+                    "invalid subject_ref id".to_string(),
+                ));
             }
             let seq = crate::value::expect_uint(seq_val)?;
             buffer[offset..offset + 32].copy_from_slice(&id_bytes);
@@ -786,8 +796,7 @@ fn encode_value_at(
             };
             let bytes = text.as_bytes();
             let copy_len = bytes.len().min(max);
-            buffer[offset..offset + 4]
-                .copy_from_slice(&(copy_len as u32).to_le_bytes());
+            buffer[offset..offset + 4].copy_from_slice(&(copy_len as u32).to_le_bytes());
             let start = offset + 4;
             let end = start + max;
             buffer[start..start + copy_len].copy_from_slice(&bytes[..copy_len]);
@@ -803,8 +812,7 @@ fn encode_value_at(
             };
             let bytes = text.as_bytes();
             let copy_len = bytes.len().min(max);
-            buffer[offset..offset + 4]
-                .copy_from_slice(&(copy_len as u32).to_le_bytes());
+            buffer[offset..offset + 4].copy_from_slice(&(copy_len as u32).to_le_bytes());
             let start = offset + 4;
             let end = start + max;
             buffer[start..start + copy_len].copy_from_slice(&bytes[..copy_len]);
@@ -836,17 +844,17 @@ fn encode_value_at(
                     }
                 }
                 Value::Array(items) => {
-                        if items.len() != 2 {
-                            return Err(DharmaError::Validation("invalid geopoint".to_string()));
-                        }
-                        let lat = match &items[0] {
-                            Value::Integer(int) => (*int).try_into().unwrap_or(0i32),
-                            _ => return Err(DharmaError::Validation("invalid geopoint".to_string())),
-                        };
-                        let lon = match &items[1] {
-                            Value::Integer(int) => (*int).try_into().unwrap_or(0i32),
-                            _ => return Err(DharmaError::Validation("invalid geopoint".to_string())),
-                        };
+                    if items.len() != 2 {
+                        return Err(DharmaError::Validation("invalid geopoint".to_string()));
+                    }
+                    let lat = match &items[0] {
+                        Value::Integer(int) => (*int).try_into().unwrap_or(0i32),
+                        _ => return Err(DharmaError::Validation("invalid geopoint".to_string())),
+                    };
+                    let lon = match &items[1] {
+                        Value::Integer(int) => (*int).try_into().unwrap_or(0i32),
+                        _ => return Err(DharmaError::Validation("invalid geopoint".to_string())),
+                    };
                     (lat, lon)
                 }
                 _ => return Err(DharmaError::Validation("invalid geopoint".to_string())),
@@ -976,7 +984,10 @@ fn apply_defaults(
         let offset = base + entry.offset;
         match &entry.typ {
             TypeSpec::Optional(inner) => {
-                let default = schema.fields[&entry.name].default.clone().unwrap_or(Value::Null);
+                let default = schema.fields[&entry.name]
+                    .default
+                    .clone()
+                    .unwrap_or(Value::Null);
                 if matches!(default, Value::Null) {
                     memory[offset] = 0;
                     let size = type_size(inner, &schema.structs);
@@ -1167,7 +1178,7 @@ mod tests {
             fields,
             actions,
             queries: BTreeMap::new(),
-        projections: BTreeMap::new(),
+            projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Strict,
         };
 
@@ -1204,7 +1215,10 @@ mod tests {
             note: None,
             meta: None,
         };
-        let body_a = Value::Map(vec![(Value::Text("value".to_string()), Value::Integer(1.into()))]);
+        let body_a = Value::Map(vec![(
+            Value::Text("value".to_string()),
+            Value::Integer(1.into()),
+        )]);
         let assertion_a = AssertionPlaintext::sign(header_a, body_a, &signing_key).unwrap();
         let bytes_a = assertion_a.to_cbor().unwrap();
         let assertion_id_a = assertion_a.assertion_id().unwrap();
@@ -1215,7 +1229,10 @@ mod tests {
             prev: Some(assertion_id_a),
             ..assertion_a.header.clone()
         };
-        let body_b = Value::Map(vec![(Value::Text("value".to_string()), Value::Integer(2.into()))]);
+        let body_b = Value::Map(vec![(
+            Value::Text("value".to_string()),
+            Value::Integer(2.into()),
+        )]);
         let assertion_b = AssertionPlaintext::sign(header_b, body_b, &signing_key).unwrap();
         let bytes_b = assertion_b.to_cbor().unwrap();
         let assertion_id_b = assertion_b.assertion_id().unwrap();
@@ -1252,7 +1269,10 @@ mod tests {
     #[test]
     fn encode_optional_arg_allows_null() {
         let mut args = BTreeMap::new();
-        args.insert("note".to_string(), TypeSpec::Optional(Box::new(TypeSpec::Int)));
+        args.insert(
+            "note".to_string(),
+            TypeSpec::Optional(Box::new(TypeSpec::Int)),
+        );
         let action = ActionSchema {
             args,
             arg_vis: BTreeMap::new(),
@@ -1326,7 +1346,7 @@ mod tests {
             fields,
             actions,
             queries: BTreeMap::new(),
-        projections: BTreeMap::new(),
+            projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Strict,
         };
 
@@ -1363,7 +1383,10 @@ mod tests {
             note: None,
             meta: None,
         };
-        let body_a = Value::Map(vec![(Value::Text("value".to_string()), Value::Integer(5.into()))]);
+        let body_a = Value::Map(vec![(
+            Value::Text("value".to_string()),
+            Value::Integer(5.into()),
+        )]);
         let assertion_a = AssertionPlaintext::sign(header_a, body_a, &signing_key).unwrap();
         let bytes_a = assertion_a.to_cbor().unwrap();
         let assertion_id_a = assertion_a.assertion_id().unwrap();
@@ -1374,7 +1397,10 @@ mod tests {
             prev: Some(assertion_id_a),
             ..assertion_a.header.clone()
         };
-        let body_b = Value::Map(vec![(Value::Text("value".to_string()), Value::Integer(9.into()))]);
+        let body_b = Value::Map(vec![(
+            Value::Text("value".to_string()),
+            Value::Integer(9.into()),
+        )]);
         let assertion_b = AssertionPlaintext::sign(header_b, body_b, &signing_key).unwrap();
         let bytes_b = assertion_b.to_cbor().unwrap();
         let assertion_id_b = assertion_b.assertion_id().unwrap();
@@ -1445,7 +1471,7 @@ mod tests {
             fields,
             actions: BTreeMap::new(),
             queries: BTreeMap::new(),
-        projections: BTreeMap::new(),
+            projections: BTreeMap::new(),
             concurrency: ConcurrencyMode::Strict,
         };
         let mut memory = vec![0u8; STATE_SIZE];
@@ -1464,7 +1490,14 @@ mod tests {
         let mut memory = vec![0u8; 64];
         let decimal_type = TypeSpec::Decimal(Some(2));
         let decimal_val = Value::Integer(1234.into());
-        encode_value_at(&decimal_type, &decimal_val, &mut memory, 0, &BTreeMap::new()).unwrap();
+        encode_value_at(
+            &decimal_type,
+            &decimal_val,
+            &mut memory,
+            0,
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let decoded = decode_value_at(&decimal_type, &memory, 0, &BTreeMap::new()).unwrap();
         assert_eq!(decoded, decimal_val);
 

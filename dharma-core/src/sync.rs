@@ -2,8 +2,13 @@ use crate::cbor;
 use crate::error::DharmaError;
 use crate::fabric::types::Advertisement;
 use crate::types::{AssertionId, EnvelopeId, HpkePublicKey, IdentityKey, SubjectId};
-use crate::value::{expect_array, expect_map, expect_text, expect_uint, expect_bytes, map_get};
+use crate::value::{expect_array, expect_bytes, expect_map, expect_text, expect_uint, map_get};
 use ciborium::value::Value;
+use std::collections::HashMap;
+
+pub const CAP_SYNC_RANGE: &str = "sync.range";
+pub const CAP_OVERLAY_ACL: &str = "overlay.acl";
+pub const CAP_OBJ_CHUNK: &str = "sync.obj.chunk";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SyncMessage {
@@ -11,6 +16,7 @@ pub enum SyncMessage {
     Inv(Inventory),
     Get(Get),
     Obj(Obj),
+    ObjChunk(ObjChunk),
     Ad(Advertisement),
     Ads(Ads),
     GetAds(GetAds),
@@ -68,6 +74,14 @@ pub struct Obj {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ObjChunk {
+    pub id: ObjectRef,
+    pub idx: u64,
+    pub done: bool,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Ads {
     pub ads: Vec<Advertisement>,
 }
@@ -78,6 +92,96 @@ pub struct GetAds;
 #[derive(Clone, Debug, PartialEq)]
 pub struct ErrMsg {
     pub message: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ObjChunkAssembler {
+    states: HashMap<ObjectRef, ObjChunkState>,
+    buffered_bytes: usize,
+    max_buffer_bytes: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ObjChunkState {
+    next_idx: u64,
+    bytes: Vec<u8>,
+}
+
+impl ObjChunkAssembler {
+    pub fn new(max_buffer_bytes: usize) -> Self {
+        Self {
+            states: HashMap::new(),
+            buffered_bytes: 0,
+            max_buffer_bytes: max_buffer_bytes.max(1),
+        }
+    }
+
+    pub fn buffered_bytes(&self) -> usize {
+        self.buffered_bytes
+    }
+
+    pub fn discard(&mut self, id: &ObjectRef) {
+        if let Some(state) = self.states.remove(id) {
+            self.buffered_bytes = self.buffered_bytes.saturating_sub(state.bytes.len());
+        }
+    }
+
+    pub fn push(&mut self, chunk: ObjChunk) -> Result<Option<Obj>, DharmaError> {
+        if chunk.idx == 0 {
+            self.discard(&chunk.id);
+            self.states
+                .insert(chunk.id.clone(), ObjChunkState::default());
+        }
+
+        let Some(state) = self.states.get_mut(&chunk.id) else {
+            return Err(DharmaError::Validation(
+                "obj chunk missing start".to_string(),
+            ));
+        };
+
+        if chunk.idx != state.next_idx {
+            self.discard(&chunk.id);
+            return Err(DharmaError::Validation(
+                "obj chunk out of order".to_string(),
+            ));
+        }
+
+        if !chunk.bytes.is_empty() {
+            let next_object_size = state.bytes.len().saturating_add(chunk.bytes.len());
+            if next_object_size > self.max_buffer_bytes {
+                self.discard(&chunk.id);
+                return Err(DharmaError::Validation(
+                    "obj chunk object exceeds buffer".to_string(),
+                ));
+            }
+            let next_buffered = self.buffered_bytes.saturating_add(chunk.bytes.len());
+            if next_buffered > self.max_buffer_bytes {
+                self.discard(&chunk.id);
+                return Err(DharmaError::Validation(
+                    "obj chunk buffer exceeded".to_string(),
+                ));
+            }
+            state.bytes.extend_from_slice(&chunk.bytes);
+            self.buffered_bytes = next_buffered;
+        }
+
+        state.next_idx = state.next_idx.saturating_add(1);
+
+        if chunk.done {
+            let bytes = self
+                .states
+                .remove(&chunk.id)
+                .map(|state| state.bytes)
+                .unwrap_or_default();
+            self.buffered_bytes = self.buffered_bytes.saturating_sub(bytes.len());
+            return Ok(Some(Obj {
+                id: chunk.id,
+                bytes,
+            }));
+        }
+
+        Ok(None)
+    }
 }
 
 impl SyncMessage {
@@ -96,6 +200,7 @@ impl SyncMessage {
             SyncMessage::Inv(inv) => ("inv", inv.to_value()),
             SyncMessage::Get(get) => ("get", get.to_value()),
             SyncMessage::Obj(obj) => ("obj", obj.to_value()),
+            SyncMessage::ObjChunk(chunk) => ("obj_chunk", chunk.to_value()),
             SyncMessage::Ad(ad) => ("ad", ad.to_value()),
             SyncMessage::Ads(ads) => ("ads", ads.to_value()),
             SyncMessage::GetAds(get) => ("get_ads", get.to_value()),
@@ -122,7 +227,12 @@ impl Hello {
             ),
             (
                 Value::Text("suites".to_string()),
-                Value::Array(self.suites.iter().map(|s| Value::Integer((*s).into())).collect()),
+                Value::Array(
+                    self.suites
+                        .iter()
+                        .map(|s| Value::Integer((*s).into()))
+                        .collect(),
+                ),
             ),
             (
                 Value::Text("caps".to_string()),
@@ -148,15 +258,18 @@ impl Hello {
 impl Inventory {
     fn to_value(&self) -> Value {
         match self {
-            Inventory::Subjects(subjects) => {
-                Value::Map(vec![(
-                    Value::Text("subjects".to_string()),
-                    Value::Array(subjects.iter().map(|s| s.to_value()).collect()),
-                )])
-            }
+            Inventory::Subjects(subjects) => Value::Map(vec![(
+                Value::Text("subjects".to_string()),
+                Value::Array(subjects.iter().map(|s| s.to_value()).collect()),
+            )]),
             Inventory::Objects(objects) => Value::Map(vec![(
                 Value::Text("objects".to_string()),
-                Value::Array(objects.iter().map(|o| Value::Bytes(o.as_bytes().to_vec())).collect()),
+                Value::Array(
+                    objects
+                        .iter()
+                        .map(|o| Value::Bytes(o.as_bytes().to_vec()))
+                        .collect(),
+                ),
             )]),
         }
     }
@@ -165,7 +278,10 @@ impl Inventory {
 impl SubjectInventory {
     fn to_value(&self) -> Value {
         let mut entries = vec![
-            (Value::Text("sub".to_string()), Value::Bytes(self.sub.as_bytes().to_vec())),
+            (
+                Value::Text("sub".to_string()),
+                Value::Bytes(self.sub.as_bytes().to_vec()),
+            ),
             (
                 Value::Text("frontier".to_string()),
                 Value::Array(
@@ -201,12 +317,24 @@ impl ObjectRef {
     fn to_value(&self) -> Value {
         match self {
             ObjectRef::Assertion(id) => Value::Map(vec![
-                (Value::Text("t".to_string()), Value::Text("assertion".to_string())),
-                (Value::Text("id".to_string()), Value::Bytes(id.as_bytes().to_vec())),
+                (
+                    Value::Text("t".to_string()),
+                    Value::Text("assertion".to_string()),
+                ),
+                (
+                    Value::Text("id".to_string()),
+                    Value::Bytes(id.as_bytes().to_vec()),
+                ),
             ]),
             ObjectRef::Envelope(id) => Value::Map(vec![
-                (Value::Text("t".to_string()), Value::Text("envelope".to_string())),
-                (Value::Text("id".to_string()), Value::Bytes(id.as_bytes().to_vec())),
+                (
+                    Value::Text("t".to_string()),
+                    Value::Text("envelope".to_string()),
+                ),
+                (
+                    Value::Text("id".to_string()),
+                    Value::Bytes(id.as_bytes().to_vec()),
+                ),
             ]),
         }
     }
@@ -214,10 +342,11 @@ impl ObjectRef {
     fn from_value(value: &Value) -> Result<Self, DharmaError> {
         let map = expect_map(value)?;
         let kind = expect_text(
-            map_get(map, "t").ok_or_else(|| DharmaError::Validation("missing ref type".to_string()))?,
+            map_get(map, "t")
+                .ok_or_else(|| DharmaError::Validation("missing ref type".to_string()))?,
         )?;
-        let id_val =
-            map_get(map, "id").ok_or_else(|| DharmaError::Validation("missing ref id".to_string()))?;
+        let id_val = map_get(map, "id")
+            .ok_or_else(|| DharmaError::Validation("missing ref id".to_string()))?;
         let bytes = expect_bytes(id_val)?;
         match kind.as_str() {
             "assertion" => Ok(ObjectRef::Assertion(AssertionId::from_slice(&bytes)?)),
@@ -270,7 +399,12 @@ impl Subscriptions {
         if !self.namespaces.is_empty() {
             entries.push((
                 Value::Text("namespaces".to_string()),
-                Value::Array(self.namespaces.iter().map(|n| Value::Text(n.clone())).collect()),
+                Value::Array(
+                    self.namespaces
+                        .iter()
+                        .map(|n| Value::Text(n.clone()))
+                        .collect(),
+                ),
             ));
         }
         Value::Map(entries)
@@ -290,7 +424,27 @@ impl Obj {
     fn to_value(&self) -> Value {
         Value::Map(vec![
             (Value::Text("id".to_string()), self.id.to_value()),
-            (Value::Text("bytes".to_string()), Value::Bytes(self.bytes.clone())),
+            (
+                Value::Text("bytes".to_string()),
+                Value::Bytes(self.bytes.clone()),
+            ),
+        ])
+    }
+}
+
+impl ObjChunk {
+    fn to_value(&self) -> Value {
+        Value::Map(vec![
+            (Value::Text("id".to_string()), self.id.to_value()),
+            (
+                Value::Text("idx".to_string()),
+                Value::Integer(self.idx.into()),
+            ),
+            (Value::Text("done".to_string()), Value::Bool(self.done)),
+            (
+                Value::Text("bytes".to_string()),
+                Value::Bytes(self.bytes.clone()),
+            ),
         ])
     }
 }
@@ -321,13 +475,16 @@ impl ErrMsg {
 
 fn parse_message(value: &Value) -> Result<SyncMessage, DharmaError> {
     let map = expect_map(value)?;
-    let t = expect_text(map_get(map, "t").ok_or_else(|| DharmaError::Validation("missing t".to_string()))?)?;
+    let t = expect_text(
+        map_get(map, "t").ok_or_else(|| DharmaError::Validation("missing t".to_string()))?,
+    )?;
     let p = map_get(map, "p").ok_or_else(|| DharmaError::Validation("missing p".to_string()))?;
     match t.as_str() {
         "hello" => Ok(SyncMessage::Hello(parse_hello(p)?)),
         "inv" => Ok(SyncMessage::Inv(parse_inventory(p)?)),
         "get" => Ok(SyncMessage::Get(parse_get(p)?)),
         "obj" => Ok(SyncMessage::Obj(parse_obj(p)?)),
+        "obj_chunk" => Ok(SyncMessage::ObjChunk(parse_obj_chunk(p)?)),
         "ad" => Ok(SyncMessage::Ad(parse_ad(p)?)),
         "ads" => Ok(SyncMessage::Ads(parse_ads(p)?)),
         "get_ads" => Ok(SyncMessage::GetAds(GetAds)),
@@ -338,16 +495,26 @@ fn parse_message(value: &Value) -> Result<SyncMessage, DharmaError> {
 
 fn parse_hello(value: &Value) -> Result<Hello, DharmaError> {
     let map = expect_map(value)?;
-    let v = expect_uint(map_get(map, "v").ok_or_else(|| DharmaError::Validation("missing v".to_string()))?)?;
-    let peer = expect_bytes(map_get(map, "peer_id").ok_or_else(|| DharmaError::Validation("missing peer_id".to_string()))?)?;
-    let hpke = expect_bytes(map_get(map, "hpke_pk").ok_or_else(|| DharmaError::Validation("missing hpke_pk".to_string()))?)?;
-    let suites_val = map_get(map, "suites").ok_or_else(|| DharmaError::Validation("missing suites".to_string()))?;
+    let v = expect_uint(
+        map_get(map, "v").ok_or_else(|| DharmaError::Validation("missing v".to_string()))?,
+    )?;
+    let peer = expect_bytes(
+        map_get(map, "peer_id")
+            .ok_or_else(|| DharmaError::Validation("missing peer_id".to_string()))?,
+    )?;
+    let hpke = expect_bytes(
+        map_get(map, "hpke_pk")
+            .ok_or_else(|| DharmaError::Validation("missing hpke_pk".to_string()))?,
+    )?;
+    let suites_val = map_get(map, "suites")
+        .ok_or_else(|| DharmaError::Validation("missing suites".to_string()))?;
     let suites_array = expect_array(suites_val)?;
     let mut suites = Vec::new();
     for item in suites_array {
         suites.push(expect_uint(item)?);
     }
-    let caps_val = map_get(map, "caps").ok_or_else(|| DharmaError::Validation("missing caps".to_string()))?;
+    let caps_val =
+        map_get(map, "caps").ok_or_else(|| DharmaError::Validation("missing caps".to_string()))?;
     let caps_array = expect_array(caps_val)?;
     let mut caps = Vec::new();
     for item in caps_array {
@@ -424,8 +591,11 @@ fn parse_inventory(value: &Value) -> Result<Inventory, DharmaError> {
 
 fn parse_subject_inventory(value: &Value) -> Result<SubjectInventory, DharmaError> {
     let map = expect_map(value)?;
-    let sub_bytes = expect_bytes(map_get(map, "sub").ok_or_else(|| DharmaError::Validation("missing sub".to_string()))?)?;
-    let frontier_val = map_get(map, "frontier").ok_or_else(|| DharmaError::Validation("missing frontier".to_string()))?;
+    let sub_bytes = expect_bytes(
+        map_get(map, "sub").ok_or_else(|| DharmaError::Validation("missing sub".to_string()))?,
+    )?;
+    let frontier_val = map_get(map, "frontier")
+        .ok_or_else(|| DharmaError::Validation("missing frontier".to_string()))?;
     let frontier_array = expect_array(frontier_val)?;
     let mut frontier = Vec::new();
     for item in frontier_array {
@@ -453,7 +623,8 @@ fn parse_subject_inventory(value: &Value) -> Result<SubjectInventory, DharmaErro
 
 fn parse_get(value: &Value) -> Result<Get, DharmaError> {
     let map = expect_map(value)?;
-    let ids_val = map_get(map, "ids").ok_or_else(|| DharmaError::Validation("missing ids".to_string()))?;
+    let ids_val =
+        map_get(map, "ids").ok_or_else(|| DharmaError::Validation("missing ids".to_string()))?;
     let ids_array = expect_array(ids_val)?;
     let mut ids = Vec::new();
     for item in ids_array {
@@ -464,10 +635,37 @@ fn parse_get(value: &Value) -> Result<Get, DharmaError> {
 
 fn parse_obj(value: &Value) -> Result<Obj, DharmaError> {
     let map = expect_map(value)?;
-    let id_val = map_get(map, "id").ok_or_else(|| DharmaError::Validation("missing id".to_string()))?;
-    let bytes = expect_bytes(map_get(map, "bytes").ok_or_else(|| DharmaError::Validation("missing bytes".to_string()))?)?;
+    let id_val =
+        map_get(map, "id").ok_or_else(|| DharmaError::Validation("missing id".to_string()))?;
+    let bytes = expect_bytes(
+        map_get(map, "bytes")
+            .ok_or_else(|| DharmaError::Validation("missing bytes".to_string()))?,
+    )?;
     Ok(Obj {
         id: ObjectRef::from_value(id_val)?,
+        bytes,
+    })
+}
+
+fn parse_obj_chunk(value: &Value) -> Result<ObjChunk, DharmaError> {
+    let map = expect_map(value)?;
+    let id_val =
+        map_get(map, "id").ok_or_else(|| DharmaError::Validation("missing id".to_string()))?;
+    let idx = expect_uint(
+        map_get(map, "idx").ok_or_else(|| DharmaError::Validation("missing idx".to_string()))?,
+    )?;
+    let done = match map_get(map, "done") {
+        Some(Value::Bool(flag)) => *flag,
+        _ => false,
+    };
+    let bytes = expect_bytes(
+        map_get(map, "bytes")
+            .ok_or_else(|| DharmaError::Validation("missing bytes".to_string()))?,
+    )?;
+    Ok(ObjChunk {
+        id: ObjectRef::from_value(id_val)?,
+        idx,
+        done,
         bytes,
     })
 }
@@ -478,7 +676,8 @@ fn parse_ad(value: &Value) -> Result<Advertisement, DharmaError> {
 
 fn parse_ads(value: &Value) -> Result<Ads, DharmaError> {
     let map = expect_map(value)?;
-    let ads_val = map_get(map, "ads").ok_or_else(|| DharmaError::Validation("missing ads".to_string()))?;
+    let ads_val =
+        map_get(map, "ads").ok_or_else(|| DharmaError::Validation("missing ads".to_string()))?;
     let ads_array = expect_array(ads_val)?;
     let mut ads = Vec::with_capacity(ads_array.len());
     for item in ads_array {
@@ -489,7 +688,10 @@ fn parse_ads(value: &Value) -> Result<Ads, DharmaError> {
 
 fn parse_err(value: &Value) -> Result<ErrMsg, DharmaError> {
     let map = expect_map(value)?;
-    let message = expect_text(map_get(map, "message").ok_or_else(|| DharmaError::Validation("missing message".to_string()))?)?;
+    let message = expect_text(
+        map_get(map, "message")
+            .ok_or_else(|| DharmaError::Validation("missing message".to_string()))?,
+    )?;
     Ok(ErrMsg { message })
 }
 
@@ -505,7 +707,7 @@ mod tests {
             peer_id: IdentityKey::from_bytes([1u8; 32]),
             hpke_pk: HpkePublicKey::from_bytes([2u8; 32]),
             suites: vec![1, 2],
-            caps: vec!["sync.range".to_string()],
+            caps: vec![CAP_SYNC_RANGE.to_string()],
             subs: Some(Subscriptions {
                 all: false,
                 subjects: vec![SubjectId::from_bytes([9u8; 32])],
@@ -534,7 +736,7 @@ mod tests {
 
     #[test]
     fn inv_objects_roundtrip() {
-        let msg = SyncMessage::Inv(Inventory::Objects(vec![EnvelopeId::from_bytes([5u8; 32])])) ;
+        let msg = SyncMessage::Inv(Inventory::Objects(vec![EnvelopeId::from_bytes([5u8; 32])]));
         let bytes = msg.to_cbor().unwrap();
         let parsed = SyncMessage::from_cbor(&bytes).unwrap();
         assert_eq!(msg, parsed);
@@ -565,8 +767,86 @@ mod tests {
     }
 
     #[test]
+    fn obj_chunk_roundtrip() {
+        let msg = SyncMessage::ObjChunk(ObjChunk {
+            id: ObjectRef::Envelope(EnvelopeId::from_bytes([8u8; 32])),
+            idx: 2,
+            done: true,
+            bytes: vec![4, 5, 6],
+        });
+        let bytes = msg.to_cbor().unwrap();
+        let parsed = SyncMessage::from_cbor(&bytes).unwrap();
+        assert_eq!(msg, parsed);
+    }
+
+    #[test]
+    fn obj_chunk_assembler_reassembles_chunks() {
+        let id = ObjectRef::Envelope(EnvelopeId::from_bytes([9u8; 32]));
+        let mut assembler = ObjChunkAssembler::new(1024);
+        assert!(assembler
+            .push(ObjChunk {
+                id: id.clone(),
+                idx: 0,
+                done: false,
+                bytes: b"hello ".to_vec(),
+            })
+            .unwrap()
+            .is_none());
+        let out = assembler
+            .push(ObjChunk {
+                id: id.clone(),
+                idx: 1,
+                done: true,
+                bytes: b"world".to_vec(),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(out.id, id);
+        assert_eq!(out.bytes, b"hello world".to_vec());
+        assert_eq!(assembler.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn obj_chunk_assembler_rejects_out_of_order_chunks() {
+        let id = ObjectRef::Envelope(EnvelopeId::from_bytes([10u8; 32]));
+        let mut assembler = ObjChunkAssembler::new(1024);
+        let err = assembler
+            .push(ObjChunk {
+                id,
+                idx: 1,
+                done: true,
+                bytes: vec![1, 2],
+            })
+            .unwrap_err();
+        match err {
+            DharmaError::Validation(reason) => assert!(reason.contains("missing start")),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn obj_chunk_assembler_enforces_buffer_limit() {
+        let id = ObjectRef::Envelope(EnvelopeId::from_bytes([11u8; 32]));
+        let mut assembler = ObjChunkAssembler::new(4);
+        let err = assembler
+            .push(ObjChunk {
+                id,
+                idx: 0,
+                done: true,
+                bytes: vec![1, 2, 3, 4, 5],
+            })
+            .unwrap_err();
+        match err {
+            DharmaError::Validation(reason) => assert!(reason.contains("exceeds buffer")),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
     fn err_roundtrip() {
-        let msg = SyncMessage::Err(ErrMsg { message: "oops".to_string() });
+        let msg = SyncMessage::Err(ErrMsg {
+            message: "oops".to_string(),
+        });
         let bytes = msg.to_cbor().unwrap();
         let parsed = SyncMessage::from_cbor(&bytes).unwrap();
         assert_eq!(msg, parsed);
@@ -577,7 +857,10 @@ mod tests {
         let payload = Value::Map(vec![(
             Value::Text("ids".to_string()),
             Value::Array(vec![Value::Map(vec![
-                (Value::Text("t".to_string()), Value::Text("../../assertion".to_string())),
+                (
+                    Value::Text("t".to_string()),
+                    Value::Text("../../assertion".to_string()),
+                ),
                 (Value::Text("id".to_string()), Value::Bytes(vec![7u8; 32])),
             ])]),
         )]);

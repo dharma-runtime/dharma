@@ -16,12 +16,36 @@ pub struct FabricRequest {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FabricOp {
-    ExecAction { subject: SubjectId, action: String, args: Value },
-    ExecQuery { subject: SubjectId, query: String, params: Value, predefined: bool },
-    QueryFast { table: String, key: Value, query: String },
-    QueryWide { table: String, shard: u32, query: String },
-    Fetch { id: EnvelopeId },
-    OracleInvoke { name: String, mode: OracleMode, timing: OracleTiming, input: Value },
+    ExecAction {
+        subject: SubjectId,
+        action: String,
+        args: Value,
+    },
+    ExecQuery {
+        subject: SubjectId,
+        query: String,
+        params: Value,
+        predefined: bool,
+    },
+    QueryFast {
+        table: String,
+        key: Value,
+        query: String,
+    },
+    QueryWide {
+        table: String,
+        shard: u32,
+        query: String,
+    },
+    Fetch {
+        id: EnvelopeId,
+    },
+    OracleInvoke {
+        name: String,
+        mode: OracleMode,
+        timing: OracleTiming,
+        input: Value,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -77,15 +101,50 @@ pub trait FabricDispatcher {
     ) -> Result<(), DharmaError> {
         Ok(())
     }
-    fn exec_action(&self, req: &FabricRequest, subject: &SubjectId, action: &str, args: &Value) -> Result<FabricResponse, DharmaError>;
-    fn exec_query(&self, req: &FabricRequest, subject: &SubjectId, query: &str, params: &Value, predefined: bool) -> Result<FabricResponse, DharmaError>;
-    fn query_fast(&self, req: &FabricRequest, table: &str, key: &Value, query: &str) -> Result<FabricResponse, DharmaError>;
-    fn query_wide(&self, req: &FabricRequest, table: &str, shard: u32, query: &str) -> Result<FabricResponse, DharmaError>;
+    fn exec_action(
+        &self,
+        req: &FabricRequest,
+        subject: &SubjectId,
+        action: &str,
+        args: &Value,
+    ) -> Result<FabricResponse, DharmaError>;
+    fn exec_query(
+        &self,
+        req: &FabricRequest,
+        subject: &SubjectId,
+        query: &str,
+        params: &Value,
+        predefined: bool,
+    ) -> Result<FabricResponse, DharmaError>;
+    fn query_fast(
+        &self,
+        req: &FabricRequest,
+        table: &str,
+        key: &Value,
+        query: &str,
+    ) -> Result<FabricResponse, DharmaError>;
+    fn query_wide(
+        &self,
+        req: &FabricRequest,
+        table: &str,
+        shard: u32,
+        query: &str,
+    ) -> Result<FabricResponse, DharmaError>;
     fn fetch(&self, req: &FabricRequest, id: &EnvelopeId) -> Result<FabricResponse, DharmaError>;
-    fn oracle_invoke(&self, req: &FabricRequest, name: &str, mode: OracleMode, timing: OracleTiming, input: &Value) -> Result<FabricResponse, DharmaError>;
+    fn oracle_invoke(
+        &self,
+        req: &FabricRequest,
+        name: &str,
+        mode: OracleMode,
+        timing: OracleTiming,
+        input: &Value,
+    ) -> Result<FabricResponse, DharmaError>;
 }
 
-pub fn dispatch<D: FabricDispatcher>(dispatcher: &D, req: &FabricRequest) -> Result<FabricResponse, DharmaError> {
+pub fn dispatch<D: FabricDispatcher>(
+    dispatcher: &D,
+    req: &FabricRequest,
+) -> Result<FabricResponse, DharmaError> {
     let now = dispatcher.now();
     if now > req.deadline {
         return Err(DharmaError::Validation("deadline exceeded".to_string()));
@@ -94,42 +153,73 @@ pub fn dispatch<D: FabricDispatcher>(dispatcher: &D, req: &FabricRequest) -> Res
         return Err(DharmaError::Validation("token not valid".to_string()));
     }
     match &req.op {
-        FabricOp::ExecAction { subject, action, args } => {
-            req.cap.check_access(Op::Execute, &Scope::Subject(*subject))?;
+        FabricOp::ExecAction {
+            subject,
+            action,
+            args,
+        } => {
+            req.cap
+                .check_access(Op::Execute, &Scope::Subject(*subject))?;
             dispatcher.authorize_exec_action(req, subject, action)?;
             dispatcher.exec_action(req, subject, action, args)
         }
-        FabricOp::ExecQuery { subject, query, params, predefined } => {
+        FabricOp::ExecQuery {
+            subject,
+            query,
+            params,
+            predefined,
+        } => {
             req.cap.check_access(Op::Read, &Scope::Subject(*subject))?;
             if !*predefined && !req.cap.flags.contains(&Flag::AllowCustomQuery) {
-                return Err(DharmaError::Validation("custom query not allowed".to_string()));
+                return Err(DharmaError::Validation(
+                    "custom query not allowed".to_string(),
+                ));
             }
             dispatcher.authorize_exec_query(req, subject, query, *predefined)?;
             dispatcher.exec_query(req, subject, query, params, *predefined)
         }
         FabricOp::QueryFast { table, key, query } => {
-            req.cap.check_access(Op::Read, &Scope::Table(table.clone()))?;
+            req.cap
+                .check_access(Op::Read, &Scope::Table(table.clone()))?;
             if !req.cap.flags.contains(&Flag::AllowCustomQuery) {
-                return Err(DharmaError::Validation("custom query not allowed".to_string()));
+                return Err(DharmaError::Validation(
+                    "custom query not allowed".to_string(),
+                ));
             }
             dispatcher.authorize_query_fast(req, table, key, query)?;
             dispatcher.query_fast(req, table, key, query)
         }
-        FabricOp::QueryWide { table, shard, query } => {
-            req.cap.check_access(Op::Read, &Scope::Table(table.clone()))?;
+        FabricOp::QueryWide {
+            table,
+            shard,
+            query,
+        } => {
+            req.cap
+                .check_access(Op::Read, &Scope::Table(table.clone()))?;
             if !req.cap.flags.contains(&Flag::AllowCustomQuery) {
-                return Err(DharmaError::Validation("custom query not allowed".to_string()));
+                return Err(DharmaError::Validation(
+                    "custom query not allowed".to_string(),
+                ));
             }
             dispatcher.authorize_query_wide(req, table, *shard, query)?;
             dispatcher.query_wide(req, table, *shard, query)
         }
         FabricOp::Fetch { id } => {
-            req.cap.check_access(Op::Read, &Scope::Table("objects".to_string()))?;
+            req.cap
+                .check_access(Op::Read, &Scope::Table("objects".to_string()))?;
             dispatcher.fetch(req, id)
         }
-        FabricOp::OracleInvoke { name, mode, timing, input } => {
+        FabricOp::OracleInvoke {
+            name,
+            mode,
+            timing,
+            input,
+        } => {
             if !req.cap.oracles.iter().any(|claim| {
-                claim.name == *name && claim.mode == *mode && claim.timing == *timing && claim.domain == req.cap.domain
+                claim.name == *name
+                    && claim.mode == *mode
+                    && claim.timing == *timing
+                    && claim.domain == req.cap.domain
             }) {
                 return Err(DharmaError::Validation("oracle not allowed".to_string()));
             }
@@ -150,63 +240,141 @@ impl FabricRequest {
 
     fn to_value(&self) -> Value {
         Value::Map(vec![
-            (Value::Text("req_id".to_string()), Value::Bytes(self.req_id.to_vec())),
+            (
+                Value::Text("req_id".to_string()),
+                Value::Bytes(self.req_id.to_vec()),
+            ),
             (Value::Text("cap".to_string()), self.cap.to_value()),
             (Value::Text("op".to_string()), self.op.to_value()),
-            (Value::Text("deadline".to_string()), Value::Integer(self.deadline.into())),
+            (
+                Value::Text("deadline".to_string()),
+                Value::Integer(self.deadline.into()),
+            ),
         ])
     }
 
     fn from_value(value: &Value) -> Result<Self, DharmaError> {
         let map = expect_map(value)?;
-        let req_id = parse_bytes16(map_get(map, "req_id").ok_or_else(|| DharmaError::Validation("missing req_id".to_string()))?)?;
-        let cap_val = map_get(map, "cap").ok_or_else(|| DharmaError::Validation("missing cap".to_string()))?;
+        let req_id = parse_bytes16(
+            map_get(map, "req_id")
+                .ok_or_else(|| DharmaError::Validation("missing req_id".to_string()))?,
+        )?;
+        let cap_val = map_get(map, "cap")
+            .ok_or_else(|| DharmaError::Validation("missing cap".to_string()))?;
         let cap = CapToken::from_value(cap_val)?;
-        let op_val = map_get(map, "op").ok_or_else(|| DharmaError::Validation("missing op".to_string()))?;
+        let op_val =
+            map_get(map, "op").ok_or_else(|| DharmaError::Validation("missing op".to_string()))?;
         let op = FabricOp::from_value(op_val)?;
-        let deadline = expect_uint(map_get(map, "deadline").ok_or_else(|| DharmaError::Validation("missing deadline".to_string()))?)?;
-        Ok(Self { req_id, cap, op, deadline })
+        let deadline = expect_uint(
+            map_get(map, "deadline")
+                .ok_or_else(|| DharmaError::Validation("missing deadline".to_string()))?,
+        )?;
+        Ok(Self {
+            req_id,
+            cap,
+            op,
+            deadline,
+        })
     }
 }
-
 
 impl FabricOp {
     fn to_value(&self) -> Value {
         match self {
-            FabricOp::ExecAction { subject, action, args } => Value::Map(vec![
-                (Value::Text("t".to_string()), Value::Text("exec_action".to_string())),
-                (Value::Text("subject".to_string()), Value::Bytes(subject.as_bytes().to_vec())),
-                (Value::Text("action".to_string()), Value::Text(action.clone())),
+            FabricOp::ExecAction {
+                subject,
+                action,
+                args,
+            } => Value::Map(vec![
+                (
+                    Value::Text("t".to_string()),
+                    Value::Text("exec_action".to_string()),
+                ),
+                (
+                    Value::Text("subject".to_string()),
+                    Value::Bytes(subject.as_bytes().to_vec()),
+                ),
+                (
+                    Value::Text("action".to_string()),
+                    Value::Text(action.clone()),
+                ),
                 (Value::Text("args".to_string()), args.clone()),
             ]),
-            FabricOp::ExecQuery { subject, query, params, predefined } => Value::Map(vec![
-                (Value::Text("t".to_string()), Value::Text("exec_query".to_string())),
-                (Value::Text("subject".to_string()), Value::Bytes(subject.as_bytes().to_vec())),
+            FabricOp::ExecQuery {
+                subject,
+                query,
+                params,
+                predefined,
+            } => Value::Map(vec![
+                (
+                    Value::Text("t".to_string()),
+                    Value::Text("exec_query".to_string()),
+                ),
+                (
+                    Value::Text("subject".to_string()),
+                    Value::Bytes(subject.as_bytes().to_vec()),
+                ),
                 (Value::Text("query".to_string()), Value::Text(query.clone())),
                 (Value::Text("params".to_string()), params.clone()),
-                (Value::Text("predefined".to_string()), Value::Bool(*predefined)),
+                (
+                    Value::Text("predefined".to_string()),
+                    Value::Bool(*predefined),
+                ),
             ]),
             FabricOp::QueryFast { table, key, query } => Value::Map(vec![
-                (Value::Text("t".to_string()), Value::Text("query_fast".to_string())),
+                (
+                    Value::Text("t".to_string()),
+                    Value::Text("query_fast".to_string()),
+                ),
                 (Value::Text("table".to_string()), Value::Text(table.clone())),
                 (Value::Text("key".to_string()), key.clone()),
                 (Value::Text("query".to_string()), Value::Text(query.clone())),
             ]),
-            FabricOp::QueryWide { table, shard, query } => Value::Map(vec![
-                (Value::Text("t".to_string()), Value::Text("query_wide".to_string())),
+            FabricOp::QueryWide {
+                table,
+                shard,
+                query,
+            } => Value::Map(vec![
+                (
+                    Value::Text("t".to_string()),
+                    Value::Text("query_wide".to_string()),
+                ),
                 (Value::Text("table".to_string()), Value::Text(table.clone())),
-                (Value::Text("shard".to_string()), Value::Integer((*shard).into())),
+                (
+                    Value::Text("shard".to_string()),
+                    Value::Integer((*shard).into()),
+                ),
                 (Value::Text("query".to_string()), Value::Text(query.clone())),
             ]),
             FabricOp::Fetch { id } => Value::Map(vec![
-                (Value::Text("t".to_string()), Value::Text("fetch".to_string())),
-                (Value::Text("id".to_string()), Value::Bytes(id.as_bytes().to_vec())),
+                (
+                    Value::Text("t".to_string()),
+                    Value::Text("fetch".to_string()),
+                ),
+                (
+                    Value::Text("id".to_string()),
+                    Value::Bytes(id.as_bytes().to_vec()),
+                ),
             ]),
-            FabricOp::OracleInvoke { name, mode, timing, input } => Value::Map(vec![
-                (Value::Text("t".to_string()), Value::Text("oracle".to_string())),
+            FabricOp::OracleInvoke {
+                name,
+                mode,
+                timing,
+                input,
+            } => Value::Map(vec![
+                (
+                    Value::Text("t".to_string()),
+                    Value::Text("oracle".to_string()),
+                ),
                 (Value::Text("name".to_string()), Value::Text(name.clone())),
-                (Value::Text("mode".to_string()), Value::Text(mode.as_str().to_string())),
-                (Value::Text("timing".to_string()), Value::Text(timing.as_str().to_string())),
+                (
+                    Value::Text("mode".to_string()),
+                    Value::Text(mode.as_str().to_string()),
+                ),
+                (
+                    Value::Text("timing".to_string()),
+                    Value::Text(timing.as_str().to_string()),
+                ),
                 (Value::Text("input".to_string()), input.clone()),
             ]),
         }
@@ -214,49 +382,109 @@ impl FabricOp {
 
     fn from_value(value: &Value) -> Result<Self, DharmaError> {
         let map = expect_map(value)?;
-        let t = expect_text(map_get(map, "t").ok_or_else(|| DharmaError::Validation("missing op type".to_string()))?)?;
+        let t = expect_text(
+            map_get(map, "t")
+                .ok_or_else(|| DharmaError::Validation("missing op type".to_string()))?,
+        )?;
         match t.as_str() {
             "exec_action" => {
                 let subject_val = map_get(map, "subject")
                     .ok_or_else(|| DharmaError::Validation("missing subject".to_string()))?;
                 let subject = parse_subject(subject_val)?;
-                let action = expect_text(map_get(map, "action").ok_or_else(|| DharmaError::Validation("missing action".to_string()))?)?;
-                let args = map_get(map, "args").ok_or_else(|| DharmaError::Validation("missing args".to_string()))?.clone();
-                Ok(FabricOp::ExecAction { subject, action, args })
+                let action = expect_text(
+                    map_get(map, "action")
+                        .ok_or_else(|| DharmaError::Validation("missing action".to_string()))?,
+                )?;
+                let args = map_get(map, "args")
+                    .ok_or_else(|| DharmaError::Validation("missing args".to_string()))?
+                    .clone();
+                Ok(FabricOp::ExecAction {
+                    subject,
+                    action,
+                    args,
+                })
             }
             "exec_query" => {
                 let subject_val = map_get(map, "subject")
                     .ok_or_else(|| DharmaError::Validation("missing subject".to_string()))?;
                 let subject = parse_subject(subject_val)?;
-                let query = expect_text(map_get(map, "query").ok_or_else(|| DharmaError::Validation("missing query".to_string()))?)?;
-                let params = map_get(map, "params").ok_or_else(|| DharmaError::Validation("missing params".to_string()))?.clone();
-                let predefined = map_get(map, "predefined").map(expect_bool).transpose()?.unwrap_or(false);
-                Ok(FabricOp::ExecQuery { subject, query, params, predefined })
+                let query = expect_text(
+                    map_get(map, "query")
+                        .ok_or_else(|| DharmaError::Validation("missing query".to_string()))?,
+                )?;
+                let params = map_get(map, "params")
+                    .ok_or_else(|| DharmaError::Validation("missing params".to_string()))?
+                    .clone();
+                let predefined = map_get(map, "predefined")
+                    .map(expect_bool)
+                    .transpose()?
+                    .unwrap_or(false);
+                Ok(FabricOp::ExecQuery {
+                    subject,
+                    query,
+                    params,
+                    predefined,
+                })
             }
             "query_fast" => {
-                let table = expect_text(map_get(map, "table").ok_or_else(|| DharmaError::Validation("missing table".to_string()))?)?;
-                let key = map_get(map, "key").ok_or_else(|| DharmaError::Validation("missing key".to_string()))?.clone();
-                let query = expect_text(map_get(map, "query").ok_or_else(|| DharmaError::Validation("missing query".to_string()))?)?;
+                let table = expect_text(
+                    map_get(map, "table")
+                        .ok_or_else(|| DharmaError::Validation("missing table".to_string()))?,
+                )?;
+                let key = map_get(map, "key")
+                    .ok_or_else(|| DharmaError::Validation("missing key".to_string()))?
+                    .clone();
+                let query = expect_text(
+                    map_get(map, "query")
+                        .ok_or_else(|| DharmaError::Validation("missing query".to_string()))?,
+                )?;
                 Ok(FabricOp::QueryFast { table, key, query })
             }
             "query_wide" => {
-                let table = expect_text(map_get(map, "table").ok_or_else(|| DharmaError::Validation("missing table".to_string()))?)?;
-                let shard = expect_uint(map_get(map, "shard").ok_or_else(|| DharmaError::Validation("missing shard".to_string()))?)?;
-                let shard_u32: u32 = shard.try_into().map_err(|_| DharmaError::Validation("shard out of range".to_string()))?;
-                let query = expect_text(map_get(map, "query").ok_or_else(|| DharmaError::Validation("missing query".to_string()))?)?;
-                Ok(FabricOp::QueryWide { table, shard: shard_u32, query })
+                let table = expect_text(
+                    map_get(map, "table")
+                        .ok_or_else(|| DharmaError::Validation("missing table".to_string()))?,
+                )?;
+                let shard = expect_uint(
+                    map_get(map, "shard")
+                        .ok_or_else(|| DharmaError::Validation("missing shard".to_string()))?,
+                )?;
+                let shard_u32: u32 = shard
+                    .try_into()
+                    .map_err(|_| DharmaError::Validation("shard out of range".to_string()))?;
+                let query = expect_text(
+                    map_get(map, "query")
+                        .ok_or_else(|| DharmaError::Validation("missing query".to_string()))?,
+                )?;
+                Ok(FabricOp::QueryWide {
+                    table,
+                    shard: shard_u32,
+                    query,
+                })
             }
             "fetch" => {
-                let id_val = map_get(map, "id").ok_or_else(|| DharmaError::Validation("missing id".to_string()))?;
+                let id_val = map_get(map, "id")
+                    .ok_or_else(|| DharmaError::Validation("missing id".to_string()))?;
                 let id_bytes = crate::value::expect_bytes(id_val)?;
                 let id = EnvelopeId::from_slice(&id_bytes)?;
                 Ok(FabricOp::Fetch { id })
             }
             "oracle" => {
-                let name = expect_text(map_get(map, "name").ok_or_else(|| DharmaError::Validation("missing name".to_string()))?)?;
-                let mode_text = expect_text(map_get(map, "mode").ok_or_else(|| DharmaError::Validation("missing mode".to_string()))?)?;
-                let timing_text = expect_text(map_get(map, "timing").ok_or_else(|| DharmaError::Validation("missing timing".to_string()))?)?;
-                let input = map_get(map, "input").ok_or_else(|| DharmaError::Validation("missing input".to_string()))?.clone();
+                let name = expect_text(
+                    map_get(map, "name")
+                        .ok_or_else(|| DharmaError::Validation("missing name".to_string()))?,
+                )?;
+                let mode_text = expect_text(
+                    map_get(map, "mode")
+                        .ok_or_else(|| DharmaError::Validation("missing mode".to_string()))?,
+                )?;
+                let timing_text = expect_text(
+                    map_get(map, "timing")
+                        .ok_or_else(|| DharmaError::Validation("missing timing".to_string()))?,
+                )?;
+                let input = map_get(map, "input")
+                    .ok_or_else(|| DharmaError::Validation("missing input".to_string()))?
+                    .clone();
                 Ok(FabricOp::OracleInvoke {
                     name,
                     mode: OracleMode::from_str(&mode_text)?,
@@ -293,14 +521,30 @@ impl FabricResponse {
     fn to_value(&self) -> Value {
         let stats = self.stats.to_value();
         let provenance = match &self.provenance {
-            Some(list) => Value::Array(list.iter().map(|id| Value::Bytes(id.as_bytes().to_vec())).collect()),
+            Some(list) => Value::Array(
+                list.iter()
+                    .map(|id| Value::Bytes(id.as_bytes().to_vec()))
+                    .collect(),
+            ),
             None => Value::Null,
         };
         Value::Map(vec![
-            (Value::Text("req_id".to_string()), Value::Bytes(self.req_id.to_vec())),
-            (Value::Text("status".to_string()), Value::Integer(self.status.into())),
-            (Value::Text("watermark".to_string()), Value::Integer(self.watermark.into())),
-            (Value::Text("payload".to_string()), Value::Bytes(self.payload.clone())),
+            (
+                Value::Text("req_id".to_string()),
+                Value::Bytes(self.req_id.to_vec()),
+            ),
+            (
+                Value::Text("status".to_string()),
+                Value::Integer(self.status.into()),
+            ),
+            (
+                Value::Text("watermark".to_string()),
+                Value::Integer(self.watermark.into()),
+            ),
+            (
+                Value::Text("payload".to_string()),
+                Value::Bytes(self.payload.clone()),
+            ),
             (Value::Text("stats".to_string()), stats),
             (Value::Text("provenance".to_string()), provenance),
         ])
@@ -308,12 +552,27 @@ impl FabricResponse {
 
     fn from_value(value: &Value) -> Result<Self, DharmaError> {
         let map = expect_map(value)?;
-        let req_id = parse_bytes16(map_get(map, "req_id").ok_or_else(|| DharmaError::Validation("missing req_id".to_string()))?)?;
-        let status = expect_uint(map_get(map, "status").ok_or_else(|| DharmaError::Validation("missing status".to_string()))?)?;
-        let status_u16: u16 = status.try_into().map_err(|_| DharmaError::Validation("status out of range".to_string()))?;
-        let watermark = expect_uint(map_get(map, "watermark").ok_or_else(|| DharmaError::Validation("missing watermark".to_string()))?)?;
-        let payload = crate::value::expect_bytes(map_get(map, "payload").ok_or_else(|| DharmaError::Validation("missing payload".to_string()))?)?;
-        let stats_val = map_get(map, "stats").ok_or_else(|| DharmaError::Validation("missing stats".to_string()))?;
+        let req_id = parse_bytes16(
+            map_get(map, "req_id")
+                .ok_or_else(|| DharmaError::Validation("missing req_id".to_string()))?,
+        )?;
+        let status = expect_uint(
+            map_get(map, "status")
+                .ok_or_else(|| DharmaError::Validation("missing status".to_string()))?,
+        )?;
+        let status_u16: u16 = status
+            .try_into()
+            .map_err(|_| DharmaError::Validation("status out of range".to_string()))?;
+        let watermark = expect_uint(
+            map_get(map, "watermark")
+                .ok_or_else(|| DharmaError::Validation("missing watermark".to_string()))?,
+        )?;
+        let payload = crate::value::expect_bytes(
+            map_get(map, "payload")
+                .ok_or_else(|| DharmaError::Validation("missing payload".to_string()))?,
+        )?;
+        let stats_val = map_get(map, "stats")
+            .ok_or_else(|| DharmaError::Validation("missing stats".to_string()))?;
         let stats = ExecStats::from_value(stats_val)?;
         let provenance_val = map_get(map, "provenance");
         let provenance = match provenance_val {
@@ -341,16 +600,31 @@ impl FabricResponse {
 impl ExecStats {
     fn to_value(&self) -> Value {
         Value::Map(vec![
-            (Value::Text("elapsed_ms".to_string()), Value::Integer(self.elapsed_ms.into())),
-            (Value::Text("rows_scanned".to_string()), Value::Integer(self.rows_scanned.into())),
+            (
+                Value::Text("elapsed_ms".to_string()),
+                Value::Integer(self.elapsed_ms.into()),
+            ),
+            (
+                Value::Text("rows_scanned".to_string()),
+                Value::Integer(self.rows_scanned.into()),
+            ),
         ])
     }
 
     fn from_value(value: &Value) -> Result<Self, DharmaError> {
         let map = expect_map(value)?;
-        let elapsed_ms = expect_uint(map_get(map, "elapsed_ms").ok_or_else(|| DharmaError::Validation("missing elapsed_ms".to_string()))?)?;
-        let rows_scanned = expect_uint(map_get(map, "rows_scanned").ok_or_else(|| DharmaError::Validation("missing rows_scanned".to_string()))?)?;
-        Ok(Self { elapsed_ms, rows_scanned })
+        let elapsed_ms = expect_uint(
+            map_get(map, "elapsed_ms")
+                .ok_or_else(|| DharmaError::Validation("missing elapsed_ms".to_string()))?,
+        )?;
+        let rows_scanned = expect_uint(
+            map_get(map, "rows_scanned")
+                .ok_or_else(|| DharmaError::Validation("missing rows_scanned".to_string()))?,
+        )?;
+        Ok(Self {
+            elapsed_ms,
+            rows_scanned,
+        })
     }
 }
 
@@ -418,7 +692,10 @@ mod tests {
 
     #[test]
     fn exec_stats_roundtrip() {
-        let stats = ExecStats { elapsed_ms: 12, rows_scanned: 7 };
+        let stats = ExecStats {
+            elapsed_ms: 12,
+            rows_scanned: 7,
+        };
         let value = stats.to_value();
         let round = ExecStats::from_value(&value).unwrap();
         assert_eq!(round.elapsed_ms, 12);
@@ -429,13 +706,63 @@ mod tests {
     fn dispatch_rejects_custom_query_without_flag() {
         struct Dummy;
         impl FabricDispatcher for Dummy {
-            fn now(&self) -> u64 { 10 }
-            fn exec_action(&self, _: &FabricRequest, _: &SubjectId, _: &str, _: &Value) -> Result<FabricResponse, DharmaError> { unreachable!() }
-            fn exec_query(&self, _: &FabricRequest, _: &SubjectId, _: &str, _: &Value, _: bool) -> Result<FabricResponse, DharmaError> { unreachable!() }
-            fn query_fast(&self, _: &FabricRequest, _: &str, _: &Value, _: &str) -> Result<FabricResponse, DharmaError> { unreachable!() }
-            fn query_wide(&self, _: &FabricRequest, _: &str, _: u32, _: &str) -> Result<FabricResponse, DharmaError> { unreachable!() }
-            fn fetch(&self, _: &FabricRequest, _: &EnvelopeId) -> Result<FabricResponse, DharmaError> { unreachable!() }
-            fn oracle_invoke(&self, _: &FabricRequest, _: &str, _: OracleMode, _: OracleTiming, _: &Value) -> Result<FabricResponse, DharmaError> { unreachable!() }
+            fn now(&self) -> u64 {
+                10
+            }
+            fn exec_action(
+                &self,
+                _: &FabricRequest,
+                _: &SubjectId,
+                _: &str,
+                _: &Value,
+            ) -> Result<FabricResponse, DharmaError> {
+                unreachable!()
+            }
+            fn exec_query(
+                &self,
+                _: &FabricRequest,
+                _: &SubjectId,
+                _: &str,
+                _: &Value,
+                _: bool,
+            ) -> Result<FabricResponse, DharmaError> {
+                unreachable!()
+            }
+            fn query_fast(
+                &self,
+                _: &FabricRequest,
+                _: &str,
+                _: &Value,
+                _: &str,
+            ) -> Result<FabricResponse, DharmaError> {
+                unreachable!()
+            }
+            fn query_wide(
+                &self,
+                _: &FabricRequest,
+                _: &str,
+                _: u32,
+                _: &str,
+            ) -> Result<FabricResponse, DharmaError> {
+                unreachable!()
+            }
+            fn fetch(
+                &self,
+                _: &FabricRequest,
+                _: &EnvelopeId,
+            ) -> Result<FabricResponse, DharmaError> {
+                unreachable!()
+            }
+            fn oracle_invoke(
+                &self,
+                _: &FabricRequest,
+                _: &str,
+                _: OracleMode,
+                _: OracleTiming,
+                _: &Value,
+            ) -> Result<FabricResponse, DharmaError> {
+                unreachable!()
+            }
         }
         let token = CapToken {
             v: 1,
@@ -458,7 +785,11 @@ mod tests {
         let req = FabricRequest {
             req_id: [0u8; 16],
             cap: token,
-            op: FabricOp::QueryFast { table: "invoice".to_string(), key: Value::Integer(1.into()), query: "x".to_string() },
+            op: FabricOp::QueryFast {
+                table: "invoice".to_string(),
+                key: Value::Integer(1.into()),
+                query: "x".to_string(),
+            },
             deadline: 100,
         };
         let err = dispatch(&Dummy, &req).unwrap_err();
@@ -472,7 +803,9 @@ mod tests {
     fn dispatch_enforces_authorizer() {
         struct Dummy;
         impl FabricDispatcher for Dummy {
-            fn now(&self) -> u64 { 10 }
+            fn now(&self) -> u64 {
+                10
+            }
             fn authorize_exec_query(
                 &self,
                 _: &FabricRequest,
@@ -482,12 +815,60 @@ mod tests {
             ) -> Result<(), DharmaError> {
                 Err(DharmaError::Validation("denied".to_string()))
             }
-            fn exec_action(&self, _: &FabricRequest, _: &SubjectId, _: &str, _: &Value) -> Result<FabricResponse, DharmaError> { unreachable!() }
-            fn exec_query(&self, _: &FabricRequest, _: &SubjectId, _: &str, _: &Value, _: bool) -> Result<FabricResponse, DharmaError> { unreachable!() }
-            fn query_fast(&self, _: &FabricRequest, _: &str, _: &Value, _: &str) -> Result<FabricResponse, DharmaError> { unreachable!() }
-            fn query_wide(&self, _: &FabricRequest, _: &str, _: u32, _: &str) -> Result<FabricResponse, DharmaError> { unreachable!() }
-            fn fetch(&self, _: &FabricRequest, _: &EnvelopeId) -> Result<FabricResponse, DharmaError> { unreachable!() }
-            fn oracle_invoke(&self, _: &FabricRequest, _: &str, _: OracleMode, _: OracleTiming, _: &Value) -> Result<FabricResponse, DharmaError> { unreachable!() }
+            fn exec_action(
+                &self,
+                _: &FabricRequest,
+                _: &SubjectId,
+                _: &str,
+                _: &Value,
+            ) -> Result<FabricResponse, DharmaError> {
+                unreachable!()
+            }
+            fn exec_query(
+                &self,
+                _: &FabricRequest,
+                _: &SubjectId,
+                _: &str,
+                _: &Value,
+                _: bool,
+            ) -> Result<FabricResponse, DharmaError> {
+                unreachable!()
+            }
+            fn query_fast(
+                &self,
+                _: &FabricRequest,
+                _: &str,
+                _: &Value,
+                _: &str,
+            ) -> Result<FabricResponse, DharmaError> {
+                unreachable!()
+            }
+            fn query_wide(
+                &self,
+                _: &FabricRequest,
+                _: &str,
+                _: u32,
+                _: &str,
+            ) -> Result<FabricResponse, DharmaError> {
+                unreachable!()
+            }
+            fn fetch(
+                &self,
+                _: &FabricRequest,
+                _: &EnvelopeId,
+            ) -> Result<FabricResponse, DharmaError> {
+                unreachable!()
+            }
+            fn oracle_invoke(
+                &self,
+                _: &FabricRequest,
+                _: &str,
+                _: OracleMode,
+                _: OracleTiming,
+                _: &Value,
+            ) -> Result<FabricResponse, DharmaError> {
+                unreachable!()
+            }
         }
         let subject = SubjectId::from_bytes([4u8; 32]);
         let token = CapToken {

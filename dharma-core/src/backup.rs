@@ -1,7 +1,7 @@
 use crate::domain::DomainState;
 use crate::error::DharmaError;
-use crate::relay::RelayState;
 use crate::ownership::Owner;
+use crate::relay::RelayState;
 use crate::store::state::load_ownership;
 use crate::store::Store;
 use crate::types::SubjectId;
@@ -13,8 +13,13 @@ pub enum BackupPolicyStatus {
         relay_domain: String,
         plan: String,
     },
-    MissingDomainPolicy { domain: String },
-    MissingRelayDomain { domain: String, relay_domain: String },
+    MissingDomainPolicy {
+        domain: String,
+    },
+    MissingRelayDomain {
+        domain: String,
+        relay_domain: String,
+    },
     MissingRelayPlan {
         domain: String,
         relay_domain: String,

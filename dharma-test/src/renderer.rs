@@ -3,10 +3,12 @@ use std::io::{self, Write};
 
 use crossterm::cursor;
 use crossterm::event::{self, Event, KeyCode};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::{backend::CrosstermBackend, Terminal};
@@ -81,7 +83,10 @@ impl Status {
         };
         vec![
             format!("Phase: {}", self.phase),
-            format!("Seed: {} ({}/{})", self.seed, self.seed_index, self.seed_total),
+            format!(
+                "Seed: {} ({}/{})",
+                self.seed, self.seed_index, self.seed_total
+            ),
             format!("Passed: {}  Failed: {}", self.passed, self.failed),
             format!("Current: {}", current),
             format!("Iteration: {}", iter),
@@ -227,7 +232,11 @@ impl TuiRenderer {
 impl Drop for TuiRenderer {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen, cursor::Show);
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            LeaveAlternateScreen,
+            cursor::Show
+        );
         let _ = self.terminal.show_cursor();
     }
 }
@@ -288,7 +297,9 @@ mod tests {
         let lines = status.summary_lines();
         assert!(lines.iter().any(|line| line.contains("Phase: properties")));
         assert!(lines.iter().any(|line| line.contains("Seed: 42 (1/3)")));
-        assert!(lines.iter().any(|line| line.contains("Current: P-CBOR-001")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("Current: P-CBOR-001")));
         assert!(lines.iter().any(|line| line.contains("Iteration: 2/10")));
         assert!(lines.iter().any(|line| line.contains("Nodes: 3")));
     }

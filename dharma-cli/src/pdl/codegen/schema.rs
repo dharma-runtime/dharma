@@ -1,8 +1,8 @@
 use crate::error::DharmaError;
 use crate::pdl::ast::{AstFile, Literal, TypeSpec, Visibility};
-use crate::{dhlp, dhlq};
-use crate::pdl::schema::{ActionSchema, CqrsSchema, FieldSchema, QuerySchema};
 use crate::pdl::schema::ConcurrencyMode as SchemaConcurrency;
+use crate::pdl::schema::{ActionSchema, CqrsSchema, FieldSchema, QuerySchema};
+use crate::{dhlp, dhlq};
 use ciborium::value::Value;
 use std::collections::BTreeMap;
 
@@ -28,7 +28,10 @@ pub fn compile_schema(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
                 },
             );
         }
-        structs.insert(def.name.clone(), crate::pdl::schema::StructSchema { fields });
+        structs.insert(
+            def.name.clone(),
+            crate::pdl::schema::StructSchema { fields },
+        );
     }
     let mut fields = BTreeMap::new();
     let mut field_vis = BTreeMap::new();
@@ -68,7 +71,9 @@ pub fn compile_schema(ast: &AstFile) -> Result<Vec<u8>, DharmaError> {
             arg_vis.insert(arg_name, vis);
         }
         for arg in args.keys() {
-            arg_vis.entry(arg.clone()).or_insert(crate::pdl::schema::Visibility::Public);
+            arg_vis
+                .entry(arg.clone())
+                .or_insert(crate::pdl::schema::Visibility::Public);
         }
         actions.insert(
             action.name.clone(),
@@ -161,7 +166,9 @@ fn type_to_schema(typ: &TypeSpec) -> crate::pdl::schema::TypeSpec {
         TypeSpec::Ref(name) => crate::pdl::schema::TypeSpec::Ref(name.clone()),
         TypeSpec::Struct(name) => crate::pdl::schema::TypeSpec::Struct(name.clone()),
         TypeSpec::GeoPoint => crate::pdl::schema::TypeSpec::GeoPoint,
-        TypeSpec::List(inner) => crate::pdl::schema::TypeSpec::List(Box::new(type_to_schema(inner))),
+        TypeSpec::List(inner) => {
+            crate::pdl::schema::TypeSpec::List(Box::new(type_to_schema(inner)))
+        }
         TypeSpec::Map(key, value) => crate::pdl::schema::TypeSpec::Map(
             Box::new(type_to_schema(key)),
             Box::new(type_to_schema(value)),
@@ -231,11 +238,7 @@ fn derive_arg_visibility(
     let mut flags: BTreeMap<String, (bool, bool)> = BTreeMap::new();
     for assignment in &action.applies {
         let assignment = &assignment.value;
-        let target = assignment
-            .target
-            .first()
-            .map(|s| s.as_str())
-            .unwrap_or("");
+        let target = assignment.target.first().map(|s| s.as_str()).unwrap_or("");
         let name = if target == "state" {
             assignment.target.get(1)
         } else {
@@ -271,22 +274,20 @@ fn collect_arg_refs_inner(expr: &crate::pdl::ast::Expr, out: &mut Vec<String>) {
                 out.push(name);
             }
         }
-        crate::pdl::ast::Expr::Literal(lit) => {
-            match lit {
-                Literal::List(items) => {
-                    for item in items {
-                        collect_arg_refs_inner(item, out);
-                    }
+        crate::pdl::ast::Expr::Literal(lit) => match lit {
+            Literal::List(items) => {
+                for item in items {
+                    collect_arg_refs_inner(item, out);
                 }
-                Literal::Map(entries) => {
-                    for (k, v) in entries {
-                        collect_arg_refs_inner(k, out);
-                        collect_arg_refs_inner(v, out);
-                    }
-                }
-                _ => {}
             }
-        }
+            Literal::Map(entries) => {
+                for (k, v) in entries {
+                    collect_arg_refs_inner(k, out);
+                    collect_arg_refs_inner(v, out);
+                }
+            }
+            _ => {}
+        },
         crate::pdl::ast::Expr::UnaryOp(_, inner) => {
             collect_arg_refs_inner(inner, out);
         }

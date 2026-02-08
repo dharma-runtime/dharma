@@ -20,11 +20,12 @@ use crate::store::state::{
 };
 use crate::store::Store;
 use crate::sync::{
-    Ads, Get, GetAds, Hello, Inventory, Obj, ObjectRef, SubjectInventory, Subscriptions,
-    SyncMessage,
+    Ads, Get, GetAds, Hello, Inventory, Obj, ObjChunk, ObjChunkAssembler, ObjectRef,
+    SubjectInventory, Subscriptions, SyncMessage, CAP_OBJ_CHUNK, CAP_OVERLAY_ACL, CAP_SYNC_RANGE,
 };
 use crate::types::{AssertionId, EnvelopeId, SchemaId, SubjectId};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, warn};
@@ -36,6 +37,43 @@ const TYPE_ERR: u8 = 13;
 const TYPE_AD: u8 = 14;
 const TYPE_ADS: u8 = 15;
 const TYPE_GET_ADS: u8 = 16;
+// Keep chunk payloads comfortably below 1MiB transport frames.
+const DEFAULT_SYNC_OBJ_CHUNK_BYTES: usize = 256 * 1024;
+// Bound in-flight chunk assembly memory per connection.
+const DEFAULT_SYNC_OBJ_BUFFER_BYTES: usize = 32 * 1024 * 1024;
+static SYNC_OBJ_CHUNK_BYTES: AtomicUsize = AtomicUsize::new(DEFAULT_SYNC_OBJ_CHUNK_BYTES);
+static SYNC_OBJ_BUFFER_BYTES: AtomicUsize = AtomicUsize::new(DEFAULT_SYNC_OBJ_BUFFER_BYTES);
+
+pub fn set_sync_obj_chunk_bytes(size: usize) {
+    if size > 0 {
+        SYNC_OBJ_CHUNK_BYTES.store(size, Ordering::Relaxed);
+    }
+}
+
+pub fn set_sync_obj_buffer_bytes(size: usize) {
+    if size > 0 {
+        SYNC_OBJ_BUFFER_BYTES.store(size, Ordering::Relaxed);
+    }
+}
+
+pub fn sync_obj_chunk_bytes() -> usize {
+    env_override_usize("DHARMA_SYNC_OBJ_CHUNK_BYTES")
+        .unwrap_or_else(|| SYNC_OBJ_CHUNK_BYTES.load(Ordering::Relaxed))
+        .max(1)
+}
+
+pub fn sync_obj_buffer_bytes() -> usize {
+    env_override_usize("DHARMA_SYNC_OBJ_BUFFER_BYTES")
+        .unwrap_or_else(|| SYNC_OBJ_BUFFER_BYTES.load(Ordering::Relaxed))
+        .max(1)
+}
+
+fn env_override_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+}
 
 #[derive(Clone, Debug)]
 pub struct SyncOptions {
@@ -108,6 +146,8 @@ pub fn sync_loop_with(
         .clone()
         .unwrap_or_else(|| load_subscriptions(store.root()));
     let peer_hello = exchange_hello(stream, &mut session, identity, &local_subs)?;
+    let peer_supports_obj_chunks = peer_hello.caps.iter().any(|cap| cap == CAP_OBJ_CHUNK);
+    let mut chunk_assembler = ObjChunkAssembler::new(sync_obj_buffer_bytes());
     {
         let subject = peer_hello
             .subject
@@ -119,16 +159,18 @@ pub fn sync_loop_with(
                 peer_id = %peer_hello.peer_id.to_hex(),
                 subject_id = %subject,
                 subs_all,
+                chunked_obj = peer_supports_obj_chunks,
                 "sync hello"
             );
         }
         log_sync(
             &options,
             format!(
-                "sync: hello peer_id={} subject={} subs_all={}",
+                "sync: hello peer_id={} subject={} subs_all={} chunked_obj={}",
                 peer_hello.peer_id.to_hex(),
                 subject,
-                subs_all
+                subs_all,
+                peer_supports_obj_chunks
             ),
         );
     }
@@ -244,52 +286,47 @@ pub fn sync_loop_with(
                         &options,
                         format!("sync: send obj {}", object_ref_hex(&obj.id)),
                     );
-                    send_obj(stream, &mut session, obj)?;
+                    send_obj(stream, &mut session, obj, peer_supports_obj_chunks)?;
                 }
             }
             SyncMessage::Obj(obj) => {
+                chunk_assembler.discard(&obj.id);
+                process_incoming_obj(
+                    stream,
+                    &mut session,
+                    store,
+                    index,
+                    keys,
+                    identity,
+                    &options,
+                    &mut pending_get,
+                    &mut pending_subjects,
+                    obj,
+                )?;
+            }
+            SyncMessage::ObjChunk(chunk) => {
                 log_sync(
                     &options,
-                    format!("sync: recv obj {}", object_ref_hex(&obj.id)),
+                    format!(
+                        "sync: recv obj_chunk {} idx={} done={} bytes={}",
+                        object_ref_hex(&chunk.id),
+                        chunk.idx,
+                        chunk.done,
+                        chunk.bytes.len()
+                    ),
                 );
-                let envelope_id = crate::crypto::envelope_id(&obj.bytes);
-                if crate::store::looks_like_wasm(&obj.bytes) {
-                    store.verify_contract_bytes(&envelope_id, &obj.bytes)?;
-                    let _ = store.put_object(&envelope_id, &obj.bytes);
-                    pending_get.remove(&obj.id);
-                    pending_get.remove(&ObjectRef::Envelope(envelope_id));
-                    let _ = retry_pending(store, index, keys);
-                } else {
-                    let subject_hint = if options.relay {
-                        pending_subjects.remove(&obj.id)
-                    } else {
-                        None
-                    };
-                    let result = if options.relay {
-                        ingest_sync_object_relay(
-                            store,
-                            index,
-                            identity,
-                            envelope_id,
-                            &obj.bytes,
-                            subject_hint.clone(),
-                        )
-                    } else {
-                        ingest_sync_object_normal(store, index, keys, envelope_id, &obj.bytes)
-                    };
-                    handle_sync_object_ingest_result(
+                if let Some(obj) = chunk_assembler.push(chunk)? {
+                    process_incoming_obj(
                         stream,
                         &mut session,
                         store,
                         index,
                         keys,
+                        identity,
                         &options,
-                        &obj,
                         &mut pending_get,
                         &mut pending_subjects,
-                        subject_hint,
-                        options.relay,
-                        result,
+                        obj,
                     )?;
                 }
             }
@@ -347,6 +384,66 @@ pub fn sync_loop_with(
         }
         let _ = t; // reserved for future type checks
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_incoming_obj(
+    stream: &mut dyn ReadWrite,
+    session: &mut Session,
+    store: &Store,
+    index: &mut FrontierIndex,
+    keys: &mut Keyring,
+    identity: &IdentityState,
+    options: &SyncOptions,
+    pending_get: &mut HashSet<ObjectRef>,
+    pending_subjects: &mut HashMap<ObjectRef, SubjectId>,
+    obj: Obj,
+) -> Result<(), DharmaError> {
+    log_sync(
+        options,
+        format!("sync: recv obj {}", object_ref_hex(&obj.id)),
+    );
+    let envelope_id = crate::crypto::envelope_id(&obj.bytes);
+    if crate::store::looks_like_wasm(&obj.bytes) {
+        store.verify_contract_bytes(&envelope_id, &obj.bytes)?;
+        let _ = store.put_object(&envelope_id, &obj.bytes);
+        pending_get.remove(&obj.id);
+        pending_get.remove(&ObjectRef::Envelope(envelope_id));
+        let _ = retry_pending(store, index, keys);
+        return Ok(());
+    }
+
+    let subject_hint = if options.relay {
+        pending_subjects.remove(&obj.id)
+    } else {
+        None
+    };
+    let result = if options.relay {
+        ingest_sync_object_relay(
+            store,
+            index,
+            identity,
+            envelope_id,
+            &obj.bytes,
+            subject_hint.clone(),
+        )
+    } else {
+        ingest_sync_object_normal(store, index, keys, envelope_id, &obj.bytes)
+    };
+    handle_sync_object_ingest_result(
+        stream,
+        session,
+        store,
+        index,
+        keys,
+        options,
+        &obj,
+        pending_get,
+        pending_subjects,
+        subject_hint,
+        options.relay,
+        result,
+    )
 }
 
 fn ingest_sync_object_relay(
@@ -569,9 +666,73 @@ fn send_obj(
     stream: &mut dyn ReadWrite,
     session: &mut Session,
     obj: Obj,
+    peer_supports_obj_chunks: bool,
 ) -> Result<(), DharmaError> {
-    let msg = SyncMessage::Obj(obj);
-    send_msg(stream, session, &msg)
+    let frame_limit = crate::net::codec::max_frame_size();
+    let clearly_too_large = obj.bytes.len() > frame_limit.saturating_sub(1024);
+    if clearly_too_large {
+        if !peer_supports_obj_chunks {
+            return Err(DharmaError::Network(
+                "frame too large; peer lacks sync.obj.chunk capability".to_string(),
+            ));
+        }
+        return send_obj_chunked(stream, session, obj);
+    }
+
+    let msg = SyncMessage::Obj(obj.clone());
+    match send_msg(stream, session, &msg) {
+        Ok(()) => Ok(()),
+        Err(DharmaError::Network(reason)) if is_frame_too_large_error(&reason) => {
+            if !peer_supports_obj_chunks {
+                return Err(DharmaError::Network(
+                    "frame too large; peer lacks sync.obj.chunk capability".to_string(),
+                ));
+            }
+            send_obj_chunked(stream, session, obj)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn send_obj_chunked(
+    stream: &mut dyn ReadWrite,
+    session: &mut Session,
+    obj: Obj,
+) -> Result<(), DharmaError> {
+    let mut offset = 0usize;
+    let mut idx = 0u64;
+    let mut chunk_bytes = sync_obj_chunk_bytes().min(obj.bytes.len().max(1));
+    while offset < obj.bytes.len() {
+        let remaining = obj.bytes.len() - offset;
+        let take = remaining.min(chunk_bytes);
+        let done = offset + take == obj.bytes.len();
+        let msg = SyncMessage::ObjChunk(ObjChunk {
+            id: obj.id.clone(),
+            idx,
+            done,
+            bytes: obj.bytes[offset..offset + take].to_vec(),
+        });
+        match send_msg(stream, session, &msg) {
+            Ok(()) => {
+                offset += take;
+                idx = idx.saturating_add(1);
+            }
+            Err(DharmaError::Network(reason)) if is_frame_too_large_error(&reason) => {
+                if take <= 1 {
+                    return Err(DharmaError::Network(
+                        "frame too small for obj chunk metadata".to_string(),
+                    ));
+                }
+                chunk_bytes = (take / 2).max(1);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+fn is_frame_too_large_error(reason: &str) -> bool {
+    reason.to_lowercase().contains("frame too large")
 }
 
 fn send_msg(
@@ -582,7 +743,7 @@ fn send_msg(
     let (t, payload) = match msg {
         SyncMessage::Inv(_) => (TYPE_INV, msg.to_cbor()?),
         SyncMessage::Get(_) => (TYPE_GET, msg.to_cbor()?),
-        SyncMessage::Obj(_) => (TYPE_OBJ, msg.to_cbor()?),
+        SyncMessage::Obj(_) | SyncMessage::ObjChunk(_) => (TYPE_OBJ, msg.to_cbor()?),
         SyncMessage::Ad(_) => (TYPE_AD, msg.to_cbor()?),
         SyncMessage::Ads(_) => (TYPE_ADS, msg.to_cbor()?),
         SyncMessage::GetAds(_) => (TYPE_GET_ADS, msg.to_cbor()?),
@@ -653,7 +814,11 @@ fn exchange_hello(
         peer_id: identity.public_key,
         hpke_pk: keys::hpke_public_key_from_secret(&identity.noise_sk),
         suites: vec![1],
-        caps: vec!["sync.range".to_string(), "overlay.acl".to_string()],
+        caps: vec![
+            CAP_SYNC_RANGE.to_string(),
+            CAP_OVERLAY_ACL.to_string(),
+            CAP_OBJ_CHUNK.to_string(),
+        ],
         subs: Some(subs.clone()),
         subject: Some(identity.subject_id),
         note: None,
@@ -1149,6 +1314,24 @@ mod tests {
     use ciborium::value::Value;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
+    use std::io::Cursor;
+    use std::sync::Mutex;
+
+    static LIMIT_LOCK: Mutex<()> = Mutex::new(());
+
+    struct SyncLimitRestore {
+        frame_size: usize,
+        chunk_bytes: usize,
+        buffer_bytes: usize,
+    }
+
+    impl Drop for SyncLimitRestore {
+        fn drop(&mut self) {
+            crate::net::codec::set_max_frame_size(self.frame_size);
+            set_sync_obj_chunk_bytes(self.chunk_bytes);
+            set_sync_obj_buffer_bytes(self.buffer_bytes);
+        }
+    }
 
     fn action_assertion_bytes(
         subject: SubjectId,
@@ -1211,6 +1394,79 @@ mod tests {
         )]);
         let assertion = AssertionPlaintext::sign(header, body, signing_key).unwrap();
         assertion.to_cbor().unwrap()
+    }
+
+    #[test]
+    fn send_obj_chunks_when_frame_limit_is_tight() {
+        let _limit_guard = LIMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = SyncLimitRestore {
+            frame_size: crate::net::codec::max_frame_size(),
+            chunk_bytes: sync_obj_chunk_bytes(),
+            buffer_bytes: sync_obj_buffer_bytes(),
+        };
+        crate::net::codec::set_max_frame_size(1_048_576);
+        set_sync_obj_chunk_bytes(600_000);
+        set_sync_obj_buffer_bytes(4 * 1024 * 1024);
+
+        let mut stream = Cursor::new(Vec::<u8>::new());
+        let mut sender = Session::new([1u8; 32], [2u8; 32]);
+        let expected = Obj {
+            id: ObjectRef::Envelope(EnvelopeId::from_bytes([21u8; 32])),
+            bytes: vec![7u8; 1_200_000],
+        };
+        send_obj(&mut stream, &mut sender, expected.clone(), true).unwrap();
+
+        stream.set_position(0);
+        let mut receiver = Session::new([3u8; 32], [1u8; 32]);
+        let mut assembler = ObjChunkAssembler::new(4 * 1024 * 1024);
+        let mut saw_chunk = false;
+        let mut received = None;
+        loop {
+            let Some(frame) = crate::net::codec::read_frame_optional(&mut stream).unwrap() else {
+                break;
+            };
+            let (_t, payload) = receiver.decrypt(&frame).unwrap();
+            let msg = SyncMessage::from_cbor(&payload).unwrap();
+            match msg {
+                SyncMessage::ObjChunk(chunk) => {
+                    saw_chunk = true;
+                    if let Some(obj) = assembler.push(chunk).unwrap() {
+                        received = Some(obj);
+                    }
+                }
+                SyncMessage::Obj(obj) => {
+                    received = Some(obj);
+                }
+                other => panic!("unexpected sync message: {other:?}"),
+            }
+        }
+        assert!(saw_chunk);
+        assert_eq!(received.unwrap(), expected);
+    }
+
+    #[test]
+    fn send_obj_requires_chunk_capability_for_large_payloads() {
+        let _limit_guard = LIMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = SyncLimitRestore {
+            frame_size: crate::net::codec::max_frame_size(),
+            chunk_bytes: sync_obj_chunk_bytes(),
+            buffer_bytes: sync_obj_buffer_bytes(),
+        };
+        crate::net::codec::set_max_frame_size(1_048_576);
+        set_sync_obj_chunk_bytes(600_000);
+        set_sync_obj_buffer_bytes(4 * 1024 * 1024);
+
+        let mut stream = Cursor::new(Vec::<u8>::new());
+        let mut sender = Session::new([4u8; 32], [5u8; 32]);
+        let obj = Obj {
+            id: ObjectRef::Envelope(EnvelopeId::from_bytes([22u8; 32])),
+            bytes: vec![9u8; 1_200_000],
+        };
+        let err = send_obj(&mut stream, &mut sender, obj, false).unwrap_err();
+        match err {
+            DharmaError::Network(reason) => assert!(reason.contains("peer lacks sync.obj.chunk")),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

@@ -42,7 +42,12 @@ impl ContactState {
                 .is_some_and(|contact| contact.as_bytes() == signer.as_bytes())
     }
 
-    fn apply_action(&mut self, signer: &IdentityKey, action: &str, body: &Value) -> Result<(), DharmaError> {
+    fn apply_action(
+        &mut self,
+        signer: &IdentityKey,
+        action: &str,
+        body: &Value,
+    ) -> Result<(), DharmaError> {
         match action {
             "Create" => {
                 let contact = parse_optional_identity(body, "contact")?;
@@ -82,7 +87,10 @@ impl ContactState {
                 if self.contact.is_none() {
                     return Ok(());
                 }
-                if self.requested_by.is_some_and(|id| id.as_bytes() == signer.as_bytes()) {
+                if self
+                    .requested_by
+                    .is_some_and(|id| id.as_bytes() == signer.as_bytes())
+                {
                     return Ok(());
                 }
                 if !self.is_owner_or_contact(signer) {
@@ -97,7 +105,10 @@ impl ContactState {
                 if self.contact.is_none() {
                     return Ok(());
                 }
-                if self.requested_by.is_some_and(|id| id.as_bytes() == signer.as_bytes()) {
+                if self
+                    .requested_by
+                    .is_some_and(|id| id.as_bytes() == signer.as_bytes())
+                {
                     return Ok(());
                 }
                 if !self.is_owner_or_contact(signer) {
@@ -156,7 +167,11 @@ fn parse_optional_identity(body: &Value, key: &str) -> Result<Option<IdentityKey
 }
 
 pub fn contact_subject_id(a: &IdentityKey, b: &IdentityKey) -> SubjectId {
-    let (lo, hi) = if a.as_bytes() <= b.as_bytes() { (a, b) } else { (b, a) };
+    let (lo, hi) = if a.as_bytes() <= b.as_bytes() {
+        (a, b)
+    } else {
+        (b, a)
+    };
     let mut buf = Vec::with_capacity(7 + 64);
     buf.extend_from_slice(b"contact");
     buf.extend_from_slice(lo.as_bytes());
@@ -164,7 +179,11 @@ pub fn contact_subject_id(a: &IdentityKey, b: &IdentityKey) -> SubjectId {
     SubjectId::from_bytes(crypto::sha256(&buf))
 }
 
-pub fn relation(store: &Store, a: &IdentityKey, b: &IdentityKey) -> Result<ContactRelation, DharmaError> {
+pub fn relation(
+    store: &Store,
+    a: &IdentityKey,
+    b: &IdentityKey,
+) -> Result<ContactRelation, DharmaError> {
     let subject = contact_subject_id(a, b);
     let records = list_assertions(store.env(), &subject)?;
     if records.is_empty() {
@@ -211,8 +230,8 @@ mod tests {
     use crate::builtins;
     use crate::store::state::append_assertion;
     use crate::types::{AssertionId, ContractId, SchemaId};
-    use rand::SeedableRng;
     use rand::rngs::StdRng;
+    use rand::SeedableRng;
 
     fn append_contact_action(
         store: &Store,
@@ -245,7 +264,16 @@ mod tests {
         let bytes = assertion.to_cbor().unwrap();
         let assertion_id = assertion.assertion_id().unwrap();
         let envelope_id = crypto::envelope_id(&bytes);
-        append_assertion(store.env(), subject, seq, assertion_id, envelope_id, &assertion.header.typ, &bytes).unwrap();
+        append_assertion(
+            store.env(),
+            subject,
+            seq,
+            assertion_id,
+            envelope_id,
+            &assertion.header.typ,
+            &bytes,
+        )
+        .unwrap();
         assertion_id
     }
 
@@ -271,8 +299,14 @@ mod tests {
         let mut seq = 1;
         let mut prev = None;
         let create_body = Value::Map(vec![
-            (Value::Text("contact".to_string()), Value::Bytes(contact_id.as_bytes().to_vec())),
-            (Value::Text("alias".to_string()), Value::Text("buddy".to_string())),
+            (
+                Value::Text("contact".to_string()),
+                Value::Bytes(contact_id.as_bytes().to_vec()),
+            ),
+            (
+                Value::Text("alias".to_string()),
+                Value::Text("buddy".to_string()),
+            ),
         ]);
         let create_id = append_contact_action(
             &store,
@@ -288,9 +322,10 @@ mod tests {
         );
         prev = Some(create_id);
         seq += 1;
-        let request_body = Value::Map(vec![
-            (Value::Text("other".to_string()), Value::Bytes(contact_id.as_bytes().to_vec())),
-        ]);
+        let request_body = Value::Map(vec![(
+            Value::Text("other".to_string()),
+            Value::Bytes(contact_id.as_bytes().to_vec()),
+        )]);
         let request_id = append_contact_action(
             &store,
             &subject,
@@ -333,8 +368,14 @@ mod tests {
         let mut seq = 1;
         let mut prev = None;
         let create_body = Value::Map(vec![
-            (Value::Text("contact".to_string()), Value::Bytes(contact_id.as_bytes().to_vec())),
-            (Value::Text("alias".to_string()), Value::Text("buddy".to_string())),
+            (
+                Value::Text("contact".to_string()),
+                Value::Bytes(contact_id.as_bytes().to_vec()),
+            ),
+            (
+                Value::Text("alias".to_string()),
+                Value::Text("buddy".to_string()),
+            ),
         ]);
         let create_id = append_contact_action(
             &store,
@@ -350,9 +391,10 @@ mod tests {
         );
         prev = Some(create_id);
         seq += 1;
-        let request_body = Value::Map(vec![
-            (Value::Text("other".to_string()), Value::Bytes(contact_id.as_bytes().to_vec())),
-        ]);
+        let request_body = Value::Map(vec![(
+            Value::Text("other".to_string()),
+            Value::Bytes(contact_id.as_bytes().to_vec()),
+        )]);
         let request_id = append_contact_action(
             &store,
             &subject,
@@ -395,8 +437,14 @@ mod tests {
         let mut seq = 1;
         let mut prev = None;
         let create_body = Value::Map(vec![
-            (Value::Text("contact".to_string()), Value::Bytes(contact_id.as_bytes().to_vec())),
-            (Value::Text("alias".to_string()), Value::Text("buddy".to_string())),
+            (
+                Value::Text("contact".to_string()),
+                Value::Bytes(contact_id.as_bytes().to_vec()),
+            ),
+            (
+                Value::Text("alias".to_string()),
+                Value::Text("buddy".to_string()),
+            ),
         ]);
         let create_id = append_contact_action(
             &store,

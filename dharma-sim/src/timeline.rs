@@ -1,14 +1,27 @@
+use crate::net::{FaultConfig, NodeId};
 use crate::scheduler::SimScheduler;
 use crate::{ClockFaultConfig, FsFaultConfig};
-use crate::net::{FaultConfig, NodeId};
 
 #[derive(Clone, Debug)]
 pub enum FaultEvent {
     Net(FaultConfig),
-    Partition { a: NodeId, b: NodeId, blocked: bool },
-    Online { node: NodeId, online: bool },
-    Fs { node: NodeId, config: FsFaultConfig },
-    Clock { node: NodeId, config: ClockFaultConfig },
+    Partition {
+        a: NodeId,
+        b: NodeId,
+        blocked: bool,
+    },
+    Online {
+        node: NodeId,
+        online: bool,
+    },
+    Fs {
+        node: NodeId,
+        config: FsFaultConfig,
+    },
+    Clock {
+        node: NodeId,
+        config: ClockFaultConfig,
+    },
 }
 
 pub struct FaultTimeline {

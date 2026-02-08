@@ -1,9 +1,9 @@
 use crate::assertion::AssertionHeader;
 use crate::env::{Env, StdEnv};
 use crate::error::DharmaError;
-use crate::store::Store;
-use crate::store::pending::{append_pending, read_pending, PendingOp};
 use crate::keys::Keyring;
+use crate::store::pending::{append_pending, read_pending, PendingOp};
+use crate::store::Store;
 use crate::types::{AssertionId, EnvelopeId, SubjectId};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -93,7 +93,12 @@ impl FrontierIndex {
         self.tips.keys().copied().collect()
     }
 
-    pub fn update(&mut self, assertion_id: AssertionId, envelope_id: EnvelopeId, header: &AssertionHeader) -> Result<(), DharmaError> {
+    pub fn update(
+        &mut self,
+        assertion_id: AssertionId,
+        envelope_id: EnvelopeId,
+        header: &AssertionHeader,
+    ) -> Result<(), DharmaError> {
         self.envelopes.insert(envelope_id);
         let tips = self
             .tips
@@ -137,7 +142,9 @@ impl FrontierIndex {
         if root.as_os_str().is_empty() {
             return false;
         }
-        let path = root.join("objects").join(format!("{}.obj", envelope_id.to_hex()));
+        let path = root
+            .join("objects")
+            .join(format!("{}.obj", envelope_id.to_hex()));
         self.env.exists(&path)
     }
 
@@ -470,8 +477,7 @@ mod tests {
         let (signing_key, _) = crypto::generate_identity_keypair(&mut rng);
         let subject = SubjectId::from_bytes([9u8; 32]);
         let first = write_plain_assertion(&store, subject, &signing_key, 1, None);
-        let second =
-            write_plain_assertion(&store, subject, &signing_key, 2, Some(first));
+        let second = write_plain_assertion(&store, subject, &signing_key, 2, Some(first));
 
         let index = FrontierIndex::new(temp.path()).unwrap();
         let tips = index.get_tips(&subject);
@@ -489,14 +495,8 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(12);
         let (signing_key, _) = crypto::generate_identity_keypair(&mut rng);
         let subject = SubjectId::from_bytes([10u8; 32]);
-        let action_id = write_plain_assertion_with_type(
-            &store,
-            subject,
-            &signing_key,
-            1,
-            None,
-            "action.Touch",
-        );
+        let action_id =
+            write_plain_assertion_with_type(&store, subject, &signing_key, 1, None, "action.Touch");
 
         let index = FrontierIndex::new(temp.path()).unwrap();
         let tips = index.get_tips(&subject);
@@ -533,8 +533,12 @@ mod tests {
             ..header1.clone()
         };
 
-        index.update(id1, EnvelopeId::from_bytes(*id1.as_bytes()), &header1).unwrap();
-        index.update(id2, EnvelopeId::from_bytes(*id2.as_bytes()), &header2).unwrap();
+        index
+            .update(id1, EnvelopeId::from_bytes(*id1.as_bytes()), &header1)
+            .unwrap();
+        index
+            .update(id2, EnvelopeId::from_bytes(*id2.as_bytes()), &header2)
+            .unwrap();
 
         let tips = index.get_tips(&subject);
         assert_eq!(tips.len(), 1);
@@ -565,14 +569,32 @@ mod tests {
         let fork_b = AssertionId::from_bytes([12u8; 32]);
         let merge_id = AssertionId::from_bytes([13u8; 32]);
 
-        index.update(base_id, EnvelopeId::from_bytes(*base_id.as_bytes()), &header).unwrap();
+        index
+            .update(
+                base_id,
+                EnvelopeId::from_bytes(*base_id.as_bytes()),
+                &header,
+            )
+            .unwrap();
         let fork_header = AssertionHeader {
             seq: 2,
             prev: Some(base_id),
             ..header.clone()
         };
-        index.update(fork_a, EnvelopeId::from_bytes(*fork_a.as_bytes()), &fork_header).unwrap();
-        index.update(fork_b, EnvelopeId::from_bytes(*fork_b.as_bytes()), &fork_header).unwrap();
+        index
+            .update(
+                fork_a,
+                EnvelopeId::from_bytes(*fork_a.as_bytes()),
+                &fork_header,
+            )
+            .unwrap();
+        index
+            .update(
+                fork_b,
+                EnvelopeId::from_bytes(*fork_b.as_bytes()),
+                &fork_header,
+            )
+            .unwrap();
         let tips = index.get_tips_for_ver(&subject, DEFAULT_DATA_VERSION);
         assert_eq!(tips.len(), 2);
 
@@ -583,7 +605,13 @@ mod tests {
             typ: "core.merge".to_string(),
             ..header
         };
-        index.update(merge_id, EnvelopeId::from_bytes(*merge_id.as_bytes()), &merge_header).unwrap();
+        index
+            .update(
+                merge_id,
+                EnvelopeId::from_bytes(*merge_id.as_bytes()),
+                &merge_header,
+            )
+            .unwrap();
         let tips = index.get_tips_for_ver(&subject, DEFAULT_DATA_VERSION);
         assert_eq!(tips, vec![merge_id]);
     }
@@ -613,8 +641,12 @@ mod tests {
         };
         let id_v1 = AssertionId::from_bytes([9u8; 32]);
         let id_v2 = AssertionId::from_bytes([10u8; 32]);
-        index.update(id_v1, EnvelopeId::from_bytes(*id_v1.as_bytes()), &header_v1).unwrap();
-        index.update(id_v2, EnvelopeId::from_bytes(*id_v2.as_bytes()), &header_v2).unwrap();
+        index
+            .update(id_v1, EnvelopeId::from_bytes(*id_v1.as_bytes()), &header_v1)
+            .unwrap();
+        index
+            .update(id_v2, EnvelopeId::from_bytes(*id_v2.as_bytes()), &header_v2)
+            .unwrap();
         let tips_all = index.get_tips(&subject);
         assert_eq!(tips_all.len(), 2);
         assert!(tips_all.contains(&id_v1));
@@ -652,14 +684,24 @@ mod tests {
         let id_v2 = AssertionId::from_bytes([10u8; 32]);
         let id_v1_next = AssertionId::from_bytes([12u8; 32]);
 
-        index.update(id_v1, EnvelopeId::from_bytes(*id_v1.as_bytes()), &header_v1).unwrap();
-        index.update(id_v2, EnvelopeId::from_bytes(*id_v2.as_bytes()), &header_v2).unwrap();
+        index
+            .update(id_v1, EnvelopeId::from_bytes(*id_v1.as_bytes()), &header_v1)
+            .unwrap();
+        index
+            .update(id_v2, EnvelopeId::from_bytes(*id_v2.as_bytes()), &header_v2)
+            .unwrap();
         let header_v1_next = AssertionHeader {
             seq: 2,
             prev: Some(id_v1),
             ..header_v1.clone()
         };
-        index.update(id_v1_next, EnvelopeId::from_bytes(*id_v1_next.as_bytes()), &header_v1_next).unwrap();
+        index
+            .update(
+                id_v1_next,
+                EnvelopeId::from_bytes(*id_v1_next.as_bytes()),
+                &header_v1_next,
+            )
+            .unwrap();
         index.compact().unwrap();
 
         let index = FrontierIndex::new(temp.path()).unwrap();

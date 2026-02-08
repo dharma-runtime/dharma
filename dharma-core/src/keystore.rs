@@ -2,9 +2,9 @@ use crate::cbor;
 use crate::error::DharmaError;
 use crate::types::{ContractId, IdentityKey, SchemaId, SubjectId};
 use argon2::{Argon2, Params, Version};
-use ciborium::value::Value;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use ciborium::value::Value;
 use ed25519_dalek::SigningKey;
 use rand_core::OsRng;
 use rand_core::RngCore;
@@ -61,13 +61,19 @@ pub fn encrypt_key(data: &KeystoreData, passphrase: &str) -> Result<Vec<u8>, Dha
             Value::Text("v".to_string()),
             Value::Integer((KEYSTORE_VERSION as u64).into()),
         ),
-        (Value::Text("kdf".to_string()), Value::Text("argon2id".to_string())),
+        (
+            Value::Text("kdf".to_string()),
+            Value::Text("argon2id".to_string()),
+        ),
         (
             Value::Text("kdf_params".to_string()),
             kdf_params_value(KDF_PARAMS_V2),
         ),
         (Value::Text("salt".to_string()), Value::Bytes(salt.to_vec())),
-        (Value::Text("nonce".to_string()), Value::Bytes(nonce.to_vec())),
+        (
+            Value::Text("nonce".to_string()),
+            Value::Bytes(nonce.to_vec()),
+        ),
         (Value::Text("ct".to_string()), Value::Bytes(ct)),
     ]);
 
@@ -91,13 +97,16 @@ pub fn decrypt_key(blob: &[u8], passphrase: &str) -> Result<KeystoreData, Dharma
         .map(parse_kdf_params)
         .transpose()?;
     let salt = crate::value::expect_bytes(
-        crate::value::map_get(map, "salt").ok_or_else(|| DharmaError::Validation("missing salt".to_string()))?,
+        crate::value::map_get(map, "salt")
+            .ok_or_else(|| DharmaError::Validation("missing salt".to_string()))?,
     )?;
     let nonce = crate::value::expect_bytes(
-        crate::value::map_get(map, "nonce").ok_or_else(|| DharmaError::Validation("missing nonce".to_string()))?,
+        crate::value::map_get(map, "nonce")
+            .ok_or_else(|| DharmaError::Validation("missing nonce".to_string()))?,
     )?;
     let ct = crate::value::expect_bytes(
-        crate::value::map_get(map, "ct").ok_or_else(|| DharmaError::Validation("missing ct".to_string()))?,
+        crate::value::map_get(map, "ct")
+            .ok_or_else(|| DharmaError::Validation("missing ct".to_string()))?,
     )?;
 
     let params = match kdf_params {
@@ -128,8 +137,13 @@ fn derive_key_with_params(
     if params.output_len != 32 {
         return Err(DharmaError::Kdf("unsupported key length".to_string()));
     }
-    let params = Params::new(params.m_cost, params.t_cost, params.p_cost, Some(params.output_len))
-        .map_err(|e| DharmaError::Kdf(e.to_string()))?;
+    let params = Params::new(
+        params.m_cost,
+        params.t_cost,
+        params.p_cost,
+        Some(params.output_len),
+    )
+    .map_err(|e| DharmaError::Kdf(e.to_string()))?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, Version::V0x13, params);
     let mut key = [0u8; 32];
     argon2.hash_password_into(passphrase.as_bytes(), salt, &mut key)?;
@@ -175,14 +189,14 @@ fn parse_kdf_params(value: &Value) -> Result<KdfParams, DharmaError> {
         crate::value::map_get(map, "len")
             .ok_or_else(|| DharmaError::Validation("missing kdf len".to_string()))?,
     )?;
-    let m_cost = u32::try_from(m)
-        .map_err(|_| DharmaError::Validation("invalid kdf m".to_string()))?;
-    let t_cost = u32::try_from(t)
-        .map_err(|_| DharmaError::Validation("invalid kdf t".to_string()))?;
-    let p_cost = u32::try_from(p)
-        .map_err(|_| DharmaError::Validation("invalid kdf p".to_string()))?;
-    let output_len = usize::try_from(len)
-        .map_err(|_| DharmaError::Validation("invalid kdf len".to_string()))?;
+    let m_cost =
+        u32::try_from(m).map_err(|_| DharmaError::Validation("invalid kdf m".to_string()))?;
+    let t_cost =
+        u32::try_from(t).map_err(|_| DharmaError::Validation("invalid kdf t".to_string()))?;
+    let p_cost =
+        u32::try_from(p).map_err(|_| DharmaError::Validation("invalid kdf p".to_string()))?;
+    let output_len =
+        usize::try_from(len).map_err(|_| DharmaError::Validation("invalid kdf len".to_string()))?;
     Ok(KdfParams {
         m_cost,
         t_cost,
@@ -227,10 +241,10 @@ fn plaintext_value(data: &KeystoreData) -> Value {
 
 fn parse_plaintext(value: &Value) -> Result<KeystoreData, DharmaError> {
     let map = crate::value::expect_map(value)?;
-    let root_bytes = crate::value::map_get(map, "root_sk")
-        .or_else(|| crate::value::map_get(map, "sk"));
-    let device_bytes = crate::value::map_get(map, "device_sk")
-        .or_else(|| crate::value::map_get(map, "sk"));
+    let root_bytes =
+        crate::value::map_get(map, "root_sk").or_else(|| crate::value::map_get(map, "sk"));
+    let device_bytes =
+        crate::value::map_get(map, "device_sk").or_else(|| crate::value::map_get(map, "sk"));
     let root_bytes = crate::value::expect_bytes(
         root_bytes.ok_or_else(|| DharmaError::Validation("missing root_sk".to_string()))?,
     )?;
@@ -241,19 +255,27 @@ fn parse_plaintext(value: &Value) -> Result<KeystoreData, DharmaError> {
         .map(|v| crate::value::expect_bytes(v))
         .transpose()?;
     let identity_bytes = crate::value::expect_bytes(
-        crate::value::map_get(map, "identity").ok_or_else(|| DharmaError::Validation("missing identity".to_string()))?,
+        crate::value::map_get(map, "identity")
+            .ok_or_else(|| DharmaError::Validation("missing identity".to_string()))?,
     )?;
     let subject_key = crate::value::expect_bytes(
-        crate::value::map_get(map, "subject_key").ok_or_else(|| DharmaError::Validation("missing subject_key".to_string()))?,
+        crate::value::map_get(map, "subject_key")
+            .ok_or_else(|| DharmaError::Validation("missing subject_key".to_string()))?,
     )?;
     let schema_bytes = crate::value::expect_bytes(
-        crate::value::map_get(map, "schema").ok_or_else(|| DharmaError::Validation("missing schema".to_string()))?,
+        crate::value::map_get(map, "schema")
+            .ok_or_else(|| DharmaError::Validation("missing schema".to_string()))?,
     )?;
     let contract_bytes = crate::value::expect_bytes(
-        crate::value::map_get(map, "contract").ok_or_else(|| DharmaError::Validation("missing contract".to_string()))?,
+        crate::value::map_get(map, "contract")
+            .ok_or_else(|| DharmaError::Validation("missing contract".to_string()))?,
     )?;
 
-    if root_bytes.len() != 32 || device_bytes.len() != 32 || identity_bytes.len() != 32 || subject_key.len() != 32 {
+    if root_bytes.len() != 32
+        || device_bytes.len() != 32
+        || identity_bytes.len() != 32
+        || subject_key.len() != 32
+    {
         return Err(DharmaError::Validation("invalid key lengths".to_string()));
     }
     let mut root_sk = [0u8; 32];
@@ -263,7 +285,9 @@ fn parse_plaintext(value: &Value) -> Result<KeystoreData, DharmaError> {
     let noise_sk = match noise_bytes {
         Some(bytes) => {
             if bytes.len() != 32 {
-                return Err(DharmaError::Validation("invalid noise key length".to_string()));
+                return Err(DharmaError::Validation(
+                    "invalid noise key length".to_string(),
+                ));
             }
             let mut out = [0u8; 32];
             out.copy_from_slice(&bytes);
@@ -342,9 +366,15 @@ mod tests {
                 Value::Text("v".to_string()),
                 Value::Integer((LEGACY_KEYSTORE_VERSION as u64).into()),
             ),
-            (Value::Text("kdf".to_string()), Value::Text("argon2id".to_string())),
+            (
+                Value::Text("kdf".to_string()),
+                Value::Text("argon2id".to_string()),
+            ),
             (Value::Text("salt".to_string()), Value::Bytes(salt.to_vec())),
-            (Value::Text("nonce".to_string()), Value::Bytes(nonce.to_vec())),
+            (
+                Value::Text("nonce".to_string()),
+                Value::Bytes(nonce.to_vec()),
+            ),
             (Value::Text("ct".to_string()), Value::Bytes(ct)),
         ]);
         cbor::encode_canonical_value(&outer).unwrap()
@@ -381,7 +411,8 @@ mod tests {
         let m = crate::value::expect_uint(crate::value::map_get(params_map, "m").unwrap()).unwrap();
         let t = crate::value::expect_uint(crate::value::map_get(params_map, "t").unwrap()).unwrap();
         let p = crate::value::expect_uint(crate::value::map_get(params_map, "p").unwrap()).unwrap();
-        let len = crate::value::expect_uint(crate::value::map_get(params_map, "len").unwrap()).unwrap();
+        let len =
+            crate::value::expect_uint(crate::value::map_get(params_map, "len").unwrap()).unwrap();
         assert_eq!(m, KDF_PARAMS_V2.m_cost as u64);
         assert_eq!(t, KDF_PARAMS_V2.t_cost as u64);
         assert_eq!(p, KDF_PARAMS_V2.p_cost as u64);

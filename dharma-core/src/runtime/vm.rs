@@ -4,23 +4,16 @@ use crate::identity;
 use crate::pdl::schema::DEFAULT_TEXT_LEN;
 use crate::runtime::remote;
 use crate::types::SubjectId;
-use crate::value::{expect_array, expect_bool, expect_bytes, expect_int, expect_map, expect_text, expect_uint, map_get};
-use wasmi::{
-    Caller,
-    Config,
-    Engine,
-    Extern,
-    FuelConsumptionMode,
-    Instance,
-    Linker,
-    Memory,
-    Module,
-    Store,
-    StoreLimits,
-    StoreLimitsBuilder,
+use crate::value::{
+    expect_array, expect_bool, expect_bytes, expect_int, expect_map, expect_text, expect_uint,
+    map_get,
 };
-use wasmi::core::Trap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use wasmi::core::Trap;
+use wasmi::{
+    Caller, Config, Engine, Extern, FuelConsumptionMode, Instance, Linker, Memory, Module, Store,
+    StoreLimits, StoreLimitsBuilder,
+};
 
 pub const STATE_BASE: usize = 0x0000;
 pub const OVERLAY_BASE: usize = 0x1000;
@@ -295,9 +288,8 @@ fn read_int_host(
     };
     let (subject, seq) = read_subject_ref_arg(&memory, &caller, subject_ptr)?;
     let path = read_text_arg(&memory, &caller, path_ptr)?;
-    let (typ, value) =
-        remote::read_remote_field(caller.data().env, &subject, seq, &path)
-            .map_err(|e| Trap::new(e.to_string()))?;
+    let (typ, value) = remote::read_remote_field(caller.data().env, &subject, seq, &path)
+        .map_err(|e| Trap::new(e.to_string()))?;
     if !matches!(
         typ,
         crate::pdl::schema::TypeSpec::Int
@@ -322,9 +314,8 @@ fn read_bool_host(
     };
     let (subject, seq) = read_subject_ref_arg(&memory, &caller, subject_ptr)?;
     let path = read_text_arg(&memory, &caller, path_ptr)?;
-    let (typ, value) =
-        remote::read_remote_field(caller.data().env, &subject, seq, &path)
-            .map_err(|e| Trap::new(e.to_string()))?;
+    let (typ, value) = remote::read_remote_field(caller.data().env, &subject, seq, &path)
+        .map_err(|e| Trap::new(e.to_string()))?;
     if !matches!(typ, crate::pdl::schema::TypeSpec::Bool) {
         return Err(Trap::new("read_bool type mismatch"));
     }
@@ -344,10 +335,14 @@ fn read_text_host(
     };
     let (subject, seq) = read_subject_ref_arg(&memory, &caller, subject_ptr)?;
     let path = read_text_arg(&memory, &caller, path_ptr)?;
-    let (typ, value) =
-        remote::read_remote_field(caller.data().env, &subject, seq, &path)
-            .map_err(|e| Trap::new(e.to_string()))?;
-    if !matches!(typ, crate::pdl::schema::TypeSpec::Text(_) | crate::pdl::schema::TypeSpec::Currency | crate::pdl::schema::TypeSpec::Enum(_)) {
+    let (typ, value) = remote::read_remote_field(caller.data().env, &subject, seq, &path)
+        .map_err(|e| Trap::new(e.to_string()))?;
+    if !matches!(
+        typ,
+        crate::pdl::schema::TypeSpec::Text(_)
+            | crate::pdl::schema::TypeSpec::Currency
+            | crate::pdl::schema::TypeSpec::Enum(_)
+    ) {
         return Err(Trap::new("read_text type mismatch"));
     }
     let text = expect_text(&value).map_err(|e| Trap::new(e.to_string()))?;
@@ -375,10 +370,12 @@ fn read_identity_host(
     };
     let (subject, seq) = read_subject_ref_arg(&memory, &caller, subject_ptr)?;
     let path = read_text_arg(&memory, &caller, path_ptr)?;
-    let (typ, value) =
-        remote::read_remote_field(caller.data().env, &subject, seq, &path)
-            .map_err(|e| Trap::new(e.to_string()))?;
-    if !matches!(typ, crate::pdl::schema::TypeSpec::Identity | crate::pdl::schema::TypeSpec::Ref(_)) {
+    let (typ, value) = remote::read_remote_field(caller.data().env, &subject, seq, &path)
+        .map_err(|e| Trap::new(e.to_string()))?;
+    if !matches!(
+        typ,
+        crate::pdl::schema::TypeSpec::Identity | crate::pdl::schema::TypeSpec::Ref(_)
+    ) {
         return Err(Trap::new("read_identity type mismatch"));
     }
     let bytes = expect_bytes(&value).map_err(|e| Trap::new(e.to_string()))?;
@@ -403,21 +400,18 @@ fn read_subject_ref_host(
     };
     let (subject, seq) = read_subject_ref_arg(&memory, &caller, subject_ptr)?;
     let path = read_text_arg(&memory, &caller, path_ptr)?;
-    let (typ, value) =
-        remote::read_remote_field(caller.data().env, &subject, seq, &path)
-            .map_err(|e| Trap::new(e.to_string()))?;
+    let (typ, value) = remote::read_remote_field(caller.data().env, &subject, seq, &path)
+        .map_err(|e| Trap::new(e.to_string()))?;
     if !matches!(typ, crate::pdl::schema::TypeSpec::SubjectRef(_)) {
         return Err(Trap::new("read_subject_ref type mismatch"));
     }
     let map = expect_map(&value).map_err(|e| Trap::new(e.to_string()))?;
-    let id_bytes = expect_bytes(
-        map_get(map, "id").ok_or_else(|| Trap::new("subject_ref missing id"))?
-    )
-    .map_err(|e| Trap::new(e.to_string()))?;
-    let seq_val = expect_uint(
-        map_get(map, "seq").ok_or_else(|| Trap::new("subject_ref missing seq"))?
-    )
-    .map_err(|e| Trap::new(e.to_string()))?;
+    let id_bytes =
+        expect_bytes(map_get(map, "id").ok_or_else(|| Trap::new("subject_ref missing id"))?)
+            .map_err(|e| Trap::new(e.to_string()))?;
+    let seq_val =
+        expect_uint(map_get(map, "seq").ok_or_else(|| Trap::new("subject_ref missing seq"))?)
+            .map_err(|e| Trap::new(e.to_string()))?;
     if id_bytes.len() != 32 {
         return Err(Trap::new("subject_ref id invalid"));
     }
@@ -460,9 +454,8 @@ fn remote_intersects_host(
     };
     let (subject, seq) = read_subject_ref_arg(&memory, &caller, subject_ptr)?;
     let path = read_text_arg(&memory, &caller, path_ptr)?;
-    let (_typ, remote_value) =
-        remote::read_remote_field(caller.data().env, &subject, seq, &path)
-            .map_err(|e| Trap::new(e.to_string()))?;
+    let (_typ, remote_value) = remote::read_remote_field(caller.data().env, &subject, seq, &path)
+        .map_err(|e| Trap::new(e.to_string()))?;
     let remote_list = expect_array(&remote_value).map_err(|e| Trap::new(e.to_string()))?;
 
     let list_ptr = list_ptr as usize;
@@ -553,11 +546,11 @@ fn remote_intersects_host(
             for entry in remote_list {
                 let map = expect_map(entry).map_err(|e| Trap::new(e.to_string()))?;
                 let id_bytes = expect_bytes(
-                    map_get(map, "id").ok_or_else(|| Trap::new("subject_ref missing id"))?
+                    map_get(map, "id").ok_or_else(|| Trap::new("subject_ref missing id"))?,
                 )
                 .map_err(|e| Trap::new(e.to_string()))?;
                 let seq_val = expect_int(
-                    map_get(map, "seq").ok_or_else(|| Trap::new("subject_ref missing seq"))?
+                    map_get(map, "seq").ok_or_else(|| Trap::new("subject_ref missing seq"))?,
                 )
                 .map_err(|e| Trap::new(e.to_string()))?;
                 if id_bytes.len() != 32 {
@@ -565,7 +558,10 @@ fn remote_intersects_host(
                 }
                 let mut id = [0u8; 32];
                 id.copy_from_slice(&id_bytes);
-                if local.iter().any(|(lid, lseq)| lid == &id && *lseq == seq_val) {
+                if local
+                    .iter()
+                    .any(|(lid, lseq)| lid == &id && *lseq == seq_val)
+                {
                     return Ok(1);
                 }
             }
@@ -729,7 +725,12 @@ action Touch()
             note: None,
             meta: None,
         };
-        let genesis = AssertionPlaintext::sign(genesis_header, ciborium::value::Value::Map(vec![]), &root_sk).unwrap();
+        let genesis = AssertionPlaintext::sign(
+            genesis_header,
+            ciborium::value::Value::Map(vec![]),
+            &root_sk,
+        )
+        .unwrap();
         let genesis_bytes = genesis.to_cbor().unwrap();
         let genesis_id = genesis.assertion_id().unwrap();
         let genesis_env = crypto::envelope_id(&genesis_bytes);
@@ -799,7 +800,8 @@ action Touch()
         args[..4].copy_from_slice(&0u32.to_le_bytes());
         let mut context = vec![0u8; 40];
         context[..32].copy_from_slice(subject.as_bytes());
-        vm.validate(&env, &mut state, &args, Some(&context)).unwrap();
+        vm.validate(&env, &mut state, &args, Some(&context))
+            .unwrap();
 
         let other = SubjectId::from_bytes([9u8; 32]);
         context[..32].copy_from_slice(other.as_bytes());

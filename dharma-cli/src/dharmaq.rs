@@ -1,13 +1,13 @@
+use crate::pdl::ast::{Expr, Literal, Op};
 use crate::DharmaError;
+use dharma_core::dharmaq::{CmpOp, Filter, Predicate, QueryPlan};
+use dharma_core::SubjectId;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{digit1, space0};
 use nom::combinator::map_res;
 use nom::sequence::delimited;
 use nom::IResult;
-use dharma_core::dharmaq::{CmpOp, Filter, Predicate, QueryPlan};
-use dharma_core::SubjectId;
-use crate::pdl::ast::{Expr, Literal, Op};
 
 const DEFAULT_TABLE: &str = "assertions";
 const DEFAULT_LIMIT: usize = 25;
@@ -138,8 +138,8 @@ fn parse_search_segment(segment: &str) -> Result<Filter, DharmaError> {
 fn parse_take_segment(segment: &str) -> Result<usize, DharmaError> {
     let rest = strip_prefix_ci(segment, "take")
         .ok_or_else(|| DharmaError::Validation("invalid take clause".to_string()))?;
-    let (remaining, value) =
-        parse_number(rest).map_err(|_| DharmaError::Validation("invalid take value".to_string()))?;
+    let (remaining, value) = parse_number(rest)
+        .map_err(|_| DharmaError::Validation("invalid take value".to_string()))?;
     if !remaining.trim().is_empty() {
         return Err(DharmaError::Validation("invalid take value".to_string()));
     }
@@ -317,12 +317,17 @@ fn expr_to_filter(expr: &Expr) -> Result<Filter, DharmaError> {
             }
             comparison_to_filter(*op, left, right)
         }
-        _ => Err(DharmaError::Validation("unsupported where expression".to_string())),
+        _ => Err(DharmaError::Validation(
+            "unsupported where expression".to_string(),
+        )),
     }
 }
 
 fn is_comparison_op(op: Op) -> bool {
-    matches!(op, Op::Eq | Op::Neq | Op::Gt | Op::Gte | Op::Lt | Op::Lte | Op::In)
+    matches!(
+        op,
+        Op::Eq | Op::Neq | Op::Gt | Op::Gte | Op::Lt | Op::Lte | Op::In
+    )
 }
 
 fn comparison_to_filter(op: Op, left: &Expr, right: &Expr) -> Result<Filter, DharmaError> {
@@ -333,15 +338,21 @@ fn comparison_to_filter(op: Op, left: &Expr, right: &Expr) -> Result<Filter, Dha
         let op = if flipped { flip_op(op) } else { op };
         return build_predicate(&field, op, literal);
     }
-    Err(DharmaError::Validation("invalid where expression".to_string()))
+    Err(DharmaError::Validation(
+        "invalid where expression".to_string(),
+    ))
 }
 
 fn in_list_filter(left: &Expr, right: &Expr) -> Result<Filter, DharmaError> {
     let Some(field) = field_from_expr(left) else {
-        return Err(DharmaError::Validation("in expects field on left".to_string()));
+        return Err(DharmaError::Validation(
+            "in expects field on left".to_string(),
+        ));
     };
     let Some(list) = list_literal_from_expr(right) else {
-        return Err(DharmaError::Validation("in expects list literal".to_string()));
+        return Err(DharmaError::Validation(
+            "in expects list literal".to_string(),
+        ));
     };
     if list.is_empty() {
         return Ok(Filter::Or(Vec::new()));
@@ -379,19 +390,23 @@ fn build_predicate(field: &str, op: Op, literal: QueryLiteral) -> Result<Filter,
         "typ" | "type" => {
             let text = literal_text(literal)?;
             if op != Op::Eq {
-                return Err(DharmaError::Validation("typ expects ==" .to_string()));
+                return Err(DharmaError::Validation("typ expects ==".to_string()));
             }
             Ok(Filter::Leaf(Predicate::TypEq(text)))
         }
         "subject" | "sub" => {
             let text = literal_text(literal)?;
             let Some(bytes) = parse_bytes32_literal(&text) else {
-                return Err(DharmaError::Validation("subject expects 32-byte hex".to_string()));
+                return Err(DharmaError::Validation(
+                    "subject expects 32-byte hex".to_string(),
+                ));
             };
             if op != Op::Eq {
-                return Err(DharmaError::Validation("subject expects ==" .to_string()));
+                return Err(DharmaError::Validation("subject expects ==".to_string()));
             }
-            Ok(Filter::Leaf(Predicate::SubjectEq(SubjectId::from_bytes(bytes))))
+            Ok(Filter::Leaf(Predicate::SubjectEq(SubjectId::from_bytes(
+                bytes,
+            ))))
         }
         _ => match literal {
             QueryLiteral::Int(value) => {
@@ -404,7 +419,7 @@ fn build_predicate(field: &str, op: Op, literal: QueryLiteral) -> Result<Filter,
             }
             QueryLiteral::Bool(value) => {
                 if op != Op::Eq {
-                    return Err(DharmaError::Validation("bool expects ==" .to_string()));
+                    return Err(DharmaError::Validation("bool expects ==".to_string()));
                 }
                 Ok(Filter::Leaf(Predicate::DynBool {
                     col: field.to_string(),
@@ -413,7 +428,7 @@ fn build_predicate(field: &str, op: Op, literal: QueryLiteral) -> Result<Filter,
             }
             QueryLiteral::Text(text) => {
                 if op != Op::Eq {
-                    return Err(DharmaError::Validation("text expects ==" .to_string()));
+                    return Err(DharmaError::Validation("text expects ==".to_string()));
                 }
                 if let Some(bytes) = parse_bytes32_literal(&text) {
                     return Ok(Filter::Leaf(Predicate::DynBytes32 {
@@ -652,7 +667,13 @@ fn strip_not_term(input: &str) -> (bool, &str) {
         return (false, input);
     }
     let rest = &trimmed[3..];
-    if rest.is_empty() || !rest.chars().next().map(|c| c.is_whitespace()).unwrap_or(false) {
+    if rest.is_empty()
+        || !rest
+            .chars()
+            .next()
+            .map(|c| c.is_whitespace())
+            .unwrap_or(false)
+    {
         return (false, input);
     }
     (true, rest.trim_start())
@@ -670,7 +691,11 @@ fn starts_with_keyword(segment: &str, keyword: &str) -> bool {
     if trimmed.len() == keyword.len() {
         return true;
     }
-    trimmed[keyword.len()..].chars().next().map(|c| c.is_whitespace()).unwrap_or(false)
+    trimmed[keyword.len()..]
+        .chars()
+        .next()
+        .map(|c| c.is_whitespace())
+        .unwrap_or(false)
 }
 
 fn strip_prefix_ci<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
@@ -703,7 +728,10 @@ mod tests {
         assert_eq!(plan.limit, 5);
         assert!(matches!(
             plan.filter,
-            Some(Filter::Leaf(Predicate::Seq { op: CmpOp::Gt, value: 10 }))
+            Some(Filter::Leaf(Predicate::Seq {
+                op: CmpOp::Gt,
+                value: 10
+            }))
         ));
     }
 
@@ -725,8 +753,12 @@ mod tests {
             panic!("expected or filter");
         };
         assert_eq!(items.len(), 2);
-        assert!(items.iter().any(|item| matches!(item, Filter::Leaf(Predicate::TextSearch(q)) if q == "alpha")));
-        assert!(items.iter().any(|item| matches!(item, Filter::Leaf(Predicate::TextSearch(q)) if q == "beta")));
+        assert!(items
+            .iter()
+            .any(|item| matches!(item, Filter::Leaf(Predicate::TextSearch(q)) if q == "alpha")));
+        assert!(items
+            .iter()
+            .any(|item| matches!(item, Filter::Leaf(Predicate::TextSearch(q)) if q == "beta")));
     }
 
     #[test]
@@ -738,8 +770,12 @@ mod tests {
         let Some(Filter::And(items)) = plan.filter else {
             panic!("expected and filter");
         };
-        assert!(items.iter().any(|f| matches!(f, Filter::Leaf(Predicate::TypEq(v)) if v == "note.text")));
-        assert!(items.iter().any(|f| matches!(f, Filter::Leaf(Predicate::SubjectEq(s)) if *s == subject)));
+        assert!(items
+            .iter()
+            .any(|f| matches!(f, Filter::Leaf(Predicate::TypEq(v)) if v == "note.text")));
+        assert!(items
+            .iter()
+            .any(|f| matches!(f, Filter::Leaf(Predicate::SubjectEq(s)) if *s == subject)));
     }
 
     #[test]
@@ -747,7 +783,10 @@ mod tests {
         let plan = parse_query("assertions | where seq >= 3").unwrap();
         assert!(matches!(
             plan.filter,
-            Some(Filter::Leaf(Predicate::Seq { op: CmpOp::Gte, value: 3 }))
+            Some(Filter::Leaf(Predicate::Seq {
+                op: CmpOp::Gte,
+                value: 3
+            }))
         ));
     }
 
