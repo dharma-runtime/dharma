@@ -53,20 +53,29 @@ impl Drop for PostgresTestContext {
     }
 }
 
-fn postgres_url() -> String {
-    let value = env::var("DHARMA_TEST_POSTGRES_URL").unwrap_or_else(|_| {
-        panic!("DHARMA_TEST_POSTGRES_URL must be set for postgres_server_adapter tests")
-    });
+fn postgres_url() -> Option<String> {
+    let value = match env::var("DHARMA_TEST_POSTGRES_URL") {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
     let trimmed = value.trim();
-    assert!(
-        !trimmed.is_empty(),
-        "DHARMA_TEST_POSTGRES_URL must not be empty for postgres_server_adapter tests"
-    );
-    trimmed.to_string()
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
-fn test_context(name: &str) -> PostgresTestContext {
+fn require_postgres_or_skip(test_name: &str) -> Option<String> {
     let url = postgres_url();
+    if url.is_none() {
+        eprintln!(
+            "skipping {test_name}: DHARMA_TEST_POSTGRES_URL is not set in environment"
+        );
+    }
+    url
+}
+
+fn test_context(name: &str, url: String) -> PostgresTestContext {
 
     let mut client = Client::connect(&url, NoTls)
         .unwrap_or_else(|err| panic!("unable to connect to DHARMA_TEST_POSTGRES_URL {url}: {err}"));
@@ -157,7 +166,10 @@ fn sanitize_name(name: &str) -> String {
 
 #[test]
 fn postgres_server_adapter_applies_migrations_and_indexes() {
-    let ctx = test_context("migrations");
+    let Some(url) = require_postgres_or_skip("postgres_server_adapter_applies_migrations_and_indexes") else {
+        return;
+    };
+    let ctx = test_context("migrations", url);
 
     let adapter = open_adapter(&ctx);
     assert_eq!(adapter.schema(), ctx.schema.as_str());
@@ -214,7 +226,10 @@ fn postgres_server_adapter_applies_migrations_and_indexes() {
 
 #[test]
 fn postgres_server_adapter_concurrent_writes_are_consistent() {
-    let ctx = test_context("concurrency");
+    let Some(url) = require_postgres_or_skip("postgres_server_adapter_concurrent_writes_are_consistent") else {
+        return;
+    };
+    let ctx = test_context("concurrency", url);
 
     let adapter = Arc::new(open_adapter(&ctx));
     let subject = SubjectId::from_bytes([11u8; 32]);
@@ -278,7 +293,10 @@ fn postgres_server_adapter_concurrent_writes_are_consistent() {
 
 #[test]
 fn postgres_server_adapter_retries_transient_failures() {
-    let mut ctx = test_context("retry");
+    let Some(url) = require_postgres_or_skip("postgres_server_adapter_retries_transient_failures") else {
+        return;
+    };
+    let mut ctx = test_context("retry", url);
 
     ctx.config.storage.postgres.statement_timeout_ms = 40;
     ctx.config.storage.postgres.retry_backoff_ms = 25;
@@ -327,7 +345,10 @@ fn postgres_server_adapter_retries_transient_failures() {
 
 #[test]
 fn postgres_server_adapter_replay_state_derivation_matches_legacy() {
-    let ctx = test_context("parity");
+    let Some(url) = require_postgres_or_skip("postgres_server_adapter_replay_state_derivation_matches_legacy") else {
+        return;
+    };
+    let ctx = test_context("parity", url);
 
     let subject = SubjectId::from_bytes([77u8; 32]);
     let (base_id, base_env, base_bytes) = signed_assertion_bytes(subject, 1, "note.text", None);
