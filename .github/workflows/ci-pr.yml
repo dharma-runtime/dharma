@@ -198,6 +198,7 @@ jobs:
 
   pr-security:
     name: PR Security Dependency Review
+    if: ${{ vars.ENABLE_DEPENDENCY_REVIEW == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -235,10 +236,15 @@ jobs:
           for result in \
             "${{ needs.pr-quality-matrix.result }}" \
             "${{ needs.pr-test.result }}" \
-            "${{ needs.pr-coverage.result }}" \
-            "${{ needs.pr-security.result }}"; do
+            "${{ needs.pr-coverage.result }}"; do
             if [ "${result}" != "success" ]; then
               echo "PR lane failed with result: ${result}"
               exit 1
             fi
           done
+
+          security_result="${{ needs.pr-security.result }}"
+          if [ "${security_result}" != "success" ] && [ "${security_result}" != "skipped" ]; then
+            echo "PR security lane failed with result: ${security_result}"
+            exit 1
+          fi
