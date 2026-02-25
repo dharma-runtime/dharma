@@ -1,11 +1,12 @@
 use crate::assertion::AssertionPlaintext;
 use crate::cbor;
+use crate::config::Config;
 use crate::env::StdEnv;
 use crate::error::DharmaError;
 use crate::pdl::schema::CqrsSchema;
 use crate::reactor::{Expr, Op};
 use crate::runtime::cqrs::{load_state, read_value_at_path};
-use crate::store::state::list_assertions;
+use crate::store::spi::{RuntimeMode, StorageFacade, StorageQuery, StorageRead};
 use crate::store::Store;
 use crate::types::{AssertionId, ContractId, EnvelopeId, SchemaId, SubjectId};
 use crate::value::{expect_array, expect_int, expect_map, expect_text, map_get};
@@ -517,10 +518,37 @@ impl AggFunc {
 pub fn execute(root: &Path, plan: &QueryPlan, params: &Value) -> Result<Vec<Value>, DharmaError> {
     let env = StdEnv::new(root);
     let store = Store::new(&env);
+    let config = Config::load(root)?;
+
+    if RuntimeMode::from_config(&config) == RuntimeMode::Server {
+        let facade = StorageFacade::new_with_config(store.clone(), RuntimeMode::Server, &config);
+        let adapter = facade.clickhouse_server_adapter()?.ok_or_else(|| {
+            DharmaError::Config("server clickhouse backend unavailable".to_string())
+        })?;
+        adapter.sync_from_canonical()?;
+        return execute_with_backend(&adapter, &store, plan, params);
+    }
+
+    execute_with_backend(&store, &store, plan, params)
+}
+
+fn execute_with_backend<B>(
+    backend: &B,
+    state_store: &Store,
+    plan: &QueryPlan,
+    params: &Value,
+) -> Result<Vec<Value>, DharmaError>
+where
+    B: StorageRead + StorageQuery,
+{
     let mut cache = RuntimeCache::new();
     let mut rows = match &plan.source {
-        QuerySource::Table(name) => load_rows_for_table(&store, &mut cache, name, params, None)?,
-        QuerySource::Search(spec) => load_rows_for_search(&store, &mut cache, spec, params)?,
+        QuerySource::Table(name) => {
+            load_rows_for_table(backend, state_store, &mut cache, name, params, None)?
+        }
+        QuerySource::Search(spec) => {
+            load_rows_for_search(backend, state_store, &mut cache, spec, params)?
+        }
     };
 
     let mut values: Option<Vec<Value>> = None;
@@ -574,7 +602,7 @@ pub fn execute(root: &Path, plan: &QueryPlan, params: &Value) -> Result<Vec<Valu
                         "join after projection not supported".to_string(),
                     ));
                 }
-                rows = join_rows(&store, &mut cache, rows, spec, params)?;
+                rows = join_rows(backend, state_store, &mut cache, rows, spec, params)?;
             }
             QueryOp::Explode(spec) => {
                 if values.is_some() {
@@ -616,11 +644,15 @@ impl RuntimeCache {
         }
     }
 
-    fn schema(&mut self, store: &Store, schema_id: &SchemaId) -> Result<CqrsSchema, DharmaError> {
+    fn schema(
+        &mut self,
+        storage: &impl StorageRead,
+        schema_id: &SchemaId,
+    ) -> Result<CqrsSchema, DharmaError> {
         if let Some(schema) = self.schemas.get(schema_id) {
             return Ok(schema.clone());
         }
-        let bytes = store.get_object(&EnvelopeId::from_bytes(*schema_id.as_bytes()))?;
+        let bytes = storage.get_object(&EnvelopeId::from_bytes(*schema_id.as_bytes()))?;
         let schema = CqrsSchema::from_cbor(&bytes)?;
         self.schemas.insert(*schema_id, schema.clone());
         Ok(schema)
@@ -628,13 +660,13 @@ impl RuntimeCache {
 
     fn contract(
         &mut self,
-        store: &Store,
+        storage: &impl StorageRead,
         contract_id: &ContractId,
     ) -> Result<Vec<u8>, DharmaError> {
         if let Some(bytes) = self.contracts.get(contract_id) {
             return Ok(bytes.clone());
         }
-        let bytes = store.get_object(&EnvelopeId::from_bytes(*contract_id.as_bytes()))?;
+        let bytes = storage.get_object(&EnvelopeId::from_bytes(*contract_id.as_bytes()))?;
         self.contracts.insert(*contract_id, bytes.clone());
         Ok(bytes)
     }
@@ -700,19 +732,23 @@ impl QueryRow {
     }
 }
 
-fn load_rows_for_table(
-    store: &Store,
+fn load_rows_for_table<B>(
+    backend: &B,
+    state_store: &Store,
     cache: &mut RuntimeCache,
     table: &str,
     params: &Value,
     score: Option<u32>,
-) -> Result<Vec<QueryRow>, DharmaError> {
+) -> Result<Vec<QueryRow>, DharmaError>
+where
+    B: StorageRead + StorageQuery,
+{
     let mut rows = Vec::new();
-    for subject in store.list_subjects()? {
-        let Some(head) = latest_subject_head(store, &subject)? else {
+    for subject in backend.list_subjects()? {
+        let Some(head) = latest_subject_head(backend, &subject)? else {
             continue;
         };
-        let schema = match cache.schema(store, &head.schema_id) {
+        let schema = match cache.schema(backend, &head.schema_id) {
             Ok(schema) => schema,
             Err(DharmaError::Schema(_)) => continue,
             Err(err) => return Err(err),
@@ -720,8 +756,14 @@ fn load_rows_for_table(
         if schema.namespace != table {
             continue;
         }
-        let contract_bytes = cache.contract(store, &head.contract_id)?;
-        let state = load_state(store.env(), &subject, &schema, &contract_bytes, head.ver)?;
+        let contract_bytes = cache.contract(backend, &head.contract_id)?;
+        let state = load_state(
+            state_store.env(),
+            &subject,
+            &schema,
+            &contract_bytes,
+            head.ver,
+        )?;
         let source = RowSource {
             table: table.to_string(),
             subject,
@@ -736,12 +778,16 @@ fn load_rows_for_table(
     Ok(rows)
 }
 
-fn load_rows_for_search(
-    store: &Store,
+fn load_rows_for_search<B>(
+    backend: &B,
+    state_store: &Store,
     cache: &mut RuntimeCache,
     spec: &SearchSpec,
     params: &Value,
-) -> Result<Vec<QueryRow>, DharmaError> {
+) -> Result<Vec<QueryRow>, DharmaError>
+where
+    B: StorageRead + StorageQuery,
+{
     let query_val = eval_expr_value_raw(params, &spec.query)?;
     let Some(query_text) = value_to_text(&query_val) else {
         return Ok(Vec::new());
@@ -750,7 +796,7 @@ fn load_rows_for_search(
         Some(path) => path.split('.').take(4).collect::<Vec<_>>().join("."),
         None => return Ok(Vec::new()),
     };
-    let rows = load_rows_for_table(store, cache, &table, params, None)?;
+    let rows = load_rows_for_table(backend, state_store, cache, &table, params, None)?;
     let mut filtered = Vec::new();
     for mut row in rows {
         let mut best: Option<u32> = None;
@@ -772,28 +818,35 @@ fn load_rows_for_search(
 }
 
 fn latest_subject_head(
-    store: &Store,
+    backend: &(impl StorageRead + StorageQuery),
     subject: &SubjectId,
 ) -> Result<Option<SubjectHead>, DharmaError> {
     let mut best: Option<SubjectHead> = None;
-    let records = list_assertions(store.env(), subject)?;
-    for record in records {
-        let assertion = match AssertionPlaintext::from_cbor(&record.bytes) {
+    for assertion_id in backend.scan_subject(subject)? {
+        let Some(envelope_id) = backend.lookup_envelope(&assertion_id)? else {
+            continue;
+        };
+        let bytes = backend.get_assertion(subject, &envelope_id)?;
+        let assertion = match AssertionPlaintext::from_cbor(&bytes) {
             Ok(value) => value,
             Err(_) => continue,
         };
         if assertion.header.sub != *subject {
             continue;
         }
-        if best.as_ref().map(|h| h.seq >= record.seq).unwrap_or(false) {
+        if best
+            .as_ref()
+            .map(|h| h.seq >= assertion.header.seq)
+            .unwrap_or(false)
+        {
             continue;
         }
         best = Some(SubjectHead {
             schema_id: assertion.header.schema,
             contract_id: assertion.header.contract,
             ver: assertion.header.ver,
-            seq: record.seq,
-            oid: Some(record.assertion_id),
+            seq: assertion.header.seq,
+            oid: Some(assertion_id),
         });
     }
     Ok(best)
@@ -1337,14 +1390,18 @@ fn select_row(row: &QueryRow, params: &Value, items: &[SelectItem]) -> Result<Va
     Ok(Value::Map(out))
 }
 
-fn join_rows(
-    store: &Store,
+fn join_rows<B>(
+    backend: &B,
+    state_store: &Store,
     cache: &mut RuntimeCache,
     rows: Vec<QueryRow>,
     spec: &JoinSpec,
     params: &Value,
-) -> Result<Vec<QueryRow>, DharmaError> {
-    let right_rows = load_rows_for_table(store, cache, &spec.table, params, None)?;
+) -> Result<Vec<QueryRow>, DharmaError>
+where
+    B: StorageRead + StorageQuery,
+{
+    let right_rows = load_rows_for_table(backend, state_store, cache, &spec.table, params, None)?;
     let mut index: HashMap<KeyValue, RowSource> = HashMap::new();
     for row in right_rows {
         if let Some(source) = row.sources.get(&spec.table) {

@@ -5,6 +5,7 @@ use crate::env::{Env, StdEnv};
 use crate::envelope::AssertionEnvelope;
 use crate::error::DharmaError;
 use crate::keys::Keyring;
+pub mod clickhouse;
 pub mod index;
 pub mod pending;
 pub mod postgres;

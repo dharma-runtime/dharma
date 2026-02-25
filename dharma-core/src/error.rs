@@ -46,6 +46,11 @@ pub enum DharmaError {
         code: Option<String>,
         message: String,
     },
+    #[error("clickhouse error ({code:?}): {message}")]
+    ClickHouse {
+        code: Option<String>,
+        message: String,
+    },
     #[error("dependency cycle detected")]
     DependencyCycle,
 }
@@ -80,6 +85,10 @@ impl Clone for DharmaError {
                 message: message.clone(),
             },
             DharmaError::Postgres { code, message } => DharmaError::Postgres {
+                code: code.clone(),
+                message: message.clone(),
+            },
+            DharmaError::ClickHouse { code, message } => DharmaError::ClickHouse {
                 code: code.clone(),
                 message: message.clone(),
             },
@@ -175,5 +184,14 @@ impl From<postgres::Error> for DharmaError {
 impl From<r2d2::Error> for DharmaError {
     fn from(err: r2d2::Error) -> Self {
         DharmaError::Network(err.to_string())
+    }
+}
+
+impl From<clickhouse::error::Error> for DharmaError {
+    fn from(err: clickhouse::error::Error) -> Self {
+        DharmaError::ClickHouse {
+            code: None,
+            message: err.to_string(),
+        }
     }
 }

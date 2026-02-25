@@ -39,11 +39,14 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 postgres = "0.19"
 r2d2 = "0.8"
 r2d2_postgres = "0.18"
+clickhouse = "0.12"
+serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
 wat = "1.0"
 tempfile = "3.10"
 rand = "0.8"
+clickhouse = { version = "0.12", features = ["test-util"] }
 
 [build-dependencies]
 wat = "1.0"

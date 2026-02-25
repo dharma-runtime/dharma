@@ -3,6 +3,7 @@ use crate::contract::PermissionSummary;
 use crate::env::Env;
 use crate::error::DharmaError;
 use crate::keys::Keyring;
+use crate::store::clickhouse::ClickHouseServerAnalyticsAdapter;
 use crate::store::postgres::PostgresServerAdapter;
 use crate::store::sqlite::SqliteEmbeddedAdapter;
 use crate::store::state::CqrsReverseEntry;
@@ -395,6 +396,19 @@ pub fn classify_backend_error(error: &DharmaError) -> BackendErrorClass {
             }
             BackendErrorClass::Fatal
         }
+        DharmaError::ClickHouse { code: _, message } => {
+            let lowered = message.to_ascii_lowercase();
+            if lowered.contains("timeout")
+                || lowered.contains("timed out")
+                || lowered.contains("connection")
+                || lowered.contains("too many simultaneous queries")
+                || lowered.contains("temporarily unavailable")
+            {
+                BackendErrorClass::Retryable
+            } else {
+                BackendErrorClass::Fatal
+            }
+        }
         DharmaError::Io(err) => match err.kind() {
             ErrorKind::TimedOut
             | ErrorKind::ConnectionReset
@@ -431,11 +445,18 @@ enum ServerAdapter {
 }
 
 #[derive(Clone)]
+enum ClickHouseAdapter {
+    Ready(ClickHouseServerAnalyticsAdapter),
+    Failed(DharmaError),
+}
+
+#[derive(Clone)]
 pub struct StorageFacade {
     store: Store,
     selection: BackendSelection,
     embedded: Option<EmbeddedAdapter>,
     server: Option<ServerAdapter>,
+    clickhouse: Option<ClickHouseAdapter>,
 }
 
 impl StorageFacade {
@@ -465,11 +486,22 @@ impl StorageFacade {
         } else {
             None
         };
+        let clickhouse = if selection.mode == RuntimeMode::Server {
+            Some(
+                match ClickHouseServerAnalyticsAdapter::open(store.root(), store.clone(), config) {
+                    Ok(adapter) => ClickHouseAdapter::Ready(adapter),
+                    Err(err) => ClickHouseAdapter::Failed(err),
+                },
+            )
+        } else {
+            None
+        };
         StorageFacade {
             store,
             selection,
             embedded,
             server,
+            clickhouse,
         }
     }
 
@@ -562,6 +594,35 @@ impl StorageFacade {
                     ))
                 }
             }
+        }
+    }
+
+    fn clickhouse_for_operation(
+        &self,
+        operation: StorageOperation,
+    ) -> Result<Option<&ClickHouseServerAnalyticsAdapter>, DharmaError> {
+        if operation != StorageOperation::Query {
+            return Ok(None);
+        }
+        if self.backend_for_operation(operation) != BackendKind::ClickHouse {
+            return Ok(None);
+        }
+        match self.clickhouse.as_ref() {
+            Some(ClickHouseAdapter::Ready(adapter)) => Ok(Some(adapter)),
+            Some(ClickHouseAdapter::Failed(err)) => Err(err.clone()),
+            None => Err(DharmaError::Config(
+                "server clickhouse backend unavailable".to_string(),
+            )),
+        }
+    }
+
+    pub fn clickhouse_server_adapter(
+        &self,
+    ) -> Result<Option<ClickHouseServerAnalyticsAdapter>, DharmaError> {
+        match self.clickhouse.as_ref() {
+            Some(ClickHouseAdapter::Ready(adapter)) => Ok(Some(adapter.clone())),
+            Some(ClickHouseAdapter::Failed(err)) => Err(err.clone()),
+            None => Ok(None),
         }
     }
 }
@@ -717,6 +778,9 @@ impl StorageQuery for StorageFacade {
         &self,
         assertion_id: &AssertionId,
     ) -> Result<Option<EnvelopeId>, DharmaError> {
+        if let Some(adapter) = self.clickhouse_for_operation(StorageOperation::Query)? {
+            return adapter.lookup_envelope(assertion_id);
+        }
         if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Query)? {
             return adapter.lookup_envelope(assertion_id);
         }
@@ -730,6 +794,9 @@ impl StorageQuery for StorageFacade {
         &self,
         envelope_id: &EnvelopeId,
     ) -> Result<Option<CqrsReverseEntry>, DharmaError> {
+        if let Some(adapter) = self.clickhouse_for_operation(StorageOperation::Query)? {
+            return adapter.lookup_cqrs_by_envelope(envelope_id);
+        }
         if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Query)? {
             return adapter.lookup_cqrs_by_envelope(envelope_id);
         }
@@ -743,6 +810,9 @@ impl StorageQuery for StorageFacade {
         &self,
         assertion_id: &AssertionId,
     ) -> Result<Option<CqrsReverseEntry>, DharmaError> {
+        if let Some(adapter) = self.clickhouse_for_operation(StorageOperation::Query)? {
+            return adapter.lookup_cqrs_by_assertion(assertion_id);
+        }
         if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Query)? {
             return adapter.lookup_cqrs_by_assertion(assertion_id);
         }
@@ -875,7 +945,7 @@ mod tests {
     }
 
     #[test]
-    fn facade_server_query_falls_back_to_legacy_when_postgres_unavailable() {
+    fn facade_server_query_returns_clickhouse_error_when_backend_unavailable() {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::from_root(temp.path());
         let mut config = Config::default();
@@ -883,10 +953,17 @@ mod tests {
         config.storage.postgres.url = "postgres://127.0.0.1:1/does_not_exist".to_string();
         config.storage.postgres.connect_timeout_ms = 1;
         config.storage.postgres.acquire_timeout_ms = 1;
+        config.storage.clickhouse.url = "http://127.0.0.1:1".to_string();
+        config.storage.clickhouse.retry_max_attempts = 1;
+        config.storage.clickhouse.retry_backoff_ms = 0;
 
         let facade = StorageFacade::new_with_config(store, RuntimeMode::Server, &config);
         let assertion_id = AssertionId::from_bytes([9u8; 32]);
-        assert_eq!(facade.lookup_envelope(&assertion_id).unwrap(), None);
+        let err = facade.lookup_envelope(&assertion_id).unwrap_err();
+        assert!(matches!(
+            err,
+            DharmaError::ClickHouse { .. } | DharmaError::Network(_) | DharmaError::Config(_)
+        ));
 
         let envelope_id = EnvelopeId::from_bytes([10u8; 32]);
         let err = facade.get_object_any(&envelope_id).unwrap_err();
