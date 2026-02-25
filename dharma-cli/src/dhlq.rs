@@ -707,3 +707,40 @@ fn convert_op(op: PdlOp) -> Result<Op, DharmaError> {
         PdlOp::Neg => Op::Neg,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_plan_group_by_and_agg() {
+        let query = r#"
+analytics.orders
+| where status == "open"
+| by (customer_id)
+| agg count() as total, sum(amount) as amount_sum
+"#;
+        let plan = parse_plan(query, 1).unwrap();
+        assert_eq!(plan.version, 1);
+        assert_eq!(
+            plan.source,
+            QuerySource::Table("analytics.orders".to_string())
+        );
+        assert_eq!(plan.ops.len(), 3);
+        assert!(matches!(
+            &plan.ops[1],
+            QueryOp::GroupBy(keys) if keys == &vec!["customer_id".to_string()]
+        ));
+        assert!(matches!(
+            &plan.ops[2],
+            QueryOp::Agg(specs)
+                if specs.len() == 2
+                    && specs[0].func == AggFunc::Count
+                    && specs[0].path.is_none()
+                    && specs[0].alias.as_deref() == Some("total")
+                    && specs[1].func == AggFunc::Sum
+                    && specs[1].path.as_deref() == Some("amount")
+                    && specs[1].alias.as_deref() == Some("amount_sum")
+        ));
+    }
+}

@@ -29,6 +29,13 @@ const DEFAULT_STORAGE_POSTGRES_ACQUIRE_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_STORAGE_POSTGRES_STATEMENT_TIMEOUT_MS: u64 = 5000;
 const DEFAULT_STORAGE_POSTGRES_RETRY_MAX_ATTEMPTS: u32 = 3;
 const DEFAULT_STORAGE_POSTGRES_RETRY_BACKOFF_MS: u64 = 50;
+const DEFAULT_STORAGE_CLICKHOUSE_ENABLED: bool = true;
+const DEFAULT_STORAGE_CLICKHOUSE_URL: &str = "http://127.0.0.1:8123";
+const DEFAULT_STORAGE_CLICKHOUSE_DATABASE: &str = "default";
+const DEFAULT_STORAGE_CLICKHOUSE_TABLE_PREFIX: &str = "dharma_analytics";
+const DEFAULT_STORAGE_CLICKHOUSE_CONNECT_TIMEOUT_MS: u64 = 5000;
+const DEFAULT_STORAGE_CLICKHOUSE_RETRY_MAX_ATTEMPTS: u32 = 3;
+const DEFAULT_STORAGE_CLICKHOUSE_RETRY_BACKOFF_MS: u64 = 50;
 const DEFAULT_PROFILE_MODE: &str = "embedded";
 const DEFAULT_REGISTRY_URL: &str = "https://registry.dharma.systems";
 const DEFAULT_VM_FUEL: u64 = 1_000_000;
@@ -77,6 +84,7 @@ pub struct StorageConfig {
     pub snapshot_interval: u64,
     pub prune_pending_hours: u64,
     pub postgres: StoragePostgresConfig,
+    pub clickhouse: StorageClickHouseConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -87,6 +95,17 @@ pub struct StoragePostgresConfig {
     pub connect_timeout_ms: u64,
     pub acquire_timeout_ms: u64,
     pub statement_timeout_ms: u64,
+    pub retry_max_attempts: u32,
+    pub retry_backoff_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct StorageClickHouseConfig {
+    pub enabled: bool,
+    pub url: String,
+    pub database: String,
+    pub table_prefix: String,
+    pub connect_timeout_ms: u64,
     pub retry_max_attempts: u32,
     pub retry_backoff_ms: u64,
 }
@@ -211,6 +230,15 @@ impl Default for Config {
                     statement_timeout_ms: DEFAULT_STORAGE_POSTGRES_STATEMENT_TIMEOUT_MS,
                     retry_max_attempts: DEFAULT_STORAGE_POSTGRES_RETRY_MAX_ATTEMPTS,
                     retry_backoff_ms: DEFAULT_STORAGE_POSTGRES_RETRY_BACKOFF_MS,
+                },
+                clickhouse: StorageClickHouseConfig {
+                    enabled: DEFAULT_STORAGE_CLICKHOUSE_ENABLED,
+                    url: DEFAULT_STORAGE_CLICKHOUSE_URL.to_string(),
+                    database: DEFAULT_STORAGE_CLICKHOUSE_DATABASE.to_string(),
+                    table_prefix: DEFAULT_STORAGE_CLICKHOUSE_TABLE_PREFIX.to_string(),
+                    connect_timeout_ms: DEFAULT_STORAGE_CLICKHOUSE_CONNECT_TIMEOUT_MS,
+                    retry_max_attempts: DEFAULT_STORAGE_CLICKHOUSE_RETRY_MAX_ATTEMPTS,
+                    retry_backoff_ms: DEFAULT_STORAGE_CLICKHOUSE_RETRY_BACKOFF_MS,
                 },
             },
             profile: ProfileConfig {
@@ -363,6 +391,30 @@ impl Config {
         out.push(format!(
             "retry_backoff_ms = {}",
             self.storage.postgres.retry_backoff_ms
+        ));
+        out.push(String::new());
+        out.push("[storage.clickhouse]".to_string());
+        out.push(format!("enabled = {}", self.storage.clickhouse.enabled));
+        out.push(format!("url = \"{}\"", self.storage.clickhouse.url));
+        out.push(format!(
+            "database = \"{}\"",
+            self.storage.clickhouse.database
+        ));
+        out.push(format!(
+            "table_prefix = \"{}\"",
+            self.storage.clickhouse.table_prefix
+        ));
+        out.push(format!(
+            "connect_timeout_ms = {}",
+            self.storage.clickhouse.connect_timeout_ms
+        ));
+        out.push(format!(
+            "retry_max_attempts = {}",
+            self.storage.clickhouse.retry_max_attempts
+        ));
+        out.push(format!(
+            "retry_backoff_ms = {}",
+            self.storage.clickhouse.retry_backoff_ms
         ));
         out.push(String::new());
 
@@ -699,6 +751,53 @@ impl Config {
                 if let ConfigValue::Int(val) = value {
                     if val >= 0 {
                         self.storage.postgres.retry_backoff_ms = val as u64;
+                    }
+                }
+            }
+            "storage.clickhouse.enabled" => {
+                if let ConfigValue::Bool(val) = value {
+                    self.storage.clickhouse.enabled = val;
+                }
+            }
+            "storage.clickhouse.url" => {
+                if let ConfigValue::Str(val) = value {
+                    if !val.is_empty() {
+                        self.storage.clickhouse.url = val;
+                    }
+                }
+            }
+            "storage.clickhouse.database" => {
+                if let ConfigValue::Str(val) = value {
+                    if !val.is_empty() {
+                        self.storage.clickhouse.database = val;
+                    }
+                }
+            }
+            "storage.clickhouse.table_prefix" => {
+                if let ConfigValue::Str(val) = value {
+                    if !val.is_empty() {
+                        self.storage.clickhouse.table_prefix = val;
+                    }
+                }
+            }
+            "storage.clickhouse.connect_timeout_ms" => {
+                if let ConfigValue::Int(val) = value {
+                    if val >= 0 {
+                        self.storage.clickhouse.connect_timeout_ms = val as u64;
+                    }
+                }
+            }
+            "storage.clickhouse.retry_max_attempts" => {
+                if let ConfigValue::Int(val) = value {
+                    if val > 0 && val <= u32::MAX as i64 {
+                        self.storage.clickhouse.retry_max_attempts = val as u32;
+                    }
+                }
+            }
+            "storage.clickhouse.retry_backoff_ms" => {
+                if let ConfigValue::Int(val) = value {
+                    if val >= 0 {
+                        self.storage.clickhouse.retry_backoff_ms = val as u64;
                     }
                 }
             }
@@ -1062,6 +1161,27 @@ fn default_config_template() -> String {
             DEFAULT_STORAGE_POSTGRES_RETRY_BACKOFF_MS
         ),
         "",
+        "[storage.clickhouse]",
+        &format!("enabled = {}", DEFAULT_STORAGE_CLICKHOUSE_ENABLED),
+        &format!("url = \"{}\"", DEFAULT_STORAGE_CLICKHOUSE_URL),
+        &format!("database = \"{}\"", DEFAULT_STORAGE_CLICKHOUSE_DATABASE),
+        &format!(
+            "table_prefix = \"{}\"",
+            DEFAULT_STORAGE_CLICKHOUSE_TABLE_PREFIX
+        ),
+        &format!(
+            "connect_timeout_ms = {}",
+            DEFAULT_STORAGE_CLICKHOUSE_CONNECT_TIMEOUT_MS
+        ),
+        &format!(
+            "retry_max_attempts = {}",
+            DEFAULT_STORAGE_CLICKHOUSE_RETRY_MAX_ATTEMPTS
+        ),
+        &format!(
+            "retry_backoff_ms = {}",
+            DEFAULT_STORAGE_CLICKHOUSE_RETRY_BACKOFF_MS
+        ),
+        "",
         "[profile]",
         &format!("mode = \"{}\"", DEFAULT_PROFILE_MODE),
         "",
@@ -1288,6 +1408,15 @@ statement_timeout_ms = 3456
 retry_max_attempts = 4
 retry_backoff_ms = 15
 
+[storage.clickhouse]
+enabled = true
+url = "http://127.0.0.1:8123"
+database = "analytics"
+table_prefix = "analytics_v1"
+connect_timeout_ms = 3456
+retry_max_attempts = 7
+retry_backoff_ms = 12
+
 [registry.pins]
 "std.finance" = "1.2.0"
 "#;
@@ -1312,6 +1441,19 @@ retry_backoff_ms = 15
         assert_eq!(cfg.storage.postgres.statement_timeout_ms, 3456);
         assert_eq!(cfg.storage.postgres.retry_max_attempts, 4);
         assert_eq!(cfg.storage.postgres.retry_backoff_ms, 15);
+        assert!(cfg.storage.clickhouse.enabled);
+        assert_eq!(
+            cfg.storage.clickhouse.url,
+            "http://127.0.0.1:8123".to_string()
+        );
+        assert_eq!(cfg.storage.clickhouse.database, "analytics".to_string());
+        assert_eq!(
+            cfg.storage.clickhouse.table_prefix,
+            "analytics_v1".to_string()
+        );
+        assert_eq!(cfg.storage.clickhouse.connect_timeout_ms, 3456);
+        assert_eq!(cfg.storage.clickhouse.retry_max_attempts, 7);
+        assert_eq!(cfg.storage.clickhouse.retry_backoff_ms, 12);
         assert_eq!(
             cfg.registry.pins.get("std.finance").cloned(),
             Some("1.2.0".to_string())
@@ -1323,6 +1465,7 @@ retry_backoff_ms = 15
         assert!(rendered.contains("sync_obj_chunk_bytes"));
         assert!(rendered.contains("sync_obj_buffer_bytes"));
         assert!(rendered.contains("[storage.postgres]"));
+        assert!(rendered.contains("[storage.clickhouse]"));
     }
 
     #[test]
