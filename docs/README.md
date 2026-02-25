@@ -26,6 +26,7 @@ Welcome to DHARMA.
 - [dhd: The Core](04_runtime/01_core.md)
 - [Execution Semantics](04_runtime/02_semantics.md)
 - [Scheduler & Time](04_runtime/03_scheduler.md)
+- [Storage Migration Runbook](04_runtime/04_storage_migration_runbook.md)
 
 ## 5. Security & Audit
 - [Identity & Signatures](05_security/01_identity.md)

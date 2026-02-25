@@ -1,6 +1,9 @@
 use crate::contract::PermissionSummary;
 use crate::error::DharmaError;
 use crate::keys::Keyring;
+use crate::store::consistency::{
+    BackendConsistencyRows, ConsistencyCqrsRow, ConsistencySemanticRow, ConsistencySubjectRow,
+};
 use crate::store::spi::{StorageCommit, StorageIndex, StorageQuery, StorageRead};
 use crate::store::state::{self, CqrsReverseEntry};
 use crate::store::Store;
@@ -86,6 +89,88 @@ impl SqliteEmbeddedAdapter {
 
     pub fn db_path(&self) -> &Path {
         &self.db_path
+    }
+
+    pub(crate) fn consistency_rows(&self) -> Result<BackendConsistencyRows, DharmaError> {
+        self.with_conn(|conn| {
+            let mut subject_stmt = conn.prepare(
+                "SELECT subject_id, seq, assertion_id, envelope_id, is_overlay, bytes, rowid
+                 FROM subject_assertions",
+            )?;
+            let mut subject_rows_sql = subject_stmt.query([])?;
+            let mut subject_rows = Vec::new();
+            while let Some(row) = subject_rows_sql.next()? {
+                let subject_raw: Vec<u8> = row.get(0)?;
+                let seq_i64: i64 = row.get(1)?;
+                let assertion_raw: Vec<u8> = row.get(2)?;
+                let envelope_raw: Vec<u8> = row.get(3)?;
+                let is_overlay_i64: i64 = row.get(4)?;
+                let bytes: Vec<u8> = row.get(5)?;
+                let rowid_i64: i64 = row.get(6)?;
+                let seq = u64::try_from(seq_i64)
+                    .map_err(|_| DharmaError::Validation("assertion seq overflow".to_string()))?;
+                let inserted_at = u64::try_from(rowid_i64).map_err(|_| {
+                    DharmaError::Validation("subject_assertions rowid overflow".to_string())
+                })?;
+                subject_rows.push(ConsistencySubjectRow {
+                    subject: SubjectId::from_slice(&subject_raw)?,
+                    seq,
+                    assertion_id: AssertionId::from_slice(&assertion_raw)?,
+                    envelope_id: EnvelopeId::from_slice(&envelope_raw)?,
+                    is_overlay: is_overlay_i64 != 0,
+                    bytes: Some(bytes),
+                    inserted_at,
+                });
+            }
+
+            let mut semantic_stmt =
+                conn.prepare("SELECT assertion_id, envelope_id, inserted_at FROM semantic_index")?;
+            let mut semantic_rows_sql = semantic_stmt.query([])?;
+            let mut semantic_rows = Vec::new();
+            while let Some(row) = semantic_rows_sql.next()? {
+                let assertion_raw: Vec<u8> = row.get(0)?;
+                let envelope_raw: Vec<u8> = row.get(1)?;
+                let inserted_i64: i64 = row.get(2)?;
+                let inserted_at = u64::try_from(inserted_i64).map_err(|_| {
+                    DharmaError::Validation("semantic_index inserted_at overflow".to_string())
+                })?;
+                semantic_rows.push(ConsistencySemanticRow {
+                    assertion_id: AssertionId::from_slice(&assertion_raw)?,
+                    envelope_id: EnvelopeId::from_slice(&envelope_raw)?,
+                    inserted_at,
+                });
+            }
+
+            let mut cqrs_stmt = conn.prepare(
+                "SELECT envelope_id, assertion_id, subject_id, is_overlay, inserted_at
+                 FROM cqrs_reverse",
+            )?;
+            let mut cqrs_rows_sql = cqrs_stmt.query([])?;
+            let mut cqrs_rows = Vec::new();
+            while let Some(row) = cqrs_rows_sql.next()? {
+                let envelope_raw: Vec<u8> = row.get(0)?;
+                let assertion_raw: Vec<u8> = row.get(1)?;
+                let subject_raw: Vec<u8> = row.get(2)?;
+                let is_overlay_i64: i64 = row.get(3)?;
+                let inserted_i64: i64 = row.get(4)?;
+                let inserted_at = u64::try_from(inserted_i64).map_err(|_| {
+                    DharmaError::Validation("cqrs_reverse inserted_at overflow".to_string())
+                })?;
+                cqrs_rows.push(ConsistencyCqrsRow {
+                    envelope_id: EnvelopeId::from_slice(&envelope_raw)?,
+                    assertion_id: AssertionId::from_slice(&assertion_raw)?,
+                    subject: SubjectId::from_slice(&subject_raw)?,
+                    is_overlay: is_overlay_i64 != 0,
+                    inserted_at,
+                });
+            }
+
+            Ok(BackendConsistencyRows {
+                subject_rows,
+                semantic_rows,
+                cqrs_rows,
+            })
+        })
     }
 
     fn with_conn<T>(

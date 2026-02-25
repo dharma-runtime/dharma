@@ -3,6 +3,9 @@ use crate::contract::PermissionSummary;
 use crate::error::DharmaError;
 use crate::keys::Keyring;
 use crate::metrics;
+use crate::store::consistency::{
+    BackendConsistencyRows, ConsistencyCqrsRow, ConsistencySemanticRow, ConsistencySubjectRow,
+};
 use crate::store::spi::{
     BackendErrorClass, BackendErrorTaxonomy, BackendKind, StorageCommit, StorageIndex,
     StorageOperation, StorageQuery, StorageRead,
@@ -252,6 +255,65 @@ impl ClickHouseServerAnalyticsAdapter {
             return Ok(rebuilt);
         }
         Ok(cached)
+    }
+
+    pub(crate) fn consistency_rows(&self) -> Result<BackendConsistencyRows, DharmaError> {
+        let subject_sql = format!(
+            "SELECT subject_id, seq, assertion_id, envelope_id, is_overlay, inserted_at FROM {}",
+            quote_ident(&self.subject_assertions_table())
+        );
+        let semantic_sql = format!(
+            "SELECT assertion_id, envelope_id, inserted_at FROM {}",
+            quote_ident(&self.semantic_index_table())
+        );
+        let cqrs_sql = format!(
+            "SELECT envelope_id, assertion_id, subject_id, is_overlay, inserted_at FROM {}",
+            quote_ident(&self.cqrs_reverse_table())
+        );
+
+        let subject_records: Vec<SubjectAssertionRecord> = self.query_rows(subject_sql)?;
+        let semantic_records: Vec<SemanticIndexRecord> = self.query_rows(semantic_sql)?;
+        let cqrs_records: Vec<CqrsReverseRecord> = self.query_rows(cqrs_sql)?;
+
+        let mut subject_rows = Vec::with_capacity(subject_records.len());
+        for row in subject_records {
+            let envelope_id = EnvelopeId::from_hex(&row.envelope_id)?;
+            subject_rows.push(ConsistencySubjectRow {
+                subject: SubjectId::from_hex(&row.subject_id)?,
+                seq: row.seq,
+                assertion_id: AssertionId::from_hex(&row.assertion_id)?,
+                envelope_id,
+                is_overlay: row.is_overlay != 0,
+                bytes: self.legacy.get_object_any(&envelope_id)?,
+                inserted_at: row.inserted_at,
+            });
+        }
+
+        let mut semantic_rows = Vec::with_capacity(semantic_records.len());
+        for row in semantic_records {
+            semantic_rows.push(ConsistencySemanticRow {
+                assertion_id: AssertionId::from_hex(&row.assertion_id)?,
+                envelope_id: EnvelopeId::from_hex(&row.envelope_id)?,
+                inserted_at: row.inserted_at,
+            });
+        }
+
+        let mut cqrs_rows = Vec::with_capacity(cqrs_records.len());
+        for row in cqrs_records {
+            cqrs_rows.push(ConsistencyCqrsRow {
+                envelope_id: EnvelopeId::from_hex(&row.envelope_id)?,
+                assertion_id: AssertionId::from_hex(&row.assertion_id)?,
+                subject: SubjectId::from_hex(&row.subject_id)?,
+                is_overlay: row.is_overlay != 0,
+                inserted_at: row.inserted_at,
+            });
+        }
+
+        Ok(BackendConsistencyRows {
+            subject_rows,
+            semantic_rows,
+            cqrs_rows,
+        })
     }
 
     fn subject_assertions_table(&self) -> String {

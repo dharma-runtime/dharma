@@ -3,6 +3,9 @@ use crate::config::Config;
 use crate::contract::PermissionSummary;
 use crate::error::DharmaError;
 use crate::keys::Keyring;
+use crate::store::consistency::{
+    BackendConsistencyRows, ConsistencyCqrsRow, ConsistencySemanticRow, ConsistencySubjectRow,
+};
 use crate::store::spi::{
     BackendErrorClass, BackendErrorTaxonomy, BackendKind, StorageCommit, StorageIndex,
     StorageOperation, StorageQuery, StorageRead,
@@ -113,6 +116,99 @@ impl PostgresServerAdapter {
 
     pub fn schema(&self) -> &str {
         &self.schema
+    }
+
+    pub(crate) fn consistency_rows(&self) -> Result<BackendConsistencyRows, DharmaError> {
+        self.with_retry(StorageOperation::Read, || {
+            let mut client = self.pool.get()?;
+            self.apply_statement_timeout(&mut client)?;
+
+            let subject_rows_sql = client.query(
+                &format!(
+                    "SELECT subject_id, seq, assertion_id, envelope_id, is_overlay, bytes, inserted_at FROM {}",
+                    self.table("subject_assertions")
+                ),
+                &[],
+            )?;
+            let mut subject_rows = Vec::with_capacity(subject_rows_sql.len());
+            for row in subject_rows_sql {
+                let subject_raw: Vec<u8> = row.get(0);
+                let seq_i64: i64 = row.get(1);
+                let assertion_raw: Vec<u8> = row.get(2);
+                let envelope_raw: Vec<u8> = row.get(3);
+                let is_overlay: bool = row.get(4);
+                let bytes: Vec<u8> = row.get(5);
+                let inserted_i64: i64 = row.get(6);
+                let seq = u64::try_from(seq_i64)
+                    .map_err(|_| DharmaError::Validation("assertion seq overflow".to_string()))?;
+                let inserted_at = u64::try_from(inserted_i64).map_err(|_| {
+                    DharmaError::Validation("subject_assertions inserted_at overflow".to_string())
+                })?;
+                subject_rows.push(ConsistencySubjectRow {
+                    subject: SubjectId::from_slice(&subject_raw)?,
+                    seq,
+                    assertion_id: AssertionId::from_slice(&assertion_raw)?,
+                    envelope_id: EnvelopeId::from_slice(&envelope_raw)?,
+                    is_overlay,
+                    bytes: Some(bytes),
+                    inserted_at,
+                });
+            }
+
+            let semantic_rows_sql = client.query(
+                &format!(
+                    "SELECT assertion_id, envelope_id, inserted_at FROM {}",
+                    self.table("semantic_index")
+                ),
+                &[],
+            )?;
+            let mut semantic_rows = Vec::with_capacity(semantic_rows_sql.len());
+            for row in semantic_rows_sql {
+                let assertion_raw: Vec<u8> = row.get(0);
+                let envelope_raw: Vec<u8> = row.get(1);
+                let inserted_i64: i64 = row.get(2);
+                let inserted_at = u64::try_from(inserted_i64).map_err(|_| {
+                    DharmaError::Validation("semantic_index inserted_at overflow".to_string())
+                })?;
+                semantic_rows.push(ConsistencySemanticRow {
+                    assertion_id: AssertionId::from_slice(&assertion_raw)?,
+                    envelope_id: EnvelopeId::from_slice(&envelope_raw)?,
+                    inserted_at,
+                });
+            }
+
+            let cqrs_rows_sql = client.query(
+                &format!(
+                    "SELECT envelope_id, assertion_id, subject_id, is_overlay, inserted_at FROM {}",
+                    self.table("cqrs_reverse")
+                ),
+                &[],
+            )?;
+            let mut cqrs_rows = Vec::with_capacity(cqrs_rows_sql.len());
+            for row in cqrs_rows_sql {
+                let envelope_raw: Vec<u8> = row.get(0);
+                let assertion_raw: Vec<u8> = row.get(1);
+                let subject_raw: Vec<u8> = row.get(2);
+                let is_overlay: bool = row.get(3);
+                let inserted_i64: i64 = row.get(4);
+                let inserted_at = u64::try_from(inserted_i64).map_err(|_| {
+                    DharmaError::Validation("cqrs_reverse inserted_at overflow".to_string())
+                })?;
+                cqrs_rows.push(ConsistencyCqrsRow {
+                    envelope_id: EnvelopeId::from_slice(&envelope_raw)?,
+                    assertion_id: AssertionId::from_slice(&assertion_raw)?,
+                    subject: SubjectId::from_slice(&subject_raw)?,
+                    is_overlay,
+                    inserted_at,
+                });
+            }
+
+            Ok(BackendConsistencyRows {
+                subject_rows,
+                semantic_rows,
+                cqrs_rows,
+            })
+        })
     }
 
     fn table(&self, name: &str) -> String {

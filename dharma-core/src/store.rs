@@ -6,6 +6,7 @@ use crate::envelope::AssertionEnvelope;
 use crate::error::DharmaError;
 use crate::keys::Keyring;
 pub mod clickhouse;
+pub mod consistency;
 pub mod index;
 pub mod pending;
 pub mod postgres;

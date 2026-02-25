@@ -9,6 +9,7 @@ use crate::store::sqlite::SqliteEmbeddedAdapter;
 use crate::store::state::CqrsReverseEntry;
 use crate::store::Store;
 use crate::types::{AssertionId, ContractId, EnvelopeId, SubjectId};
+use std::any::Any;
 use std::io::ErrorKind;
 use std::path::Path;
 
@@ -68,9 +69,18 @@ pub trait StorageQuery {
     ) -> Result<Option<CqrsReverseEntry>, DharmaError>;
 }
 
-pub trait StorageSpi: StorageCommit + StorageRead + StorageIndex + StorageQuery {}
+pub trait StorageSpi: StorageCommit + StorageRead + StorageIndex + StorageQuery {
+    fn as_any(&self) -> &dyn Any;
+}
 
-impl<T> StorageSpi for T where T: StorageCommit + StorageRead + StorageIndex + StorageQuery {}
+impl<T> StorageSpi for T
+where
+    T: StorageCommit + StorageRead + StorageIndex + StorageQuery + Any,
+{
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 impl StorageCommit for Store {
     fn put_object_if_absent(

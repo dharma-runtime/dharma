@@ -99,6 +99,10 @@ pub fn run() -> Result<(), DharmaError> {
         [_, "backup", "import", "--force", path] | [_, "backup", "import", path, "--force"] => {
             cmd::ops::backup_import(path, true)
         }
+        [_, "migrate", "validate"] => cmd::ops::migrate_validate(&[]),
+        [_, "migrate", "validate", args @ ..] => cmd::ops::migrate_validate(args),
+        [_, "migrate", "parity"] => cmd::ops::migrate_parity(&[]),
+        [_, "migrate", "parity", args @ ..] => cmd::ops::migrate_parity(args),
         [_, "project", args @ ..] => cmd::project::project(args),
         [_, "action", subject, action] => cmd::action::action_cmd(subject, action, &[]),
         [_, "action", subject, action, args @ ..] => cmd::action::action_cmd(
@@ -155,6 +159,8 @@ fn requires_write(argv: &[&str]) -> bool {
         [_, "identity", "export"] | [_, "export"] => false,
         [_, "config", "show"] | [_, "config"] => false,
         [_, "doctor"] => false,
+        [_, "migrate", "validate", ..] => false,
+        [_, "migrate", "parity", ..] => true,
         [_, "identity", "init", ..] | [_, "init", ..] => true,
         [_, "connect", ..] => true,
         [_, "compile", ..] => true,
@@ -186,6 +192,10 @@ fn print_usage() {
     println!("  dh reserve expire [--dry-run]");
     println!("  dh backup export <path>");
     println!("  dh backup import <path> [--force]");
+    println!(
+        "  dh migrate validate [--backend sqlite|postgres|clickhouse|all] [--strict] [--json]"
+    );
+    println!("  dh migrate parity [--strict] [--json]");
     println!("  dh project rebuild [--scope std.commerce]");
     println!("  dh project watch [--scope std.commerce] [--interval SECONDS]");
     println!("  dh serve [--relay] [--verbose]");
