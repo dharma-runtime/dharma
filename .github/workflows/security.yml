@@ -13,10 +13,18 @@ permissions:
   security-events: write
 
 jobs:
-  dependency-and-license-scans:
-    name: Dependency and License Scans
+  security-scan-matrix:
+    name: Security Scan (${{ matrix.scan }})
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: true
+      matrix:
+        scan:
+          - audit
+          - deny
+          - license
+          - osv
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,36 +36,69 @@ jobs:
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: security-rust
+          workspaces: |
+            . -> target
+          cache-workspace-crates: true
+          cache-on-failure: true
 
-      - name: Install security tooling
+      - name: Install cargo-audit
+        if: matrix.scan == 'audit'
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-audit,cargo-deny,cargo-license
+          tool: cargo-audit
 
-      - name: Run cargo audit report
+      - name: Install cargo-deny
+        if: matrix.scan == 'deny'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Install cargo-license
+        if: matrix.scan == 'license'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-license
+
+      - name: Run selected scan
         run: |
+          set -euo pipefail
           mkdir -p security-reports
-          # This workflow is the enforcement gate for known vulnerabilities.
-          cargo audit --json > security-reports/cargo-audit.json
+          case "${{ matrix.scan }}" in
+            audit)
+              cargo audit --json > security-reports/cargo-audit.json
+              ;;
+            deny)
+              cargo deny check --config .github/deny.toml bans sources > security-reports/cargo-deny.txt
+              ;;
+            license)
+              cargo license --json > security-reports/cargo-license.json
+              ;;
+            osv)
+              docker run --rm -v "${PWD}:/src" ghcr.io/google/osv-scanner:latest \
+                scan --format json /src > security-reports/osv-report.json
+              ;;
+            *)
+              echo "Unknown scan type: ${{ matrix.scan }}"
+              exit 1
+              ;;
+          esac
 
-      - name: Run dependency policy checks
-        run: cargo deny check --config .github/deny.toml bans sources > security-reports/cargo-deny.txt
-
-      - name: Build license inventory
-        # Inventory/reporting only for now; enforcement can be added once SPDX metadata is aligned.
-        run: cargo license --json > security-reports/cargo-license.json
-
-      - name: Upload security reports
+      - name: Upload scan report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: security-reports
+          name: security-report-${{ matrix.scan }}
           path: security-reports/*
+          retention-days: 30
 
   codeql:
-    name: CodeQL (Optional)
-    if: vars.ENABLE_CODEQL == 'true'
+    name: CodeQL Analyze
+    if: github.event_name == 'push' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
+    needs:
+      - security-scan-matrix
     permissions:
       actions: read
       contents: read
@@ -76,3 +117,48 @@ jobs:
 
       - name: Analyze
         uses: github/codeql-action/analyze@v3
+
+  security-report:
+    name: Security Report
+    if: always()
+    runs-on: ubuntu-latest
+    needs:
+      - security-scan-matrix
+      - codeql
+    steps:
+      - name: Emit failed job list
+        run: |
+          set -euo pipefail
+          failures=()
+
+          matrix_result="${{ needs.security-scan-matrix.result }}"
+          if [ "${matrix_result}" != "success" ]; then
+            failures+=("security-scan-matrix:${matrix_result}")
+          fi
+
+          codeql_result="${{ needs.codeql.result }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${codeql_result}" != "skipped" ] && [ "${codeql_result}" != "success" ]; then
+              failures+=("codeql:${codeql_result}")
+            fi
+          else
+            if [ "${codeql_result}" != "success" ]; then
+              failures+=("codeql:${codeql_result}")
+            fi
+          fi
+
+          if [ "${#failures[@]}" -gt 0 ]; then
+            printf 'Failed jobs: %s\n' "${failures[*]}"
+            exit 1
+          fi
+
+      - name: Summarize lane results
+        run: |
+          {
+            echo "## Security Lane Report"
+            echo
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+            echo "| security-scan-matrix | ${{ needs.security-scan-matrix.result }} |"
+            echo "| codeql | ${{ needs.codeql.result }} |"
+          } >> "${GITHUB_STEP_SUMMARY}"

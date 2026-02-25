@@ -16,11 +16,64 @@ permissions:
   contents: read
 
 jobs:
-  full-deep-ci:
-    name: Full Deterministic Deep CI
+  main-quality-matrix:
+    name: Main Quality Seed ${{ matrix.seed }}
     runs-on: ubuntu-latest
-    # Deep deterministic CI (especially scheduled chaos mode) can run for hours.
+    timeout-minutes: 180
+    strategy:
+      fail-fast: true
+      matrix:
+        seed:
+          - 7
+          - 11
+          - 42
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-main-rust
+          workspaces: |
+            . -> target
+          cache-workspace-crates: true
+          cache-on-failure: true
+
+      - name: Run clippy (no deps)
+        run: cargo clippy --workspace --exclude dharma-ui --all-targets --no-deps
+
+      - name: Run unit and integration tests
+        run: cargo test --workspace --exclude dharma-ui
+
+      - name: Build release binaries
+        run: cargo build -p dharma-cli -p dharma-runtime --release
+
+      - name: Run deterministic deep replay seed
+        run: ./target/release/dh test --deep --ci --replay "SEED=${{ matrix.seed }}"
+
+      - name: Upload failure tickets (if any)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dharma-failure-tickets-main-seed-${{ matrix.seed }}
+          if-no-files-found: ignore
+          path: tests/failures/DHARMA-FAILURE-*.md
+          retention-days: 14
+
+  main-chaos:
+    name: Main Scheduled Chaos
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
     timeout-minutes: 360
+    needs:
+      - main-quality-matrix
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,33 +85,34 @@ jobs:
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-main-rust
+          workspaces: |
+            . -> target
+          cache-workspace-crates: true
+          cache-on-failure: true
 
       - name: Build release binaries
-        # Jobs run on isolated runners; rebuild here for deterministic packaging.
         run: cargo build -p dharma-cli -p dharma-runtime --release
 
-      - name: Run full deep CI
-        run: |
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            ./target/release/dh test --deep --chaos --ci
-          else
-            ./target/release/dh test --deep --ci
-          fi
+      - name: Run scheduled chaos deep CI
+        run: ./target/release/dh test --deep --chaos --ci
 
       - name: Upload failure tickets (if any)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: dharma-failure-tickets-main
+          name: dharma-failure-tickets-main-chaos
           if-no-files-found: ignore
           path: tests/failures/DHARMA-FAILURE-*.md
+          retention-days: 14
 
   artifact-build:
     name: Build Artifacts
     runs-on: ubuntu-latest
     timeout-minutes: 90
     needs:
-      - full-deep-ci
+      - main-quality-matrix
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,6 +124,12 @@ jobs:
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-main-rust
+          workspaces: |
+            . -> target
+          cache-workspace-crates: true
+          cache-on-failure: true
 
       - name: Build release binaries
         run: cargo build -p dharma-cli -p dharma-runtime --release
@@ -90,13 +150,14 @@ jobs:
         with:
           name: main-build-artifacts
           path: dist/*
+          retention-days: 30
 
   sbom-and-depscan:
     name: SBOM and Dependency Scan
     runs-on: ubuntu-latest
     timeout-minutes: 90
     needs:
-      - full-deep-ci
+      - main-quality-matrix
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -108,6 +169,12 @@ jobs:
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-main-rust
+          workspaces: |
+            . -> target
+          cache-workspace-crates: true
+          cache-on-failure: true
 
       - name: Install SBOM and audit tools
         uses: taiki-e/install-action@v2
@@ -121,10 +188,64 @@ jobs:
           find dharma-* -maxdepth 1 -type f -name 'dharma-sbom.json' -exec cp {} sbom/ \;
 
       - name: Run dependency audit report
-        run: cargo audit --json > sbom/cargo-audit.json || true
+        run: cargo audit --json > sbom/cargo-audit.json
 
       - name: Attach SBOM and audit reports
         uses: actions/upload-artifact@v4
         with:
           name: sbom-and-audit
           path: sbom/*
+          retention-days: 30
+
+  main-report:
+    name: Main Report
+    if: always()
+    runs-on: ubuntu-latest
+    needs:
+      - main-quality-matrix
+      - main-chaos
+      - artifact-build
+      - sbom-and-depscan
+    steps:
+      - name: Summarize lane results
+        run: |
+          {
+            echo "## Main CI Report"
+            echo
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+            echo "| main-quality-matrix | ${{ needs.main-quality-matrix.result }} |"
+            echo "| main-chaos | ${{ needs.main-chaos.result }} |"
+            echo "| artifact-build | ${{ needs.artifact-build.result }} |"
+            echo "| sbom-and-depscan | ${{ needs.sbom-and-depscan.result }} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Enforce lane outcomes
+        run: |
+          set -euo pipefail
+          failures=()
+          quality_result="${{ needs.main-quality-matrix.result }}"
+          artifact_result="${{ needs.artifact-build.result }}"
+          sbom_result="${{ needs.sbom-and-depscan.result }}"
+
+          if [ "${quality_result}" != "success" ]; then
+            failures+=("main-quality-matrix:${quality_result}")
+          fi
+          if [ "${artifact_result}" != "success" ]; then
+            failures+=("artifact-build:${artifact_result}")
+          fi
+          if [ "${sbom_result}" != "success" ]; then
+            failures+=("sbom-and-depscan:${sbom_result}")
+          fi
+
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            chaos_result="${{ needs.main-chaos.result }}"
+            if [ "${chaos_result}" != "success" ]; then
+              failures+=("main-chaos:${chaos_result}")
+            fi
+          fi
+
+          if [ "${#failures[@]}" -gt 0 ]; then
+            printf 'Lane failures: %s\n' "${failures[*]}"
+            exit 1
+          fi

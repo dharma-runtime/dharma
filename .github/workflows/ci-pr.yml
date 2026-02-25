@@ -14,10 +14,16 @@ permissions:
   contents: read
 
 jobs:
-  pr-quality:
-    name: PR Quality and Tests
+  pr-quality-matrix:
+    name: PR Quality (${{ matrix.toolchain }})
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: true
+      matrix:
+        toolchain:
+          - stable
+          - beta
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,13 +33,20 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
+          toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-pr-rust
+          workspaces: |
+            . -> target
+          cache-workspace-crates: true
+          cache-on-failure: true
 
       - name: Detect changed Rust files
+        if: matrix.toolchain == 'stable'
         id: changed-rs
         uses: tj-actions/changed-files@v46
         with:
@@ -43,16 +56,12 @@ jobs:
           safe_output: false
 
       - name: Check formatting on changed Rust files
-        if: steps.changed-rs.outputs.any_changed == 'true'
+        if: matrix.toolchain == 'stable' && steps.changed-rs.outputs.any_changed == 'true'
         run: |
-          # Incremental formatter check: full `cargo fmt --check` is currently too noisy
-          # due existing workspace formatting drift.
           changed_files="${{ steps.changed-rs.outputs.all_changed_files }}"
           IFS=',' read -r -a files <<< "${changed_files}"
           for file in "${files[@]}"; do
             [ -z "${file}" ] && continue
-
-            # Guard against escaped line continuations leaking from action output.
             file="${file%\\}"
 
             dir="$(dirname "${file}")"
@@ -82,6 +91,39 @@ jobs:
       - name: Run unit and integration tests
         run: cargo test --workspace --exclude dharma-ui
 
+      - name: Upload failure tickets (if any)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dharma-failure-tickets-pr-${{ matrix.toolchain }}
+          if-no-files-found: ignore
+          path: tests/failures/DHARMA-FAILURE-*.md
+          retention-days: 7
+
+  pr-test:
+    name: PR Deterministic Deep Replay
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    needs:
+      - pr-quality-matrix
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-pr-rust
+          workspaces: |
+            . -> target
+          cache-workspace-crates: true
+          cache-on-failure: true
+
       - name: Build release binaries for deterministic replay checks
         run: cargo build -p dharma-cli -p dharma-runtime --release
 
@@ -96,16 +138,18 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: dharma-failure-tickets-pr
+          name: dharma-failure-tickets-pr-deep
           if-no-files-found: ignore
           path: tests/failures/DHARMA-FAILURE-*.md
+          retention-days: 7
 
   pr-coverage:
     name: PR Coverage Summary
     runs-on: ubuntu-latest
     timeout-minutes: 90
     needs:
-      - pr-quality
+      - pr-quality-matrix
+      - pr-test
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -117,6 +161,12 @@ jobs:
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-pr-rust
+          workspaces: |
+            . -> target
+          cache-workspace-crates: true
+          cache-on-failure: true
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
@@ -144,3 +194,51 @@ jobs:
           path: |
             lcov.info
             coverage-summary.txt
+          retention-days: 14
+
+  pr-security:
+    name: PR Security Dependency Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dependency review
+        uses: actions/dependency-review-action@v4
+
+  pr-report:
+    name: PR Report
+    if: always()
+    runs-on: ubuntu-latest
+    needs:
+      - pr-quality-matrix
+      - pr-test
+      - pr-coverage
+      - pr-security
+    steps:
+      - name: Summarize lane results
+        run: |
+          {
+            echo "## PR CI Report"
+            echo
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+            echo "| pr-quality-matrix | ${{ needs.pr-quality-matrix.result }} |"
+            echo "| pr-test | ${{ needs.pr-test.result }} |"
+            echo "| pr-coverage | ${{ needs.pr-coverage.result }} |"
+            echo "| pr-security | ${{ needs.pr-security.result }} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Enforce failure-fast reporting
+        run: |
+          for result in \
+            "${{ needs.pr-quality-matrix.result }}" \
+            "${{ needs.pr-test.result }}" \
+            "${{ needs.pr-coverage.result }}" \
+            "${{ needs.pr-security.result }}"; do
+            if [ "${result}" != "success" ]; then
+              echo "PR lane failed with result: ${result}"
+              exit 1
+            fi
+          done
