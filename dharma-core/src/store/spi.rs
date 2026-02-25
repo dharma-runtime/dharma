@@ -3,6 +3,7 @@ use crate::contract::PermissionSummary;
 use crate::env::Env;
 use crate::error::DharmaError;
 use crate::keys::Keyring;
+use crate::store::sqlite::SqliteEmbeddedAdapter;
 use crate::store::state::CqrsReverseEntry;
 use crate::store::Store;
 use crate::types::{AssertionId, ContractId, EnvelopeId, SubjectId};
@@ -371,6 +372,12 @@ impl BackendErrorTaxonomy {
 pub fn classify_backend_error(error: &DharmaError) -> BackendErrorClass {
     match error {
         DharmaError::Network(_) | DharmaError::LockBusy => BackendErrorClass::Retryable,
+        DharmaError::Sqlite { code, .. }
+            if code.as_deref() == Some("DatabaseBusy")
+                || code.as_deref() == Some("DatabaseLocked") =>
+        {
+            BackendErrorClass::Retryable
+        }
         DharmaError::Io(err) => match err.kind() {
             ErrorKind::TimedOut
             | ErrorKind::ConnectionReset
@@ -389,16 +396,35 @@ pub fn classify_backend_error(error: &DharmaError) -> BackendErrorClass {
 }
 
 #[derive(Clone)]
+enum EmbeddedAdapter {
+    Ready(SqliteEmbeddedAdapter),
+    Failed(DharmaError),
+}
+
+#[derive(Clone)]
 pub struct StorageFacade {
     store: Store,
     selection: BackendSelection,
+    embedded: Option<EmbeddedAdapter>,
 }
 
 impl StorageFacade {
     pub fn new(store: Store, mode: RuntimeMode) -> Self {
+        let selection = BackendSelection::for_mode(mode);
+        let embedded = if selection.mode == RuntimeMode::Embedded {
+            Some(
+                match SqliteEmbeddedAdapter::open(store.root(), store.clone()) {
+                    Ok(adapter) => EmbeddedAdapter::Ready(adapter),
+                    Err(err) => EmbeddedAdapter::Failed(err),
+                },
+            )
+        } else {
+            None
+        };
         StorageFacade {
             store,
-            selection: BackendSelection::for_mode(mode),
+            selection,
+            embedded,
         }
     }
 
@@ -442,6 +468,22 @@ impl StorageFacade {
     ) -> BackendErrorTaxonomy {
         BackendErrorTaxonomy::classify(self.backend_for_operation(operation), operation, error)
     }
+
+    fn sqlite_for_operation(
+        &self,
+        operation: StorageOperation,
+    ) -> Result<Option<&SqliteEmbeddedAdapter>, DharmaError> {
+        if self.backend_for_operation(operation) != BackendKind::Sqlite {
+            return Ok(None);
+        }
+        match self.embedded.as_ref() {
+            Some(EmbeddedAdapter::Ready(adapter)) => Ok(Some(adapter)),
+            Some(EmbeddedAdapter::Failed(err)) => Err(err.clone()),
+            None => Err(DharmaError::Config(
+                "embedded sqlite backend unavailable".to_string(),
+            )),
+        }
+    }
 }
 
 impl StorageCommit for StorageFacade {
@@ -450,7 +492,10 @@ impl StorageCommit for StorageFacade {
         envelope_id: &EnvelopeId,
         bytes: &[u8],
     ) -> Result<(), DharmaError> {
-        self.store.put_object_if_absent(envelope_id, bytes)
+        match self.sqlite_for_operation(StorageOperation::Commit)? {
+            Some(adapter) => adapter.put_object_if_absent(envelope_id, bytes),
+            None => self.store.put_object_if_absent(envelope_id, bytes),
+        }
     }
 
     fn put_assertion(
@@ -459,21 +504,33 @@ impl StorageCommit for StorageFacade {
         envelope_id: &EnvelopeId,
         bytes: &[u8],
     ) -> Result<(), DharmaError> {
-        self.store.put_assertion(subject, envelope_id, bytes)
+        match self.sqlite_for_operation(StorageOperation::Commit)? {
+            Some(adapter) => adapter.put_assertion(subject, envelope_id, bytes),
+            None => self.store.put_assertion(subject, envelope_id, bytes),
+        }
     }
 
     fn put_permission_summary(&self, summary: &PermissionSummary) -> Result<(), DharmaError> {
-        self.store.put_permission_summary(summary)
+        match self.sqlite_for_operation(StorageOperation::Commit)? {
+            Some(adapter) => adapter.put_permission_summary(summary),
+            None => self.store.put_permission_summary(summary),
+        }
     }
 }
 
 impl StorageRead for StorageFacade {
     fn get_object(&self, envelope_id: &EnvelopeId) -> Result<Vec<u8>, DharmaError> {
-        self.store.get_object(envelope_id)
+        match self.sqlite_for_operation(StorageOperation::Read)? {
+            Some(adapter) => adapter.get_object(envelope_id),
+            None => self.store.get_object(envelope_id),
+        }
     }
 
     fn get_object_any(&self, envelope_id: &EnvelopeId) -> Result<Option<Vec<u8>>, DharmaError> {
-        self.store.get_object_any(envelope_id)
+        match self.sqlite_for_operation(StorageOperation::Read)? {
+            Some(adapter) => adapter.get_object_any(envelope_id),
+            None => self.store.get_object_any(envelope_id),
+        }
     }
 
     fn get_assertion(
@@ -481,32 +538,50 @@ impl StorageRead for StorageFacade {
         subject: &SubjectId,
         envelope_id: &EnvelopeId,
     ) -> Result<Vec<u8>, DharmaError> {
-        self.store.get_assertion(subject, envelope_id)
+        match self.sqlite_for_operation(StorageOperation::Read)? {
+            Some(adapter) => adapter.get_assertion(subject, envelope_id),
+            None => self.store.get_assertion(subject, envelope_id),
+        }
     }
 
     fn scan_subject(&self, subject: &SubjectId) -> Result<Vec<AssertionId>, DharmaError> {
-        self.store.scan_subject(subject)
+        match self.sqlite_for_operation(StorageOperation::Read)? {
+            Some(adapter) => adapter.scan_subject(subject),
+            None => self.store.scan_subject(subject),
+        }
     }
 
     fn list_subjects(&self) -> Result<Vec<SubjectId>, DharmaError> {
-        self.store.list_subjects()
+        match self.sqlite_for_operation(StorageOperation::Read)? {
+            Some(adapter) => adapter.list_subjects(),
+            None => self.store.list_subjects(),
+        }
     }
 
     fn list_objects(&self) -> Result<Vec<EnvelopeId>, DharmaError> {
-        self.store.list_objects()
+        match self.sqlite_for_operation(StorageOperation::Read)? {
+            Some(adapter) => adapter.list_objects(),
+            None => self.store.list_objects(),
+        }
     }
 
     fn get_permission_summary(
         &self,
         contract: &ContractId,
     ) -> Result<Option<PermissionSummary>, DharmaError> {
-        self.store.get_permission_summary(contract)
+        match self.sqlite_for_operation(StorageOperation::Read)? {
+            Some(adapter) => adapter.get_permission_summary(contract),
+            None => self.store.get_permission_summary(contract),
+        }
     }
 }
 
 impl StorageIndex for StorageFacade {
     fn rebuild_subject_views(&self, keys: &Keyring) -> Result<(), DharmaError> {
-        self.store.rebuild_subject_views(keys)
+        match self.sqlite_for_operation(StorageOperation::Index)? {
+            Some(adapter) => adapter.rebuild_subject_views(keys),
+            None => self.store.rebuild_subject_views(keys),
+        }
     }
 
     fn record_semantic(
@@ -514,7 +589,10 @@ impl StorageIndex for StorageFacade {
         assertion_id: &AssertionId,
         envelope_id: &EnvelopeId,
     ) -> Result<(), DharmaError> {
-        self.store.record_semantic(assertion_id, envelope_id)
+        match self.sqlite_for_operation(StorageOperation::Index)? {
+            Some(adapter) => adapter.record_semantic(assertion_id, envelope_id),
+            None => self.store.record_semantic(assertion_id, envelope_id),
+        }
     }
 }
 
@@ -523,21 +601,30 @@ impl StorageQuery for StorageFacade {
         &self,
         assertion_id: &AssertionId,
     ) -> Result<Option<EnvelopeId>, DharmaError> {
-        self.store.lookup_envelope(assertion_id)
+        match self.sqlite_for_operation(StorageOperation::Query)? {
+            Some(adapter) => adapter.lookup_envelope(assertion_id),
+            None => self.store.lookup_envelope(assertion_id),
+        }
     }
 
     fn lookup_cqrs_by_envelope(
         &self,
         envelope_id: &EnvelopeId,
     ) -> Result<Option<CqrsReverseEntry>, DharmaError> {
-        self.store.lookup_cqrs_by_envelope(envelope_id)
+        match self.sqlite_for_operation(StorageOperation::Query)? {
+            Some(adapter) => adapter.lookup_cqrs_by_envelope(envelope_id),
+            None => self.store.lookup_cqrs_by_envelope(envelope_id),
+        }
     }
 
     fn lookup_cqrs_by_assertion(
         &self,
         assertion_id: &AssertionId,
     ) -> Result<Option<CqrsReverseEntry>, DharmaError> {
-        self.store.lookup_cqrs_by_assertion(assertion_id)
+        match self.sqlite_for_operation(StorageOperation::Query)? {
+            Some(adapter) => adapter.lookup_cqrs_by_assertion(assertion_id),
+            None => self.store.lookup_cqrs_by_assertion(assertion_id),
+        }
     }
 }
 
@@ -604,6 +691,15 @@ mod tests {
             classify_backend_error(&io_err),
             BackendErrorClass::Retryable
         );
+
+        let sqlite_busy = DharmaError::Sqlite {
+            code: Some("DatabaseBusy".to_string()),
+            message: "database is busy".to_string(),
+        };
+        assert_eq!(
+            classify_backend_error(&sqlite_busy),
+            BackendErrorClass::Retryable
+        );
     }
 
     #[test]
@@ -617,6 +713,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::from_root(temp.path());
         let facade = StorageFacade::new(store, RuntimeMode::Embedded);
+        assert!(temp.path().join("indexes").join("embedded.sqlite").exists());
         let envelope_id = EnvelopeId::from_bytes([7u8; 32]);
         let wasm_bytes = [0x00, 0x61, 0x73, 0x6d, 0x01];
 
@@ -625,5 +722,21 @@ mod tests {
             .unwrap();
         let loaded = facade.get_object(&envelope_id).unwrap();
         assert_eq!(loaded, wasm_bytes);
+    }
+
+    #[test]
+    fn facade_embedded_init_failure_preserves_original_error_type() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("indexes"), b"not-a-directory").unwrap();
+
+        let store = Store::from_root(temp.path());
+        let facade = StorageFacade::new(store, RuntimeMode::Embedded);
+        let envelope_id = EnvelopeId::from_bytes([3u8; 32]);
+
+        let err = facade.get_object_any(&envelope_id).unwrap_err();
+        match err {
+            DharmaError::Io(io_err) => assert_eq!(io_err.kind(), ErrorKind::AlreadyExists),
+            other => panic!("unexpected error type: {other:?}"),
+        }
     }
 }

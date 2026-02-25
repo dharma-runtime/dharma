@@ -27,12 +27,16 @@ DHARMA stores all objects in a flat, content-addressed store:
   subjects/<subject_id>/assertions/log.bin
   subjects/<subject_id>/overlays/log.bin
   subjects/<subject_id>/snapshots/
+  indexes/embedded.sqlite
   indexes/global.idx
 ```
 
 - **Objects** are immutable and deduplicated by hash.
 - **Subject logs** are derived views.
 - **Snapshots** accelerate replay but are discardable.
+- In `embedded` profile mode, `indexes/embedded.sqlite` is initialized on first use and mirrors object/semantic/query paths.
+- Embedded SQLite keeps custom lookup indexes (`idx_semantic_assertion`, `idx_cqrs_envelope`, `idx_cqrs_assertion`, `idx_subject_assertions_subject_seq`) so replay and query lookups avoid full scans.
+- If SQLite rows are missing, runtime backfills from legacy file artifacts; `rebuild_subject_views` remains file-log driven and then rebuilds SQLite indexes.
 
 ---
 

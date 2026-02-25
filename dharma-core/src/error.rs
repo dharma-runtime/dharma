@@ -36,8 +36,47 @@ pub enum DharmaError {
     Config(String),
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("sqlite error ({code:?}): {message}")]
+    Sqlite {
+        code: Option<String>,
+        message: String,
+    },
     #[error("dependency cycle detected")]
     DependencyCycle,
+}
+
+impl Clone for DharmaError {
+    fn clone(&self) -> Self {
+        match self {
+            DharmaError::InvalidLength { expected, actual } => DharmaError::InvalidLength {
+                expected: *expected,
+                actual: *actual,
+            },
+            DharmaError::Cbor(message) => DharmaError::Cbor(message.clone()),
+            DharmaError::Crypto(message) => DharmaError::Crypto(message.clone()),
+            DharmaError::Kdf(message) => DharmaError::Kdf(message.clone()),
+            DharmaError::Signature(message) => DharmaError::Signature(message.clone()),
+            DharmaError::DecryptionFailed => DharmaError::DecryptionFailed,
+            DharmaError::MissingKey => DharmaError::MissingKey,
+            DharmaError::NonCanonicalCbor => DharmaError::NonCanonicalCbor,
+            DharmaError::Schema(message) => DharmaError::Schema(message.clone()),
+            DharmaError::Contract(message) => DharmaError::Contract(message.clone()),
+            DharmaError::OutOfFuel => DharmaError::OutOfFuel,
+            DharmaError::Validation(message) => DharmaError::Validation(message.clone()),
+            DharmaError::Network(message) => DharmaError::Network(message.clone()),
+            DharmaError::LockBusy => DharmaError::LockBusy,
+            DharmaError::Io(err) => {
+                DharmaError::Io(std::io::Error::new(err.kind(), err.to_string()))
+            }
+            DharmaError::Config(message) => DharmaError::Config(message.clone()),
+            DharmaError::NotFound(message) => DharmaError::NotFound(message.clone()),
+            DharmaError::Sqlite { code, message } => DharmaError::Sqlite {
+                code: code.clone(),
+                message: message.clone(),
+            },
+            DharmaError::DependencyCycle => DharmaError::DependencyCycle,
+        }
+    }
 }
 
 impl From<ciborium::de::Error<std::io::Error>> for DharmaError {
@@ -79,6 +118,26 @@ impl From<std::io::Error> for DharmaError {
             | ErrorKind::ConnectionRefused
             | ErrorKind::WouldBlock => DharmaError::Network(err.to_string()),
             _ => DharmaError::Io(err),
+        }
+    }
+}
+
+impl From<rusqlite::Error> for DharmaError {
+    fn from(err: rusqlite::Error) -> Self {
+        match &err {
+            rusqlite::Error::SqliteFailure(inner, _) => match inner.code {
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked => {
+                    DharmaError::LockBusy
+                }
+                _ => DharmaError::Sqlite {
+                    code: Some(format!("{:?}", inner.code)),
+                    message: err.to_string(),
+                },
+            },
+            _ => DharmaError::Sqlite {
+                code: None,
+                message: err.to_string(),
+            },
         }
     }
 }
