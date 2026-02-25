@@ -9,6 +9,10 @@ use dharma::config::Config;
 use dharma::env::Env;
 use dharma::env::StdEnv;
 use dharma::pdl::schema::CqrsSchema;
+use dharma::store::consistency::{
+    compare_configured_backends, validate_migrations_for_backends, CrossBackendReport,
+    MigrationBackend, MigrationValidationReport,
+};
 use dharma::store::pending;
 use dharma::store::state;
 use dharma::types::{hex_decode, EnvelopeId, SubjectId};
@@ -309,6 +313,326 @@ pub fn backup_import(path: &str, force: bool) -> Result<(), DharmaError> {
 
     println!("backup imported from {}", path);
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum MigrationBackendTarget {
+    #[default]
+    All,
+    Sqlite,
+    Postgres,
+    ClickHouse,
+}
+
+const ALL_MIGRATION_BACKENDS: [MigrationBackend; 3] = [
+    MigrationBackend::Sqlite,
+    MigrationBackend::Postgres,
+    MigrationBackend::ClickHouse,
+];
+const SQLITE_MIGRATION_BACKEND: [MigrationBackend; 1] = [MigrationBackend::Sqlite];
+const POSTGRES_MIGRATION_BACKEND: [MigrationBackend; 1] = [MigrationBackend::Postgres];
+const CLICKHOUSE_MIGRATION_BACKEND: [MigrationBackend; 1] = [MigrationBackend::ClickHouse];
+
+impl MigrationBackendTarget {
+    fn parse(value: &str) -> Result<Self, DharmaError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "all" => Ok(MigrationBackendTarget::All),
+            "sqlite" => Ok(MigrationBackendTarget::Sqlite),
+            "postgres" | "postgresql" => Ok(MigrationBackendTarget::Postgres),
+            "clickhouse" => Ok(MigrationBackendTarget::ClickHouse),
+            other => Err(DharmaError::Validation(format!(
+                "unknown backend `{other}` (expected sqlite|postgres|clickhouse|all)"
+            ))),
+        }
+    }
+
+    fn backends(&self) -> &'static [MigrationBackend] {
+        match self {
+            MigrationBackendTarget::All => &ALL_MIGRATION_BACKENDS,
+            MigrationBackendTarget::Sqlite => &SQLITE_MIGRATION_BACKEND,
+            MigrationBackendTarget::Postgres => &POSTGRES_MIGRATION_BACKEND,
+            MigrationBackendTarget::ClickHouse => &CLICKHOUSE_MIGRATION_BACKEND,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+struct MigrateValidateOptions {
+    backend: MigrationBackendTarget,
+    strict: bool,
+    json: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+struct MigrateParityOptions {
+    strict: bool,
+    json: bool,
+}
+
+pub fn migrate_validate(args: &[&str]) -> Result<(), DharmaError> {
+    let opts = parse_migrate_validate_options(args)?;
+    let root = std::env::current_dir()?;
+    let config = Config::load(&root)?;
+    let data_dir = config.storage_path(&root);
+    let env = StdEnv::new(&data_dir);
+    let store = Store::new(&env);
+
+    let report = validate_migrations_for_backends(&root, &config, &store, opts.backend.backends())?;
+
+    if opts.json {
+        println!("{}", migration_report_json(&report));
+    } else {
+        print_migration_report(&report);
+    }
+
+    if opts.strict && migration_report_has_failures(&report) {
+        return Err(DharmaError::Validation(
+            "migration validation failed".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn migrate_parity(args: &[&str]) -> Result<(), DharmaError> {
+    let opts = parse_migrate_parity_options(args)?;
+    let root = std::env::current_dir()?;
+    let config = Config::load(&root)?;
+    let data_dir = config.storage_path(&root);
+    let env = StdEnv::new(&data_dir);
+    let store = Store::new(&env);
+    let report = parity_report_from_result(compare_configured_backends(&root, &config, &store));
+
+    if opts.json {
+        println!("{}", parity_report_json(&report));
+    } else {
+        print_parity_report(&report);
+    }
+
+    if opts.strict && parity_report_has_failures(&report) {
+        return Err(DharmaError::Validation(
+            "cross-backend parity check failed".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn parity_report_from_result(
+    result: Result<CrossBackendReport, DharmaError>,
+) -> CrossBackendReport {
+    match result {
+        Ok(report) => report,
+        Err(err) => CrossBackendReport {
+            snapshots: Vec::new(),
+            issues: vec![format!("backend access failed: {err}")],
+        },
+    }
+}
+
+fn parse_migrate_validate_options(args: &[&str]) -> Result<MigrateValidateOptions, DharmaError> {
+    let mut opts = MigrateValidateOptions::default();
+    let mut idx = 0usize;
+    while idx < args.len() {
+        match args[idx] {
+            "--strict" => opts.strict = true,
+            "--json" => opts.json = true,
+            "--backend" => {
+                idx += 1;
+                let value = args.get(idx).ok_or_else(|| {
+                    DharmaError::Validation(
+                        "missing backend value for --backend (expected sqlite|postgres|clickhouse|all)"
+                            .to_string(),
+                    )
+                })?;
+                opts.backend = MigrationBackendTarget::parse(value)?;
+            }
+            flag if flag.starts_with("--backend=") => {
+                let value = flag.split_once('=').map(|(_, value)| value).unwrap_or("");
+                opts.backend = MigrationBackendTarget::parse(value)?;
+            }
+            other => {
+                return Err(DharmaError::Validation(format!(
+                    "unknown migrate validate flag `{other}`"
+                )));
+            }
+        }
+        idx += 1;
+    }
+    Ok(opts)
+}
+
+fn parse_migrate_parity_options(args: &[&str]) -> Result<MigrateParityOptions, DharmaError> {
+    let mut opts = MigrateParityOptions::default();
+    for arg in args {
+        match *arg {
+            "--strict" => opts.strict = true,
+            "--json" => opts.json = true,
+            other => {
+                return Err(DharmaError::Validation(format!(
+                    "unknown migrate parity flag `{other}`"
+                )));
+            }
+        }
+    }
+    Ok(opts)
+}
+
+fn migration_report_has_failures(report: &MigrationValidationReport) -> bool {
+    if !report.issues.is_empty() {
+        return true;
+    }
+    report.validations.iter().any(|v| !v.issues.is_empty())
+}
+
+fn parity_report_has_failures(report: &CrossBackendReport) -> bool {
+    if !report.issues.is_empty() {
+        return true;
+    }
+    report.snapshots.iter().any(|s| !s.issues.is_empty())
+}
+
+fn print_migration_report(report: &MigrationValidationReport) {
+    if report.validations.is_empty() {
+        println!("migrate validate: no backends selected");
+        return;
+    }
+    for validation in &report.validations {
+        let status = if validation.issues.is_empty() {
+            "ok"
+        } else {
+            "fail"
+        };
+        println!(
+            "[{status}] {} subjects={} assertions={} objects={} replay_hash={} frontier_hash={}",
+            validation.backend,
+            validation.subjects,
+            validation.assertions,
+            validation.objects,
+            validation.replay_hash_hex,
+            validation.frontier_hash_hex
+        );
+        for issue in &validation.issues {
+            println!("  - {issue}");
+        }
+    }
+}
+
+fn print_parity_report(report: &CrossBackendReport) {
+    for snapshot in &report.snapshots {
+        let status = if snapshot.issues.is_empty() {
+            "ok"
+        } else {
+            "fail"
+        };
+        println!(
+            "[{status}] {} subjects={} assertions={} objects={} replay_hash={} frontier_hash={}",
+            snapshot.backend,
+            snapshot.subjects,
+            snapshot.assertions,
+            snapshot.objects,
+            snapshot.replay_hash_hex,
+            snapshot.frontier_hash_hex
+        );
+        for issue in &snapshot.issues {
+            println!("  - {issue}");
+        }
+    }
+    if !report.issues.is_empty() {
+        println!("cross-backend issues:");
+        for issue in &report.issues {
+            println!("  - {issue}");
+        }
+    }
+}
+
+fn migration_report_json(report: &MigrationValidationReport) -> String {
+    let mut out = String::from("{\"validations\":[");
+    for (idx, validation) in report.validations.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "{{\"backend\":\"{}\",\"subjects\":{},\"assertions\":{},\"objects\":{},\"replay_hash_hex\":\"{}\",\"frontier_hash_hex\":\"{}\",\"issues\":[",
+            json_escape(&validation.backend),
+            validation.subjects,
+            validation.assertions,
+            validation.objects,
+            json_escape(&validation.replay_hash_hex),
+            json_escape(&validation.frontier_hash_hex),
+        ));
+        for (issue_idx, issue) in validation.issues.iter().enumerate() {
+            if issue_idx > 0 {
+                out.push(',');
+            }
+            out.push('"');
+            out.push_str(&json_escape(issue));
+            out.push('"');
+        }
+        out.push_str("]}");
+    }
+    out.push_str("],\"issues\":[");
+    for (idx, issue) in report.issues.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(&json_escape(issue));
+        out.push('"');
+    }
+    out.push_str("]}");
+    out
+}
+
+fn parity_report_json(report: &CrossBackendReport) -> String {
+    let mut out = String::from("{\"snapshots\":[");
+    for (idx, snapshot) in report.snapshots.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "{{\"backend\":\"{}\",\"subjects\":{},\"assertions\":{},\"objects\":{},\"replay_hash_hex\":\"{}\",\"frontier_hash_hex\":\"{}\",\"issues\":[",
+            json_escape(&snapshot.backend),
+            snapshot.subjects,
+            snapshot.assertions,
+            snapshot.objects,
+            json_escape(&snapshot.replay_hash_hex),
+            json_escape(&snapshot.frontier_hash_hex),
+        ));
+        for (issue_idx, issue) in snapshot.issues.iter().enumerate() {
+            if issue_idx > 0 {
+                out.push(',');
+            }
+            out.push('"');
+            out.push_str(&json_escape(issue));
+            out.push('"');
+        }
+        out.push_str("]}");
+    }
+    out.push_str("],\"issues\":[");
+    for (idx, issue) in report.issues.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(&json_escape(issue));
+        out.push('"');
+    }
+    out.push_str("]}");
+    out
+}
+
+fn json_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn backup_meta(root: &Path, data_dir: &Path, keystore: &Path) -> String {
@@ -819,6 +1143,88 @@ keystore_path = "keystore"
         let contents = std::fs::read_to_string(&source)?;
         std::fs::write(&target, contents)?;
         Ok(target)
+    }
+
+    #[test]
+    fn migrate_validate_parses_backend_and_flags() {
+        let opts = parse_migrate_validate_options(&["--backend", "postgres", "--strict", "--json"])
+            .unwrap();
+        assert_eq!(opts.backend, MigrationBackendTarget::Postgres);
+        assert!(opts.strict);
+        assert!(opts.json);
+    }
+
+    #[test]
+    fn migrate_validate_rejects_unknown_backend() {
+        let err = parse_migrate_validate_options(&["--backend", "mysql"]).unwrap_err();
+        match err {
+            DharmaError::Validation(msg) => {
+                assert!(msg.contains("unknown backend"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn migrate_validate_target_maps_to_requested_backends() {
+        assert_eq!(
+            MigrationBackendTarget::Sqlite.backends(),
+            &[MigrationBackend::Sqlite]
+        );
+        assert_eq!(
+            MigrationBackendTarget::Postgres.backends(),
+            &[MigrationBackend::Postgres]
+        );
+        assert_eq!(
+            MigrationBackendTarget::ClickHouse.backends(),
+            &[MigrationBackend::ClickHouse]
+        );
+        assert_eq!(
+            MigrationBackendTarget::All.backends(),
+            &[
+                MigrationBackend::Sqlite,
+                MigrationBackend::Postgres,
+                MigrationBackend::ClickHouse
+            ]
+        );
+    }
+
+    #[test]
+    fn migrate_strict_failure_detection_uses_report_issues() {
+        let parity = CrossBackendReport {
+            snapshots: Vec::new(),
+            issues: vec!["subjects mismatch".to_string()],
+        };
+        assert!(parity_report_has_failures(&parity));
+
+        let migration = MigrationValidationReport {
+            validations: vec![],
+            issues: vec!["sqlite: missing table `objects`".to_string()],
+        };
+        assert!(migration_report_has_failures(&migration));
+    }
+
+    #[test]
+    fn parity_report_from_result_wraps_error_as_issue() {
+        let report = parity_report_from_result(Err(DharmaError::Validation(
+            "connection refused".to_string(),
+        )));
+        assert!(report.snapshots.is_empty());
+        assert_eq!(report.issues.len(), 1);
+        assert!(report.issues[0].contains("backend access failed"));
+        assert!(report.issues[0].contains("connection refused"));
+    }
+
+    #[test]
+    fn parity_report_json_escapes_quote_characters_once() {
+        let report = CrossBackendReport {
+            snapshots: Vec::new(),
+            issues: vec!["backend said: \"bad\"".to_string()],
+        };
+        assert_eq!(
+            parity_report_json(&report),
+            "{\"snapshots\":[],\"issues\":[\"backend said: \\\"bad\\\"\"]}"
+        );
     }
 
     #[test]

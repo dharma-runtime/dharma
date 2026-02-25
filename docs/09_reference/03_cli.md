@@ -13,12 +13,21 @@ dh connect <addr:port>
 dh config show
 dh compile <file.dhl>
 dh test [--deep] [--chaos] [--ci] [--replay SEED=<seed>]
+dh doctor
+dh gc [--dry-run] [--no-prune] [--no-dharmaq]
+dh reserve expire [--dry-run]
+dh backup export <path>
+dh backup import <path> [--force]
+dh migrate validate [--backend sqlite|postgres|clickhouse|all] [--strict] [--json]
+dh migrate parity [--strict] [--json]
 dh serve
 dh
 ```
 
 Notes:
 - `dh` with no args starts the REPL.
+- `dh migrate validate --strict` exits non-zero on schema/index/watermark invariant failure.
+- `dh migrate parity --strict` exits non-zero on cross-backend parity/replay/frontier mismatch.
 
 ---
 
