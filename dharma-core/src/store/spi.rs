@@ -3,6 +3,7 @@ use crate::contract::PermissionSummary;
 use crate::env::Env;
 use crate::error::DharmaError;
 use crate::keys::Keyring;
+use crate::store::postgres::PostgresServerAdapter;
 use crate::store::sqlite::SqliteEmbeddedAdapter;
 use crate::store::state::CqrsReverseEntry;
 use crate::store::Store;
@@ -378,6 +379,22 @@ pub fn classify_backend_error(error: &DharmaError) -> BackendErrorClass {
         {
             BackendErrorClass::Retryable
         }
+        DharmaError::Postgres { code, message } => {
+            if let Some(code) = code.as_deref() {
+                if is_retryable_postgres_state(code) {
+                    return BackendErrorClass::Retryable;
+                }
+            } else {
+                let lowered = message.to_ascii_lowercase();
+                if lowered.contains("timeout")
+                    || lowered.contains("timed out")
+                    || lowered.contains("connection")
+                {
+                    return BackendErrorClass::Retryable;
+                }
+            }
+            BackendErrorClass::Fatal
+        }
         DharmaError::Io(err) => match err.kind() {
             ErrorKind::TimedOut
             | ErrorKind::ConnectionReset
@@ -395,9 +412,21 @@ pub fn classify_backend_error(error: &DharmaError) -> BackendErrorClass {
     }
 }
 
+fn is_retryable_postgres_state(code: &str) -> bool {
+    matches!(code, "40001" | "40P01" | "55P03" | "57014")
+        || code.starts_with("08")
+        || code.starts_with("53")
+}
+
 #[derive(Clone)]
 enum EmbeddedAdapter {
     Ready(SqliteEmbeddedAdapter),
+    Failed(DharmaError),
+}
+
+#[derive(Clone)]
+enum ServerAdapter {
+    Ready(PostgresServerAdapter),
     Failed(DharmaError),
 }
 
@@ -406,10 +435,15 @@ pub struct StorageFacade {
     store: Store,
     selection: BackendSelection,
     embedded: Option<EmbeddedAdapter>,
+    server: Option<ServerAdapter>,
 }
 
 impl StorageFacade {
     pub fn new(store: Store, mode: RuntimeMode) -> Self {
+        Self::new_with_config(store, mode, &Config::default())
+    }
+
+    pub fn new_with_config(store: Store, mode: RuntimeMode, config: &Config) -> Self {
         let selection = BackendSelection::for_mode(mode);
         let embedded = if selection.mode == RuntimeMode::Embedded {
             Some(
@@ -421,10 +455,21 @@ impl StorageFacade {
         } else {
             None
         };
+        let server = if selection.mode == RuntimeMode::Server {
+            Some(
+                match PostgresServerAdapter::open(store.root(), store.clone(), config) {
+                    Ok(adapter) => ServerAdapter::Ready(adapter),
+                    Err(err) => ServerAdapter::Failed(err),
+                },
+            )
+        } else {
+            None
+        };
         StorageFacade {
             store,
             selection,
             embedded,
+            server,
         }
     }
 
@@ -433,12 +478,12 @@ impl StorageFacade {
         E: Env + Clone + Send + Sync + 'static,
     {
         let store = Store::new(env);
-        Self::new(store, RuntimeMode::from_config(config))
+        Self::new_with_config(store, RuntimeMode::from_config(config), config)
     }
 
     pub fn from_root_and_config<P: AsRef<Path>>(root: P, config: &Config) -> Self {
         let store = Store::from_root(root.as_ref());
-        Self::new(store, RuntimeMode::from_config(config))
+        Self::new_with_config(store, RuntimeMode::from_config(config), config)
     }
 
     pub fn store(&self) -> Store {
@@ -484,6 +529,41 @@ impl StorageFacade {
             )),
         }
     }
+
+    fn postgres_for_operation(
+        &self,
+        operation: StorageOperation,
+    ) -> Result<Option<&PostgresServerAdapter>, DharmaError> {
+        let wants_postgres = match operation {
+            StorageOperation::Commit | StorageOperation::Read | StorageOperation::Index => {
+                self.backend_for_operation(operation) == BackendKind::Postgres
+            }
+            StorageOperation::Query => self.selection.mode == RuntimeMode::Server,
+        };
+        if !wants_postgres {
+            return Ok(None);
+        }
+
+        match self.server.as_ref() {
+            Some(ServerAdapter::Ready(adapter)) => Ok(Some(adapter)),
+            Some(ServerAdapter::Failed(err)) => {
+                if operation == StorageOperation::Query {
+                    Ok(None)
+                } else {
+                    Err(err.clone())
+                }
+            }
+            None => {
+                if operation == StorageOperation::Query {
+                    Ok(None)
+                } else {
+                    Err(DharmaError::Config(
+                        "server postgres backend unavailable".to_string(),
+                    ))
+                }
+            }
+        }
+    }
 }
 
 impl StorageCommit for StorageFacade {
@@ -492,10 +572,13 @@ impl StorageCommit for StorageFacade {
         envelope_id: &EnvelopeId,
         bytes: &[u8],
     ) -> Result<(), DharmaError> {
-        match self.sqlite_for_operation(StorageOperation::Commit)? {
-            Some(adapter) => adapter.put_object_if_absent(envelope_id, bytes),
-            None => self.store.put_object_if_absent(envelope_id, bytes),
+        if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Commit)? {
+            return adapter.put_object_if_absent(envelope_id, bytes);
         }
+        if let Some(adapter) = self.postgres_for_operation(StorageOperation::Commit)? {
+            return adapter.put_object_if_absent(envelope_id, bytes);
+        }
+        self.store.put_object_if_absent(envelope_id, bytes)
     }
 
     fn put_assertion(
@@ -504,33 +587,45 @@ impl StorageCommit for StorageFacade {
         envelope_id: &EnvelopeId,
         bytes: &[u8],
     ) -> Result<(), DharmaError> {
-        match self.sqlite_for_operation(StorageOperation::Commit)? {
-            Some(adapter) => adapter.put_assertion(subject, envelope_id, bytes),
-            None => self.store.put_assertion(subject, envelope_id, bytes),
+        if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Commit)? {
+            return adapter.put_assertion(subject, envelope_id, bytes);
         }
+        if let Some(adapter) = self.postgres_for_operation(StorageOperation::Commit)? {
+            return adapter.put_assertion(subject, envelope_id, bytes);
+        }
+        self.store.put_assertion(subject, envelope_id, bytes)
     }
 
     fn put_permission_summary(&self, summary: &PermissionSummary) -> Result<(), DharmaError> {
-        match self.sqlite_for_operation(StorageOperation::Commit)? {
-            Some(adapter) => adapter.put_permission_summary(summary),
-            None => self.store.put_permission_summary(summary),
+        if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Commit)? {
+            return adapter.put_permission_summary(summary);
         }
+        if let Some(adapter) = self.postgres_for_operation(StorageOperation::Commit)? {
+            return adapter.put_permission_summary(summary);
+        }
+        self.store.put_permission_summary(summary)
     }
 }
 
 impl StorageRead for StorageFacade {
     fn get_object(&self, envelope_id: &EnvelopeId) -> Result<Vec<u8>, DharmaError> {
-        match self.sqlite_for_operation(StorageOperation::Read)? {
-            Some(adapter) => adapter.get_object(envelope_id),
-            None => self.store.get_object(envelope_id),
+        if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Read)? {
+            return adapter.get_object(envelope_id);
         }
+        if let Some(adapter) = self.postgres_for_operation(StorageOperation::Read)? {
+            return adapter.get_object(envelope_id);
+        }
+        self.store.get_object(envelope_id)
     }
 
     fn get_object_any(&self, envelope_id: &EnvelopeId) -> Result<Option<Vec<u8>>, DharmaError> {
-        match self.sqlite_for_operation(StorageOperation::Read)? {
-            Some(adapter) => adapter.get_object_any(envelope_id),
-            None => self.store.get_object_any(envelope_id),
+        if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Read)? {
+            return adapter.get_object_any(envelope_id);
         }
+        if let Some(adapter) = self.postgres_for_operation(StorageOperation::Read)? {
+            return adapter.get_object_any(envelope_id);
+        }
+        self.store.get_object_any(envelope_id)
     }
 
     fn get_assertion(
@@ -538,50 +633,68 @@ impl StorageRead for StorageFacade {
         subject: &SubjectId,
         envelope_id: &EnvelopeId,
     ) -> Result<Vec<u8>, DharmaError> {
-        match self.sqlite_for_operation(StorageOperation::Read)? {
-            Some(adapter) => adapter.get_assertion(subject, envelope_id),
-            None => self.store.get_assertion(subject, envelope_id),
+        if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Read)? {
+            return adapter.get_assertion(subject, envelope_id);
         }
+        if let Some(adapter) = self.postgres_for_operation(StorageOperation::Read)? {
+            return adapter.get_assertion(subject, envelope_id);
+        }
+        self.store.get_assertion(subject, envelope_id)
     }
 
     fn scan_subject(&self, subject: &SubjectId) -> Result<Vec<AssertionId>, DharmaError> {
-        match self.sqlite_for_operation(StorageOperation::Read)? {
-            Some(adapter) => adapter.scan_subject(subject),
-            None => self.store.scan_subject(subject),
+        if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Read)? {
+            return adapter.scan_subject(subject);
         }
+        if let Some(adapter) = self.postgres_for_operation(StorageOperation::Read)? {
+            return adapter.scan_subject(subject);
+        }
+        self.store.scan_subject(subject)
     }
 
     fn list_subjects(&self) -> Result<Vec<SubjectId>, DharmaError> {
-        match self.sqlite_for_operation(StorageOperation::Read)? {
-            Some(adapter) => adapter.list_subjects(),
-            None => self.store.list_subjects(),
+        if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Read)? {
+            return adapter.list_subjects();
         }
+        if let Some(adapter) = self.postgres_for_operation(StorageOperation::Read)? {
+            return adapter.list_subjects();
+        }
+        self.store.list_subjects()
     }
 
     fn list_objects(&self) -> Result<Vec<EnvelopeId>, DharmaError> {
-        match self.sqlite_for_operation(StorageOperation::Read)? {
-            Some(adapter) => adapter.list_objects(),
-            None => self.store.list_objects(),
+        if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Read)? {
+            return adapter.list_objects();
         }
+        if let Some(adapter) = self.postgres_for_operation(StorageOperation::Read)? {
+            return adapter.list_objects();
+        }
+        self.store.list_objects()
     }
 
     fn get_permission_summary(
         &self,
         contract: &ContractId,
     ) -> Result<Option<PermissionSummary>, DharmaError> {
-        match self.sqlite_for_operation(StorageOperation::Read)? {
-            Some(adapter) => adapter.get_permission_summary(contract),
-            None => self.store.get_permission_summary(contract),
+        if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Read)? {
+            return adapter.get_permission_summary(contract);
         }
+        if let Some(adapter) = self.postgres_for_operation(StorageOperation::Read)? {
+            return adapter.get_permission_summary(contract);
+        }
+        self.store.get_permission_summary(contract)
     }
 }
 
 impl StorageIndex for StorageFacade {
     fn rebuild_subject_views(&self, keys: &Keyring) -> Result<(), DharmaError> {
-        match self.sqlite_for_operation(StorageOperation::Index)? {
-            Some(adapter) => adapter.rebuild_subject_views(keys),
-            None => self.store.rebuild_subject_views(keys),
+        if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Index)? {
+            return adapter.rebuild_subject_views(keys);
         }
+        if let Some(adapter) = self.postgres_for_operation(StorageOperation::Index)? {
+            return adapter.rebuild_subject_views(keys);
+        }
+        self.store.rebuild_subject_views(keys)
     }
 
     fn record_semantic(
@@ -589,10 +702,13 @@ impl StorageIndex for StorageFacade {
         assertion_id: &AssertionId,
         envelope_id: &EnvelopeId,
     ) -> Result<(), DharmaError> {
-        match self.sqlite_for_operation(StorageOperation::Index)? {
-            Some(adapter) => adapter.record_semantic(assertion_id, envelope_id),
-            None => self.store.record_semantic(assertion_id, envelope_id),
+        if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Index)? {
+            return adapter.record_semantic(assertion_id, envelope_id);
         }
+        if let Some(adapter) = self.postgres_for_operation(StorageOperation::Index)? {
+            return adapter.record_semantic(assertion_id, envelope_id);
+        }
+        self.store.record_semantic(assertion_id, envelope_id)
     }
 }
 
@@ -601,30 +717,39 @@ impl StorageQuery for StorageFacade {
         &self,
         assertion_id: &AssertionId,
     ) -> Result<Option<EnvelopeId>, DharmaError> {
-        match self.sqlite_for_operation(StorageOperation::Query)? {
-            Some(adapter) => adapter.lookup_envelope(assertion_id),
-            None => self.store.lookup_envelope(assertion_id),
+        if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Query)? {
+            return adapter.lookup_envelope(assertion_id);
         }
+        if let Some(adapter) = self.postgres_for_operation(StorageOperation::Query)? {
+            return adapter.lookup_envelope(assertion_id);
+        }
+        self.store.lookup_envelope(assertion_id)
     }
 
     fn lookup_cqrs_by_envelope(
         &self,
         envelope_id: &EnvelopeId,
     ) -> Result<Option<CqrsReverseEntry>, DharmaError> {
-        match self.sqlite_for_operation(StorageOperation::Query)? {
-            Some(adapter) => adapter.lookup_cqrs_by_envelope(envelope_id),
-            None => self.store.lookup_cqrs_by_envelope(envelope_id),
+        if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Query)? {
+            return adapter.lookup_cqrs_by_envelope(envelope_id);
         }
+        if let Some(adapter) = self.postgres_for_operation(StorageOperation::Query)? {
+            return adapter.lookup_cqrs_by_envelope(envelope_id);
+        }
+        self.store.lookup_cqrs_by_envelope(envelope_id)
     }
 
     fn lookup_cqrs_by_assertion(
         &self,
         assertion_id: &AssertionId,
     ) -> Result<Option<CqrsReverseEntry>, DharmaError> {
-        match self.sqlite_for_operation(StorageOperation::Query)? {
-            Some(adapter) => adapter.lookup_cqrs_by_assertion(assertion_id),
-            None => self.store.lookup_cqrs_by_assertion(assertion_id),
+        if let Some(adapter) = self.sqlite_for_operation(StorageOperation::Query)? {
+            return adapter.lookup_cqrs_by_assertion(assertion_id);
         }
+        if let Some(adapter) = self.postgres_for_operation(StorageOperation::Query)? {
+            return adapter.lookup_cqrs_by_assertion(assertion_id);
+        }
+        self.store.lookup_cqrs_by_assertion(assertion_id)
     }
 }
 
@@ -700,6 +825,15 @@ mod tests {
             classify_backend_error(&sqlite_busy),
             BackendErrorClass::Retryable
         );
+
+        let postgres_retryable = DharmaError::Postgres {
+            code: Some("40001".to_string()),
+            message: "serialization failure".to_string(),
+        };
+        assert_eq!(
+            classify_backend_error(&postgres_retryable),
+            BackendErrorClass::Retryable
+        );
     }
 
     #[test]
@@ -738,5 +872,27 @@ mod tests {
             DharmaError::Io(io_err) => assert_eq!(io_err.kind(), ErrorKind::AlreadyExists),
             other => panic!("unexpected error type: {other:?}"),
         }
+    }
+
+    #[test]
+    fn facade_server_query_falls_back_to_legacy_when_postgres_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::from_root(temp.path());
+        let mut config = Config::default();
+        config.profile.mode = "server".to_string();
+        config.storage.postgres.url = "postgres://127.0.0.1:1/does_not_exist".to_string();
+        config.storage.postgres.connect_timeout_ms = 1;
+        config.storage.postgres.acquire_timeout_ms = 1;
+
+        let facade = StorageFacade::new_with_config(store, RuntimeMode::Server, &config);
+        let assertion_id = AssertionId::from_bytes([9u8; 32]);
+        assert_eq!(facade.lookup_envelope(&assertion_id).unwrap(), None);
+
+        let envelope_id = EnvelopeId::from_bytes([10u8; 32]);
+        let err = facade.get_object_any(&envelope_id).unwrap_err();
+        assert!(matches!(
+            err,
+            DharmaError::Network(_) | DharmaError::Postgres { .. } | DharmaError::Config(_)
+        ));
     }
 }

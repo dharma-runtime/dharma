@@ -7,6 +7,7 @@ use crate::error::DharmaError;
 use crate::keys::Keyring;
 pub mod index;
 pub mod pending;
+pub mod postgres;
 pub mod spi;
 pub mod sqlite;
 pub mod state;

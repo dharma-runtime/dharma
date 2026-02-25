@@ -36,6 +36,9 @@ crc32fast = { version = "1.4" }
 memmap2 = { version = "0.9", optional = true }
 tracing = "0.1"
 rusqlite = { version = "0.31", features = ["bundled"] }
+postgres = "0.19"
+r2d2 = "0.8"
+r2d2_postgres = "0.18"
 
 [dev-dependencies]
 wat = "1.0"
