@@ -68,15 +68,12 @@ fn postgres_url() -> Option<String> {
 fn require_postgres_or_skip(test_name: &str) -> Option<String> {
     let url = postgres_url();
     if url.is_none() {
-        eprintln!(
-            "skipping {test_name}: DHARMA_TEST_POSTGRES_URL is not set in environment"
-        );
+        eprintln!("skipping {test_name}: DHARMA_TEST_POSTGRES_URL is not set in environment");
     }
     url
 }
 
 fn test_context(name: &str, url: String) -> PostgresTestContext {
-
     let mut client = Client::connect(&url, NoTls)
         .unwrap_or_else(|err| panic!("unable to connect to DHARMA_TEST_POSTGRES_URL {url}: {err}"));
 
@@ -166,7 +163,9 @@ fn sanitize_name(name: &str) -> String {
 
 #[test]
 fn postgres_server_adapter_applies_migrations_and_indexes() {
-    let Some(url) = require_postgres_or_skip("postgres_server_adapter_applies_migrations_and_indexes") else {
+    let Some(url) =
+        require_postgres_or_skip("postgres_server_adapter_applies_migrations_and_indexes")
+    else {
         return;
     };
     let ctx = test_context("migrations", url);
@@ -226,7 +225,9 @@ fn postgres_server_adapter_applies_migrations_and_indexes() {
 
 #[test]
 fn postgres_server_adapter_concurrent_writes_are_consistent() {
-    let Some(url) = require_postgres_or_skip("postgres_server_adapter_concurrent_writes_are_consistent") else {
+    let Some(url) =
+        require_postgres_or_skip("postgres_server_adapter_concurrent_writes_are_consistent")
+    else {
         return;
     };
     let ctx = test_context("concurrency", url);
@@ -293,7 +294,8 @@ fn postgres_server_adapter_concurrent_writes_are_consistent() {
 
 #[test]
 fn postgres_server_adapter_retries_transient_failures() {
-    let Some(url) = require_postgres_or_skip("postgres_server_adapter_retries_transient_failures") else {
+    let Some(url) = require_postgres_or_skip("postgres_server_adapter_retries_transient_failures")
+    else {
         return;
     };
     let mut ctx = test_context("retry", url);
@@ -345,7 +347,9 @@ fn postgres_server_adapter_retries_transient_failures() {
 
 #[test]
 fn postgres_server_adapter_replay_state_derivation_matches_legacy() {
-    let Some(url) = require_postgres_or_skip("postgres_server_adapter_replay_state_derivation_matches_legacy") else {
+    let Some(url) =
+        require_postgres_or_skip("postgres_server_adapter_replay_state_derivation_matches_legacy")
+    else {
         return;
     };
     let ctx = test_context("parity", url);
