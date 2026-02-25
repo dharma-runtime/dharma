@@ -21,6 +21,14 @@ const DEFAULT_STORAGE_PATH: &str = "~/.dharma/data";
 const DEFAULT_KEYSTORE_PATH: &str = "keystore";
 const DEFAULT_SNAPSHOT_INTERVAL: u64 = 1000;
 const DEFAULT_PRUNE_PENDING_HOURS: u64 = 24;
+const DEFAULT_STORAGE_POSTGRES_URL: &str = "postgres://postgres:postgres@127.0.0.1:5432/dharma";
+const DEFAULT_STORAGE_POSTGRES_SCHEMA: &str = "public";
+const DEFAULT_STORAGE_POSTGRES_POOL_MAX_SIZE: u32 = 16;
+const DEFAULT_STORAGE_POSTGRES_CONNECT_TIMEOUT_MS: u64 = 5000;
+const DEFAULT_STORAGE_POSTGRES_ACQUIRE_TIMEOUT_MS: u64 = 5000;
+const DEFAULT_STORAGE_POSTGRES_STATEMENT_TIMEOUT_MS: u64 = 5000;
+const DEFAULT_STORAGE_POSTGRES_RETRY_MAX_ATTEMPTS: u32 = 3;
+const DEFAULT_STORAGE_POSTGRES_RETRY_BACKOFF_MS: u64 = 50;
 const DEFAULT_PROFILE_MODE: &str = "embedded";
 const DEFAULT_REGISTRY_URL: &str = "https://registry.dharma.systems";
 const DEFAULT_VM_FUEL: u64 = 1_000_000;
@@ -68,6 +76,19 @@ pub struct StorageConfig {
     pub path: String,
     pub snapshot_interval: u64,
     pub prune_pending_hours: u64,
+    pub postgres: StoragePostgresConfig,
+}
+
+#[derive(Clone, Debug)]
+pub struct StoragePostgresConfig {
+    pub url: String,
+    pub schema: String,
+    pub pool_max_size: u32,
+    pub connect_timeout_ms: u64,
+    pub acquire_timeout_ms: u64,
+    pub statement_timeout_ms: u64,
+    pub retry_max_attempts: u32,
+    pub retry_backoff_ms: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -181,6 +202,16 @@ impl Default for Config {
                 path: DEFAULT_STORAGE_PATH.to_string(),
                 snapshot_interval: DEFAULT_SNAPSHOT_INTERVAL,
                 prune_pending_hours: DEFAULT_PRUNE_PENDING_HOURS,
+                postgres: StoragePostgresConfig {
+                    url: DEFAULT_STORAGE_POSTGRES_URL.to_string(),
+                    schema: DEFAULT_STORAGE_POSTGRES_SCHEMA.to_string(),
+                    pool_max_size: DEFAULT_STORAGE_POSTGRES_POOL_MAX_SIZE,
+                    connect_timeout_ms: DEFAULT_STORAGE_POSTGRES_CONNECT_TIMEOUT_MS,
+                    acquire_timeout_ms: DEFAULT_STORAGE_POSTGRES_ACQUIRE_TIMEOUT_MS,
+                    statement_timeout_ms: DEFAULT_STORAGE_POSTGRES_STATEMENT_TIMEOUT_MS,
+                    retry_max_attempts: DEFAULT_STORAGE_POSTGRES_RETRY_MAX_ATTEMPTS,
+                    retry_backoff_ms: DEFAULT_STORAGE_POSTGRES_RETRY_BACKOFF_MS,
+                },
             },
             profile: ProfileConfig {
                 mode: DEFAULT_PROFILE_MODE.to_string(),
@@ -304,6 +335,34 @@ impl Config {
         out.push(format!(
             "prune_pending_hours = {}",
             self.storage.prune_pending_hours
+        ));
+        out.push(String::new());
+        out.push("[storage.postgres]".to_string());
+        out.push(format!("url = \"{}\"", self.storage.postgres.url));
+        out.push(format!("schema = \"{}\"", self.storage.postgres.schema));
+        out.push(format!(
+            "pool_max_size = {}",
+            self.storage.postgres.pool_max_size
+        ));
+        out.push(format!(
+            "connect_timeout_ms = {}",
+            self.storage.postgres.connect_timeout_ms
+        ));
+        out.push(format!(
+            "acquire_timeout_ms = {}",
+            self.storage.postgres.acquire_timeout_ms
+        ));
+        out.push(format!(
+            "statement_timeout_ms = {}",
+            self.storage.postgres.statement_timeout_ms
+        ));
+        out.push(format!(
+            "retry_max_attempts = {}",
+            self.storage.postgres.retry_max_attempts
+        ));
+        out.push(format!(
+            "retry_backoff_ms = {}",
+            self.storage.postgres.retry_backoff_ms
         ));
         out.push(String::new());
 
@@ -584,6 +643,62 @@ impl Config {
                 if let ConfigValue::Int(val) = value {
                     if val >= 0 {
                         self.storage.prune_pending_hours = val as u64;
+                    }
+                }
+            }
+            "storage.postgres.url" => {
+                if let ConfigValue::Str(val) = value {
+                    if !val.is_empty() {
+                        self.storage.postgres.url = val;
+                    }
+                }
+            }
+            "storage.postgres.schema" => {
+                if let ConfigValue::Str(val) = value {
+                    if !val.is_empty() {
+                        self.storage.postgres.schema = val;
+                    }
+                }
+            }
+            "storage.postgres.pool_max_size" => {
+                if let ConfigValue::Int(val) = value {
+                    if val > 0 && val <= u32::MAX as i64 {
+                        self.storage.postgres.pool_max_size = val as u32;
+                    }
+                }
+            }
+            "storage.postgres.connect_timeout_ms" => {
+                if let ConfigValue::Int(val) = value {
+                    if val >= 0 {
+                        self.storage.postgres.connect_timeout_ms = val as u64;
+                    }
+                }
+            }
+            "storage.postgres.acquire_timeout_ms" => {
+                if let ConfigValue::Int(val) = value {
+                    if val >= 0 {
+                        self.storage.postgres.acquire_timeout_ms = val as u64;
+                    }
+                }
+            }
+            "storage.postgres.statement_timeout_ms" => {
+                if let ConfigValue::Int(val) = value {
+                    if val >= 0 {
+                        self.storage.postgres.statement_timeout_ms = val as u64;
+                    }
+                }
+            }
+            "storage.postgres.retry_max_attempts" => {
+                if let ConfigValue::Int(val) = value {
+                    if val > 0 && val <= u32::MAX as i64 {
+                        self.storage.postgres.retry_max_attempts = val as u32;
+                    }
+                }
+            }
+            "storage.postgres.retry_backoff_ms" => {
+                if let ConfigValue::Int(val) = value {
+                    if val >= 0 {
+                        self.storage.postgres.retry_backoff_ms = val as u64;
                     }
                 }
             }
@@ -922,6 +1037,31 @@ fn default_config_template() -> String {
         &format!("snapshot_interval = {}", DEFAULT_SNAPSHOT_INTERVAL),
         &format!("prune_pending_hours = {}", DEFAULT_PRUNE_PENDING_HOURS),
         "",
+        "[storage.postgres]",
+        &format!("url = \"{}\"", DEFAULT_STORAGE_POSTGRES_URL),
+        &format!("schema = \"{}\"", DEFAULT_STORAGE_POSTGRES_SCHEMA),
+        &format!("pool_max_size = {}", DEFAULT_STORAGE_POSTGRES_POOL_MAX_SIZE),
+        &format!(
+            "connect_timeout_ms = {}",
+            DEFAULT_STORAGE_POSTGRES_CONNECT_TIMEOUT_MS
+        ),
+        &format!(
+            "acquire_timeout_ms = {}",
+            DEFAULT_STORAGE_POSTGRES_ACQUIRE_TIMEOUT_MS
+        ),
+        &format!(
+            "statement_timeout_ms = {}",
+            DEFAULT_STORAGE_POSTGRES_STATEMENT_TIMEOUT_MS
+        ),
+        &format!(
+            "retry_max_attempts = {}",
+            DEFAULT_STORAGE_POSTGRES_RETRY_MAX_ATTEMPTS
+        ),
+        &format!(
+            "retry_backoff_ms = {}",
+            DEFAULT_STORAGE_POSTGRES_RETRY_BACKOFF_MS
+        ),
+        "",
         "[profile]",
         &format!("mode = \"{}\"", DEFAULT_PROFILE_MODE),
         "",
@@ -1138,6 +1278,16 @@ sync_obj_chunk_bytes = 12345
 sync_obj_buffer_bytes = 67890
 peers = ["tcp://a:1", "tcp://b:2"]
 
+[storage.postgres]
+url = "postgres://test:test@127.0.0.1:5432/test"
+schema = "dharma_test"
+pool_max_size = 8
+connect_timeout_ms = 1234
+acquire_timeout_ms = 2345
+statement_timeout_ms = 3456
+retry_max_attempts = 4
+retry_backoff_ms = 15
+
 [registry.pins]
 "std.finance" = "1.2.0"
 "#;
@@ -1152,6 +1302,17 @@ peers = ["tcp://a:1", "tcp://b:2"]
         assert_eq!(cfg.network.sync_obj_buffer_bytes, 67890);
         assert_eq!(cfg.network.peers.len(), 2);
         assert_eq!(
+            cfg.storage.postgres.url,
+            "postgres://test:test@127.0.0.1:5432/test".to_string()
+        );
+        assert_eq!(cfg.storage.postgres.schema, "dharma_test".to_string());
+        assert_eq!(cfg.storage.postgres.pool_max_size, 8);
+        assert_eq!(cfg.storage.postgres.connect_timeout_ms, 1234);
+        assert_eq!(cfg.storage.postgres.acquire_timeout_ms, 2345);
+        assert_eq!(cfg.storage.postgres.statement_timeout_ms, 3456);
+        assert_eq!(cfg.storage.postgres.retry_max_attempts, 4);
+        assert_eq!(cfg.storage.postgres.retry_backoff_ms, 15);
+        assert_eq!(
             cfg.registry.pins.get("std.finance").cloned(),
             Some("1.2.0".to_string())
         );
@@ -1161,6 +1322,7 @@ peers = ["tcp://a:1", "tcp://b:2"]
         assert!(rendered.contains("max_frame_size"));
         assert!(rendered.contains("sync_obj_chunk_bytes"));
         assert!(rendered.contains("sync_obj_buffer_bytes"));
+        assert!(rendered.contains("[storage.postgres]"));
     }
 
     #[test]

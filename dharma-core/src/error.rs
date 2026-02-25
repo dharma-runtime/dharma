@@ -41,6 +41,11 @@ pub enum DharmaError {
         code: Option<String>,
         message: String,
     },
+    #[error("postgres error ({code:?}): {message}")]
+    Postgres {
+        code: Option<String>,
+        message: String,
+    },
     #[error("dependency cycle detected")]
     DependencyCycle,
 }
@@ -71,6 +76,10 @@ impl Clone for DharmaError {
             DharmaError::Config(message) => DharmaError::Config(message.clone()),
             DharmaError::NotFound(message) => DharmaError::NotFound(message.clone()),
             DharmaError::Sqlite { code, message } => DharmaError::Sqlite {
+                code: code.clone(),
+                message: message.clone(),
+            },
+            DharmaError::Postgres { code, message } => DharmaError::Postgres {
                 code: code.clone(),
                 message: message.clone(),
             },
@@ -151,5 +160,20 @@ impl From<argon2::password_hash::Error> for DharmaError {
 impl From<argon2::Error> for DharmaError {
     fn from(err: argon2::Error) -> Self {
         DharmaError::Kdf(err.to_string())
+    }
+}
+
+impl From<postgres::Error> for DharmaError {
+    fn from(err: postgres::Error) -> Self {
+        DharmaError::Postgres {
+            code: err.as_db_error().map(|db| db.code().code().to_string()),
+            message: err.to_string(),
+        }
+    }
+}
+
+impl From<r2d2::Error> for DharmaError {
+    fn from(err: r2d2::Error) -> Self {
+        DharmaError::Network(err.to_string())
     }
 }
