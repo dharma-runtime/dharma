@@ -8,6 +8,7 @@ use crate::keys::Keyring;
 pub mod index;
 pub mod pending;
 pub mod spi;
+pub mod sqlite;
 pub mod state;
 use crate::types::{AssertionId, ContractId, EnvelopeId, SubjectId};
 use std::collections::HashMap;
