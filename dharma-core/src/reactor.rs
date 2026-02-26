@@ -503,6 +503,14 @@ fn lookup(root: &Value, path: &[String]) -> Option<Value> {
                     }
                 }
             }
+            let dotted = path.join(".");
+            for (k, v) in entries {
+                if let Value::Text(name) = k {
+                    if name == &dotted {
+                        return Some(v.clone());
+                    }
+                }
+            }
             None
         }
         Value::Array(items) => {

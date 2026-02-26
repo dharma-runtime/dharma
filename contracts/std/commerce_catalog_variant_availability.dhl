@@ -115,12 +115,11 @@ projection VariantAvailabilityByBucket
     query
         std.commerce.availability.item_bucket
         | lj std.commerce.catalog.variant on item_id=std.commerce.catalog.variant.item_id
-        | sel std.commerce.catalog.variant.subject as variant_id, delivery_area, bucket_date, available_on_hand_qty, available_backorder_qty, available_preorder_qty, preorder_allowed, preorder_capacity, preorder_unverified, shelf_life_status, shelf_life_unverified
-        | by variant_id, delivery_area, bucket_date
+        | by std.commerce.catalog.variant.subject, delivery_area, bucket_date
         | agg sum(available_backorder_qty) as available_backorder_qty, sum(available_on_hand_qty) as available_on_hand_qty, sum(available_preorder_qty) as available_preorder_qty, max(preorder_allowed) as preorder_allowed, max(preorder_capacity) as preorder_capacity, max(preorder_unverified) as preorder_unverified, min(shelf_life_status) as shelf_life_status, max(shelf_life_unverified) as shelf_life_unverified
     emit upsert std.commerce.catalog.variant_availability
-        id = proj_id(variant_id, delivery_area, bucket_date)
-        variant_id = variant_id
+        id = proj_id(std.commerce.catalog.variant.subject, delivery_area, bucket_date)
+        variant_id = std.commerce.catalog.variant.subject
         delivery_area = delivery_area
         bucket_date = bucket_date
         available_on_hand_qty = available_on_hand_qty

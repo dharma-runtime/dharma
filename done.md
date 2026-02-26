@@ -126,6 +126,13 @@
 - Task 24: Fabric Execution Protocol (Fast/Wide Path) (tasks/24_fabric_execution.md)
 - Task 25: Directory & Relay System (V1 Discovery/Atlas) (tasks/25_directory_relay.md)
 
+## ECommerce (Epic 66)
+- Epic 66: ECommerce Overview (tasks/66_ecommerce_epic.md)
+- Task 66.1: Projection Writers + Pipelines (tasks/66_1_ecommerce_projections.md)
+- Task 66.2: Core Entity Contracts (Supplier/Warehouse) (tasks/66_2_ecommerce_core_entities.md)
+- Task 66.3: Projection + Query Tests (tasks/66_3_ecommerce_projection_tests.md)
+- DHA-69: Program Gate TTM v1 Ecommerce/ERP Go-Live (projection runtime wiring, deterministic tests, and go-live runbook)
+
 ## Standard Library
 - Task 44: Standard Library Expansion (The OS of Business) (tasks/44_stdlib_expansion.md)
 

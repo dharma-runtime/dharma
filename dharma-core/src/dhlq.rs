@@ -11,7 +11,7 @@ use crate::store::Store;
 use crate::types::{AssertionId, ContractId, EnvelopeId, SchemaId, SubjectId};
 use crate::value::{expect_array, expect_int, expect_map, expect_text, map_get};
 use ciborium::value::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -552,6 +552,7 @@ where
     };
 
     let mut values: Option<Vec<Value>> = None;
+    let mut grouped_values = false;
     for op in &plan.ops {
         match op {
             QueryOp::Where(expr) => {
@@ -595,6 +596,7 @@ where
                     out.push(select_row(row, params, items)?);
                 }
                 values = Some(out);
+                grouped_values = false;
             }
             QueryOp::Join(spec) => {
                 if values.is_some() {
@@ -620,10 +622,12 @@ where
             QueryOp::GroupBy(keys) => {
                 let grouped = group_rows(&rows, params, keys)?;
                 values = Some(grouped);
+                grouped_values = true;
             }
             QueryOp::Agg(specs) => {
-                let agg = aggregate_rows(values.take(), &rows, params, specs)?;
+                let agg = aggregate_rows(values.take(), &rows, params, specs, grouped_values)?;
                 values = Some(agg);
+                grouped_values = false;
             }
         }
     }
@@ -707,29 +711,116 @@ impl QueryRow {
         let base = self.sources.get(&self.base_table);
         let mut entries = Vec::new();
         if let Some(base) = base {
-            entries.push((
-                Value::Text("subject".to_string()),
+            upsert_map_text_entry(
+                &mut entries,
+                "subject",
                 Value::Bytes(base.subject.as_bytes().to_vec()),
-            ));
+            );
             if let Some(oid) = base.oid {
-                entries.push((
-                    Value::Text("oid".to_string()),
-                    Value::Bytes(oid.as_bytes().to_vec()),
-                ));
+                upsert_map_text_entry(&mut entries, "oid", Value::Bytes(oid.as_bytes().to_vec()));
             }
-            entries.push((
-                Value::Text("seq".to_string()),
+            upsert_map_text_entry(
+                &mut entries,
+                "seq",
                 Value::Integer((base.seq as u64).into()),
-            ));
+            );
+            extend_with_source_fields(&mut entries, base);
         }
         if self.score > 0 {
-            entries.push((
-                Value::Text("score".to_string()),
+            upsert_map_text_entry(
+                &mut entries,
+                "score",
                 Value::Integer((self.score as u64).into()),
-            ));
+            );
+        }
+
+        let mut derived_keys = self.derived.keys().cloned().collect::<Vec<_>>();
+        derived_keys.sort();
+        for key in derived_keys {
+            if let Some(value) = self.derived.get(&key) {
+                upsert_map_text_entry(&mut entries, &key, value.clone());
+            }
+        }
+
+        let mut source_names = self.sources.keys().cloned().collect::<Vec<_>>();
+        source_names.sort();
+        for source_name in source_names {
+            let Some(source) = self.sources.get(&source_name) else {
+                continue;
+            };
+            let nested_value = Value::Map(source_value_map(source));
+            let parts = source_name.split('.').collect::<Vec<_>>();
+            insert_nested_entry(&mut entries, &parts, nested_value);
         }
         Value::Map(entries)
     }
+}
+
+fn upsert_map_text_entry(entries: &mut Vec<(Value, Value)>, key: &str, value: Value) {
+    if let Some((_, existing)) = entries
+        .iter_mut()
+        .find(|(k, _)| matches!(k, Value::Text(name) if name == key))
+    {
+        *existing = value;
+        return;
+    }
+    entries.push((Value::Text(key.to_string()), value));
+}
+
+fn insert_nested_entry(entries: &mut Vec<(Value, Value)>, path: &[&str], value: Value) {
+    if path.is_empty() {
+        return;
+    }
+    if path.len() == 1 {
+        upsert_map_text_entry(entries, path[0], value);
+        return;
+    }
+
+    let key = path[0];
+    if let Some((_, existing)) = entries
+        .iter_mut()
+        .find(|(k, _)| matches!(k, Value::Text(name) if name == key))
+    {
+        if !matches!(existing, Value::Map(_)) {
+            *existing = Value::Map(Vec::new());
+        }
+        if let Value::Map(children) = existing {
+            insert_nested_entry(children, &path[1..], value);
+            return;
+        }
+    }
+
+    let mut children = Vec::new();
+    insert_nested_entry(&mut children, &path[1..], value);
+    entries.push((Value::Text(key.to_string()), Value::Map(children)));
+}
+
+fn extend_with_source_fields(entries: &mut Vec<(Value, Value)>, source: &RowSource) {
+    for field_name in source.schema.fields.keys() {
+        if let Ok((_, value)) = read_value_at_path(&source.memory, &source.schema, field_name) {
+            upsert_map_text_entry(entries, field_name, value);
+        }
+    }
+}
+
+fn source_value_map(source: &RowSource) -> Vec<(Value, Value)> {
+    let mut entries = Vec::new();
+    entries.push((
+        Value::Text("subject".to_string()),
+        Value::Bytes(source.subject.as_bytes().to_vec()),
+    ));
+    if let Some(oid) = source.oid {
+        entries.push((
+            Value::Text("oid".to_string()),
+            Value::Bytes(oid.as_bytes().to_vec()),
+        ));
+    }
+    entries.push((
+        Value::Text("seq".to_string()),
+        Value::Integer((source.seq as u64).into()),
+    ));
+    extend_with_source_fields(&mut entries, source);
+    entries
 }
 
 fn load_rows_for_table<B>(
@@ -1006,6 +1097,11 @@ fn row_value(row: &QueryRow, _params: &Value, path: &str) -> Result<Value, Dharm
     if parts.is_empty() {
         return Ok(Value::Null);
     }
+    if let Some(root) = row.derived.get(parts[0]) {
+        if let Some(value) = lookup_value_path(root, &parts[1..]) {
+            return Ok(value);
+        }
+    }
     if let Some(val) = row_meta_value(row, &parts) {
         return Ok(val);
     }
@@ -1019,6 +1115,30 @@ fn row_value(row: &QueryRow, _params: &Value, path: &str) -> Result<Value, Dharm
     let field = field_path.join(".");
     let (_, value) = read_value_at_path(&source.memory, &source.schema, &field)?;
     Ok(value)
+}
+
+fn lookup_value_path(root: &Value, path: &[&str]) -> Option<Value> {
+    if path.is_empty() {
+        return Some(root.clone());
+    }
+    match root {
+        Value::Map(entries) => {
+            for (key, value) in entries {
+                if let Value::Text(name) = key {
+                    if name == path[0] {
+                        return lookup_value_path(value, &path[1..]);
+                    }
+                }
+            }
+            None
+        }
+        Value::Array(items) => {
+            let idx = path[0].parse::<usize>().ok()?;
+            let next = items.get(idx)?;
+            lookup_value_path(next, &path[1..])
+        }
+        _ => None,
+    }
 }
 
 fn row_meta_value(row: &QueryRow, parts: &[&str]) -> Option<Value> {
@@ -1227,16 +1347,18 @@ fn group_rows(
     params: &Value,
     keys: &[String],
 ) -> Result<Vec<Value>, DharmaError> {
-    let mut out = Vec::new();
+    let mut groups: BTreeMap<Vec<u8>, Value> = BTreeMap::new();
     for row in rows {
         let mut entry = Vec::new();
         for key in keys {
             let val = row_value(row, params, key)?;
             entry.push((Value::Text(key.clone()), val));
         }
-        out.push(Value::Map(entry));
+        let value = Value::Map(entry);
+        let key = cbor::encode_canonical_value(&value)?;
+        groups.entry(key).or_insert(value);
     }
-    Ok(out)
+    Ok(groups.into_values().collect())
 }
 
 fn aggregate_rows(
@@ -1244,7 +1366,33 @@ fn aggregate_rows(
     rows: &[QueryRow],
     params: &Value,
     specs: &[AggSpec],
+    grouped_values: bool,
 ) -> Result<Vec<Value>, DharmaError> {
+    if grouped_values {
+        let Some(groups) = values else {
+            return Ok(Vec::new());
+        };
+        if groups.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut out = Vec::new();
+        for group in groups {
+            let group_entries = expect_map(&group)?;
+            let mut entry = group_entries.to_vec();
+            for spec in specs {
+                let alias = spec
+                    .alias
+                    .clone()
+                    .unwrap_or_else(|| spec.func.as_str().to_string());
+                let value = aggregate_value_for_group(spec, rows, params, Some(group_entries))?;
+                entry.push((Value::Text(alias), value));
+            }
+            out.push(Value::Map(entry));
+        }
+        return Ok(out);
+    }
+
     let base: Vec<Value> =
         values.unwrap_or_else(|| rows.iter().map(|row| row.to_value()).collect());
     if base.is_empty() {
@@ -1252,19 +1400,11 @@ fn aggregate_rows(
     }
     let mut totals = Vec::new();
     for spec in specs {
-        let value = match spec.func {
-            AggFunc::Count => Value::Integer((base.len() as u64).into()),
-            AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max => {
-                let mut vals = Vec::new();
-                if let Some(path) = &spec.path {
-                    for row in rows {
-                        if let Ok(val) = row_value(row, params, path) {
-                            vals.push(val);
-                        }
-                    }
-                }
-                aggregate_values(&spec.func, &vals)
-            }
+        let value = aggregate_value_for_group(spec, rows, params, None)?;
+        let value = if matches!(spec.func, AggFunc::Count) {
+            Value::Integer((base.len() as u64).into())
+        } else {
+            value
         };
         let alias = spec
             .alias
@@ -1273,6 +1413,56 @@ fn aggregate_rows(
         totals.push((Value::Text(alias), value));
     }
     Ok(vec![Value::Map(totals)])
+}
+
+fn aggregate_value_for_group(
+    spec: &AggSpec,
+    rows: &[QueryRow],
+    params: &Value,
+    group_entries: Option<&[(Value, Value)]>,
+) -> Result<Value, DharmaError> {
+    let mut matched = Vec::new();
+    for row in rows {
+        if row_matches_group(row, params, group_entries)? {
+            matched.push(row);
+        }
+    }
+
+    let value = match spec.func {
+        AggFunc::Count => Value::Integer((matched.len() as u64).into()),
+        AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max => {
+            let mut vals = Vec::new();
+            if let Some(path) = &spec.path {
+                for row in matched {
+                    if let Ok(val) = row_value(row, params, path) {
+                        vals.push(val);
+                    }
+                }
+            }
+            aggregate_values(&spec.func, &vals)
+        }
+    };
+    Ok(value)
+}
+
+fn row_matches_group(
+    row: &QueryRow,
+    params: &Value,
+    group_entries: Option<&[(Value, Value)]>,
+) -> Result<bool, DharmaError> {
+    let Some(entries) = group_entries else {
+        return Ok(true);
+    };
+    for (key, expected) in entries {
+        let Value::Text(name) = key else {
+            continue;
+        };
+        let actual = row_value(row, params, name)?;
+        if actual != *expected {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn aggregate_values(func: &AggFunc, values: &[Value]) -> Value {

@@ -65,6 +65,17 @@ action Upsert(
         state.net_amount_minor = net_amount_minor
         state.gross_amount_minor = gross_amount_minor
         state.updated_at = context.timestamp
+
+action Deactivate()
+    validate
+        has_role(context.signer, "projection.writer")
+    apply
+        state.qty = 0
+        state.unit_price_minor = 0
+        state.tax_amount_minor = 0
+        state.net_amount_minor = 0
+        state.gross_amount_minor = 0
+        state.updated_at = context.timestamp
 ```
 
 ## Projection

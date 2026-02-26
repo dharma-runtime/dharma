@@ -1056,12 +1056,17 @@ mod tests {
     use crate::cmd::action::{
         apply_action_prepared, load_contract_bytes, load_contract_ids_for_ver, load_schema_bytes,
     };
+    use crate::cmd::project_runtime;
     use crate::compile_dhl;
+    use dharma::assertion::{AssertionHeader, AssertionPlaintext, DEFAULT_DATA_VERSION};
+    use dharma::crypto;
     use dharma::identity_store;
     use dharma::pdl::schema::CqrsSchema;
-    use dharma::types::SubjectId;
+    use dharma::store::state::append_assertion;
+    use dharma::types::{ContractId, SchemaId, SubjectId};
     use rand::rngs::StdRng;
     use rand::SeedableRng;
+    use std::collections::HashMap;
     use std::sync::{Mutex, MutexGuard};
     use tempfile::TempDir;
 
@@ -1742,6 +1747,1027 @@ std.commerce.availability.item_bucket
             status_from(on_hand, backorder, preorder, preorder_allowed),
             "OutOfStock"
         );
+
+        Ok(())
+    }
+
+    #[derive(Clone)]
+    struct ContractArtifacts {
+        schema_id: SchemaId,
+        contract_id: ContractId,
+        schema: CqrsSchema,
+        contract_bytes: Vec<u8>,
+    }
+
+    #[derive(Clone)]
+    struct CommerceFixture {
+        data_dir: PathBuf,
+        identity: dharma::IdentityState,
+        category_id: String,
+        variant_id: SubjectId,
+        line_id: SubjectId,
+        invoice_id: SubjectId,
+        catalog_product: ContractArtifacts,
+    }
+
+    fn vmap(entries: Vec<(&str, Value)>) -> Value {
+        Value::Map(
+            entries
+                .into_iter()
+                .map(|(k, v)| (Value::Text(k.to_string()), v))
+                .collect(),
+        )
+    }
+
+    fn grant_projection_writer_role(
+        data_dir: &Path,
+        identity: &dharma::IdentityState,
+    ) -> Result<(), DharmaError> {
+        let env = StdEnv::new(data_dir);
+        let _ = crate::mount_self(&env, identity)?;
+        let records = state::list_assertions(&env, &identity.subject_id)?;
+        let prev = records.last().map(|record| record.assertion_id);
+        let seq = records.last().map(|record| record.seq + 1).unwrap_or(1);
+
+        let header = AssertionHeader {
+            v: crypto::PROTOCOL_VERSION,
+            ver: DEFAULT_DATA_VERSION,
+            sub: identity.subject_id,
+            typ: "identity.profile".to_string(),
+            auth: identity.public_key,
+            seq,
+            prev,
+            refs: prev.into_iter().collect(),
+            ts: None,
+            schema: SchemaId::from_bytes([9u8; 32]),
+            contract: ContractId::from_bytes([7u8; 32]),
+            note: None,
+            meta: None,
+        };
+        let body = vmap(vec![(
+            "roles",
+            Value::Array(vec![Value::Text("projection.writer".to_string())]),
+        )]);
+        let assertion = AssertionPlaintext::sign(header, body, &identity.signing_key)?;
+        let bytes = assertion.to_cbor()?;
+        let assertion_id = assertion.assertion_id()?;
+        let envelope_id = crypto::envelope_id(&bytes);
+        append_assertion(
+            &env,
+            &identity.subject_id,
+            seq,
+            assertion_id,
+            envelope_id,
+            "identity.profile",
+            &bytes,
+        )?;
+        Ok(())
+    }
+
+    fn compile_contract_artifacts(
+        root: &Path,
+        data_dir: &PathBuf,
+        cache: &mut HashMap<String, ContractArtifacts>,
+        filename: &str,
+    ) -> Result<ContractArtifacts, DharmaError> {
+        if let Some(found) = cache.get(filename) {
+            return Ok(found.clone());
+        }
+        let path = copy_contract(root, filename)?;
+        compile_dhl(path.to_str().unwrap(), None)?;
+        let (schema_id, contract_id) = load_contract_ids_for_ver(data_dir, DEFAULT_DATA_VERSION)?;
+        let schema_bytes = load_schema_bytes(data_dir, &schema_id)?;
+        let contract_bytes = load_contract_bytes(data_dir, &contract_id)?;
+        let schema = CqrsSchema::from_cbor(&schema_bytes)?;
+        let artifacts = ContractArtifacts {
+            schema_id,
+            contract_id,
+            schema,
+            contract_bytes,
+        };
+        cache.insert(filename.to_string(), artifacts.clone());
+        Ok(artifacts)
+    }
+
+    fn write_fixture_order_po_contract(root: &Path) -> Result<PathBuf, DharmaError> {
+        let path = root
+            .join("contracts")
+            .join("std")
+            .join("commerce_order_po.dhl");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let body = r#"---
+namespace: std.commerce.order.po
+version: 1.0.0
+---
+
+## Code
+
+```dhl
+aggregate PurchaseOrder
+    state
+        public customer_id: Ref<std.iam.Identity>
+        public status: Enum(Draft, Posted) = 'Draft
+        public created_at: Timestamp?
+
+action Create(customer_id: Ref<std.iam.Identity>, status: Enum(Draft, Posted))
+    validate
+        state.created_at == null
+    apply
+        state.customer_id = customer_id
+        state.status = status
+        state.created_at = context.timestamp
+```
+"#;
+        std::fs::write(&path, body)?;
+        Ok(path)
+    }
+
+    fn write_fixture_catalog_product_contract(root: &Path) -> Result<PathBuf, DharmaError> {
+        let path = root
+            .join("contracts")
+            .join("std")
+            .join("commerce_catalog_product.dhl");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let body = r#"---
+namespace: std.commerce.catalog.product
+version: 1.0.0
+---
+
+## Code
+
+```dhl
+aggregate Product
+    state
+        public category_id: Text(len=64)?
+        public taxonomy: Map<Text(len=64), Text(len=256)>
+        public status: Enum(Draft, Published, Archived) = 'Draft
+        public created_at: Timestamp?
+
+action Create(category_id: Text(len=64)?, taxonomy: Map<Text(len=64), Text(len=256)>)
+    validate
+        state.created_at == null
+    apply
+        state.category_id = category_id
+        state.taxonomy = taxonomy
+        state.status = 'Draft
+        state.created_at = context.timestamp
+
+action Publish()
+    validate
+        state.status != 'Archived
+    apply
+        state.status = 'Published
+```
+"#;
+        std::fs::write(&path, body)?;
+        Ok(path)
+    }
+
+    fn write_fixture_order_line_contract(root: &Path) -> Result<PathBuf, DharmaError> {
+        let path = root
+            .join("contracts")
+            .join("std")
+            .join("commerce_order_line.dhl");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let body = r#"---
+namespace: std.commerce.order.line
+version: 1.0.0
+---
+
+## Code
+
+```dhl
+struct DeliveryWindow
+    public start: Timestamp?
+    public end: Timestamp?
+
+aggregate Line
+    state
+        public po_id: Ref<std.commerce.order.po>
+        public remaining_qty: Decimal(scale=6)
+        public cancelled: Bool = false
+        public requested_delivery_window: DeliveryWindow?
+        public splits: List<Text(len=64)>
+        public created_at: Timestamp?
+
+action CreateFromSnapshot(
+    po_id: Ref<std.commerce.order.po>,
+    remaining_qty: Decimal(scale=6),
+    requested_delivery_window: DeliveryWindow?
+)
+    validate
+        state.created_at == null
+    apply
+        state.po_id = po_id
+        state.remaining_qty = remaining_qty
+        state.cancelled = false
+        state.requested_delivery_window = requested_delivery_window
+        state.created_at = context.timestamp
+
+action SplitLine(split_ref: Text(len=64))
+    validate
+        state.created_at != null
+    apply
+        state.splits.push(split_ref)
+```
+"#;
+        std::fs::write(&path, body)?;
+        Ok(path)
+    }
+
+    fn write_fixture_catalog_variant_contract(root: &Path) -> Result<PathBuf, DharmaError> {
+        let path = root
+            .join("contracts")
+            .join("std")
+            .join("commerce_catalog_variant.dhl");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let body = r#"---
+namespace: std.commerce.catalog.variant
+version: 1.0.0
+---
+
+## Code
+
+```dhl
+aggregate Variant
+    state
+        public item_id: Ref<std.commerce.catalog.item>
+        public status: Enum(Active, Archived) = 'Active
+        public created_at: Timestamp?
+
+action Create(item_id: Ref<std.commerce.catalog.item>)
+    validate
+        state.created_at == null
+    apply
+        state.item_id = item_id
+        state.status = 'Active
+        state.created_at = context.timestamp
+```
+"#;
+        std::fs::write(&path, body)?;
+        Ok(path)
+    }
+
+    fn write_fixture_logistics_batch_contract(root: &Path) -> Result<PathBuf, DharmaError> {
+        let path = root
+            .join("contracts")
+            .join("std")
+            .join("commerce_logistics_batch.dhl");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let body = r#"---
+namespace: std.commerce.logistics.batch
+version: 1.0.0
+---
+
+## Code
+
+```dhl
+struct BatchLineAttachment
+    public line_id: Ref<std.commerce.order.line>
+    public qty_planned: Decimal(scale=6)
+
+aggregate LogisticsBatch
+    state
+        public attachments: List<BatchLineAttachment>
+        public scheduled_for: Timestamp?
+        public batch_state: Enum(Planning, Scheduled, InTransit, Delivered, Cancelled) = 'Planning
+        public route_id: Text(len=64)?
+        public route_sequence: Int?
+        public created_at: Timestamp?
+
+action CreateLogisticsBatch(scheduled_for: Timestamp?)
+    validate
+        state.created_at == null
+    apply
+        state.scheduled_for = scheduled_for
+        state.batch_state = 'Planning
+        state.created_at = context.timestamp
+
+action AttachLineToBatch(line_id: Ref<std.commerce.order.line>, qty_planned: Decimal(scale=6))
+    validate
+        qty_planned >= 0
+    apply
+        state.attachments.push(BatchLineAttachment { line_id: line_id, qty_planned: qty_planned })
+
+action AssignRoute(route_id: Text(len=64), sequence: Int?)
+    apply
+        state.route_id = route_id
+        state.route_sequence = sequence
+```
+"#;
+        std::fs::write(&path, body)?;
+        Ok(path)
+    }
+
+    fn write_fixture_invoice_contract(root: &Path) -> Result<PathBuf, DharmaError> {
+        let path = root
+            .join("contracts")
+            .join("std")
+            .join("commerce_invoice.dhl");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let body = r#"---
+namespace: std.commerce.invoice
+version: 1.0.0
+---
+
+## Code
+
+```dhl
+struct InvoiceLine
+    public invoice_line_id: Text(len=64)
+    public line_id: Ref<std.commerce.order.line>
+    public fulfillment_id: Text(len=64)
+    public description: Text(len=256)
+    public qty: Decimal(scale=6)
+    public unit_price_minor: Int
+    public tax_amount_minor: Int
+    public net_amount_minor: Int
+    public gross_amount_minor: Int
+
+aggregate Invoice
+    state
+        public po_id: Ref<std.commerce.order.po>
+        public issued_at: Timestamp?
+        public posted_at: Timestamp?
+        public state: Enum(Draft, Posted, Void) = 'Draft
+        public lines: List<InvoiceLine>
+
+action IssueInvoiceFromBatch(po_id: Ref<std.commerce.order.po>, lines: List<InvoiceLine>)
+    validate
+        state.issued_at == null
+    apply
+        state.po_id = po_id
+        state.lines = lines
+        state.issued_at = context.timestamp
+        state.state = 'Draft
+
+action PostInvoice()
+    validate
+        state.state == 'Draft
+    apply
+        state.state = 'Posted
+        state.posted_at = context.timestamp
+```
+"#;
+        std::fs::write(&path, body)?;
+        Ok(path)
+    }
+
+    fn write_fixture_credit_note_contract(root: &Path) -> Result<PathBuf, DharmaError> {
+        let path = root
+            .join("contracts")
+            .join("std")
+            .join("commerce_credit_note.dhl");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let body = r#"---
+namespace: std.commerce.credit_note
+version: 1.0.0
+---
+
+## Code
+
+```dhl
+struct CreditLine
+    public credit_line_id: Text(len=64)
+    public invoice_line_id: Text(len=64)
+    public line_id: Ref<std.commerce.order.line>
+    public fulfillment_id: Text(len=64)
+    public description: Text(len=256)
+    public qty: Decimal(scale=6)
+    public unit_price_minor: Int
+    public tax_amount_minor: Int
+    public net_amount_minor: Int
+    public gross_amount_minor: Int
+
+aggregate CreditNote
+    state
+        public invoice_id: Ref<std.commerce.invoice>
+        public issued_at: Timestamp?
+        public posted_at: Timestamp?
+        public state: Enum(Draft, Posted, Void) = 'Draft
+        public lines: List<CreditLine>
+
+action IssueCreditNoteForLine(
+    invoice_id: Ref<std.commerce.invoice>,
+    credit_line_id: Text(len=64),
+    line_id: Ref<std.commerce.order.line>,
+    fulfillment_id: Text(len=64),
+    description: Text(len=256),
+    qty: Decimal(scale=6),
+    unit_price_minor: Int,
+    net_amount_minor: Int,
+    gross_amount_minor: Int
+)
+    validate
+        state.issued_at == null
+    apply
+        state.invoice_id = invoice_id
+        state.lines.push(CreditLine { credit_line_id: credit_line_id, invoice_line_id: "inv-line", line_id: line_id, fulfillment_id: fulfillment_id, description: description, qty: qty, unit_price_minor: unit_price_minor, tax_amount_minor: 0, net_amount_minor: net_amount_minor, gross_amount_minor: gross_amount_minor })
+        state.issued_at = context.timestamp
+        state.state = 'Draft
+
+action PostCreditNote()
+    validate
+        state.state == 'Draft
+    apply
+        state.state = 'Posted
+        state.posted_at = context.timestamp
+```
+"#;
+        std::fs::write(&path, body)?;
+        Ok(path)
+    }
+
+    fn compile_written_contract(
+        data_dir: &PathBuf,
+        path: &Path,
+    ) -> Result<ContractArtifacts, DharmaError> {
+        compile_dhl(path.to_str().unwrap(), None)?;
+        let (schema_id, contract_id) = load_contract_ids_for_ver(data_dir, DEFAULT_DATA_VERSION)?;
+        let schema_bytes = load_schema_bytes(data_dir, &schema_id)?;
+        let contract_bytes = load_contract_bytes(data_dir, &contract_id)?;
+        Ok(ContractArtifacts {
+            schema_id,
+            contract_id,
+            schema: CqrsSchema::from_cbor(&schema_bytes)?,
+            contract_bytes,
+        })
+    }
+
+    fn apply_contract_action(
+        data_dir: &PathBuf,
+        identity: &dharma::IdentityState,
+        contract: &ContractArtifacts,
+        subject: SubjectId,
+        action: &str,
+        args: Value,
+    ) -> Result<(), DharmaError> {
+        let _ = apply_action_prepared(
+            data_dir,
+            identity,
+            subject,
+            action,
+            args,
+            DEFAULT_DATA_VERSION,
+            contract.schema_id,
+            contract.contract_id,
+            &contract.schema,
+            &contract.contract_bytes,
+            None,
+        )?;
+        Ok(())
+    }
+
+    fn run_query(
+        data_dir: &PathBuf,
+        query: &str,
+        params: Value,
+    ) -> Result<Vec<Value>, DharmaError> {
+        let plan = dhlq::parse_plan(query, 1)?;
+        dharma::dhlq::execute(data_dir, &plan, &params)
+    }
+
+    fn run_query_from_contract_source(
+        data_dir: &PathBuf,
+        contract_filename: &str,
+        query_name: &str,
+        params: Value,
+    ) -> Result<Vec<Value>, DharmaError> {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let contract_path = repo_root
+            .join("contracts")
+            .join("std")
+            .join(contract_filename);
+        let contents = std::fs::read_to_string(&contract_path)?;
+        let ast = crate::pdl::parser::parse(&contents)?;
+        let query = ast
+            .queries
+            .iter()
+            .find(|q| q.name == query_name)
+            .ok_or_else(|| {
+                DharmaError::Validation(format!(
+                    "query '{}' not found in {}",
+                    query_name,
+                    contract_path.display()
+                ))
+            })?;
+        let query_text = query.body.join("\n");
+        if query_text.trim().is_empty() {
+            return Err(DharmaError::Validation(format!(
+                "query '{}' has empty body in {}",
+                query_name,
+                contract_path.display()
+            )));
+        }
+        let plan = dhlq::parse_plan(&query_text, query.start_line)?;
+        dharma::dhlq::execute(data_dir, &plan, &params)
+    }
+
+    fn table_count(data_dir: &PathBuf, table: &str) -> Result<i64, DharmaError> {
+        let query = format!("{table}\n| agg count()");
+        let rows = run_query(data_dir, &query, Value::Array(vec![]))?;
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let row = rows
+            .first()
+            .ok_or_else(|| DharmaError::Validation("missing count row".to_string()))?;
+        let map = expect_map(row)?;
+        let count = map_get(map, "count")
+            .ok_or_else(|| DharmaError::Validation("missing count".to_string()))?;
+        expect_int(count)
+    }
+
+    fn build_commerce_fixture() -> Result<(TempCtx, CommerceFixture), DharmaError> {
+        let (ctx, identity) = setup_temp_project()?;
+        std::env::set_var("DHARMA_PASSPHRASE", "test-pass");
+        let root = std::env::current_dir()?;
+        let data_dir = crate::ensure_data_dir()?;
+        grant_projection_writer_role(&data_dir, &identity)?;
+
+        let mut cache: HashMap<String, ContractArtifacts> = HashMap::new();
+        let po_contract =
+            compile_written_contract(&data_dir, &write_fixture_order_po_contract(&root)?)?;
+        let product_contract =
+            compile_written_contract(&data_dir, &write_fixture_catalog_product_contract(&root)?)?;
+        let variant_contract =
+            compile_written_contract(&data_dir, &write_fixture_catalog_variant_contract(&root)?)?;
+        let batch_contract =
+            compile_written_contract(&data_dir, &write_fixture_logistics_batch_contract(&root)?)?;
+        let invoice_contract =
+            compile_written_contract(&data_dir, &write_fixture_invoice_contract(&root)?)?;
+        let credit_note_contract =
+            compile_written_contract(&data_dir, &write_fixture_credit_note_contract(&root)?)?;
+        let line_contract =
+            compile_written_contract(&data_dir, &write_fixture_order_line_contract(&root)?)?;
+        let bucket_contract = compile_contract_artifacts(
+            &root,
+            &data_dir,
+            &mut cache,
+            "commerce_availability_item_bucket.dhl",
+        )?;
+        for filename in [
+            "commerce_catalog_product_facet.dhl",
+            "commerce_catalog_variant_availability.dhl",
+            "commerce_order_line_stats.dhl",
+            "commerce_order_po_action_queue.dhl",
+            "commerce_logistics_batch_line.dhl",
+            "commerce_logistics_batch_route.dhl",
+            "commerce_invoice_line.dhl",
+            "commerce_credit_note_line.dhl",
+            "commerce_inventory_supplier.dhl",
+            "commerce_logistics_warehouse.dhl",
+        ] {
+            let _ = compile_contract_artifacts(&root, &data_dir, &mut cache, filename)?;
+        }
+
+        let mut rng = StdRng::seed_from_u64(66_300_001);
+        let po_id = SubjectId::random(&mut rng);
+        let warehouse_id = SubjectId::random(&mut rng);
+        let product_id = SubjectId::random(&mut rng);
+        let variant_id = SubjectId::random(&mut rng);
+        let item_id = SubjectId::random(&mut rng);
+        let bucket_id = SubjectId::random(&mut rng);
+        let line_id = SubjectId::random(&mut rng);
+        let batch_id = SubjectId::random(&mut rng);
+        let invoice_id = SubjectId::random(&mut rng);
+        let credit_note_id = SubjectId::random(&mut rng);
+        let category_id = "cat-1".to_string();
+        let t0 = 1_700_000_000i64;
+
+        apply_contract_action(
+            &data_dir,
+            &identity,
+            &po_contract,
+            po_id,
+            "Create",
+            vmap(vec![
+                (
+                    "customer_id",
+                    Value::Bytes(identity.subject_id.as_bytes().to_vec()),
+                ),
+                ("status", Value::Text("Draft".to_string())),
+            ]),
+        )?;
+        apply_contract_action(
+            &data_dir,
+            &identity,
+            &product_contract,
+            product_id,
+            "Create",
+            vmap(vec![
+                ("category_id", Value::Text(category_id.clone())),
+                (
+                    "taxonomy",
+                    Value::Map(vec![(
+                        Value::Text("origin".to_string()),
+                        Value::Text("FR".to_string()),
+                    )]),
+                ),
+            ]),
+        )?;
+        apply_contract_action(
+            &data_dir,
+            &identity,
+            &product_contract,
+            product_id,
+            "Publish",
+            Value::Map(vec![]),
+        )?;
+
+        apply_contract_action(
+            &data_dir,
+            &identity,
+            &variant_contract,
+            variant_id,
+            "Create",
+            vmap(vec![("item_id", Value::Bytes(item_id.as_bytes().to_vec()))]),
+        )?;
+
+        apply_contract_action(
+            &data_dir,
+            &identity,
+            &bucket_contract,
+            bucket_id,
+            "Upsert",
+            vmap(vec![
+                ("item_id", Value::Bytes(item_id.as_bytes().to_vec())),
+                (
+                    "warehouse_id",
+                    Value::Bytes(warehouse_id.as_bytes().to_vec()),
+                ),
+                ("channel_id", Value::Null),
+                ("delivery_area", Value::Null),
+                ("bucket_date", Value::Null),
+                ("on_hand_qty", Value::Integer(2_000_000.into())),
+                ("inbound_committed_qty", Value::Integer(0.into())),
+                ("reserved_qty", Value::Integer(0.into())),
+                ("available_on_hand_qty", Value::Integer(2_000_000.into())),
+                ("available_backorder_qty", Value::Integer(0.into())),
+                ("available_preorder_qty", Value::Integer(0.into())),
+                ("preorder_allowed", Value::Bool(false)),
+                ("preorder_capacity", Value::Integer(0.into())),
+                ("preorder_unverified", Value::Bool(false)),
+                ("shelf_life_status", Value::Text("Ok".to_string())),
+                ("shelf_life_unverified", Value::Bool(false)),
+                ("blocked_reason", Value::Null),
+                ("as_of", Value::Null),
+            ]),
+        )?;
+
+        apply_contract_action(
+            &data_dir,
+            &identity,
+            &line_contract,
+            line_id,
+            "CreateFromSnapshot",
+            vmap(vec![
+                ("po_id", Value::Bytes(po_id.as_bytes().to_vec())),
+                ("remaining_qty", Value::Integer(2_000_000.into())),
+                (
+                    "requested_delivery_window",
+                    vmap(vec![
+                        ("start", Value::Integer((t0 + 3_600).into())),
+                        ("end", Value::Integer((t0 + 7_200).into())),
+                    ]),
+                ),
+            ]),
+        )?;
+
+        apply_contract_action(
+            &data_dir,
+            &identity,
+            &batch_contract,
+            batch_id,
+            "CreateLogisticsBatch",
+            vmap(vec![("scheduled_for", Value::Integer((t0 + 5_400).into()))]),
+        )?;
+        apply_contract_action(
+            &data_dir,
+            &identity,
+            &batch_contract,
+            batch_id,
+            "AttachLineToBatch",
+            vmap(vec![
+                ("line_id", Value::Bytes(line_id.as_bytes().to_vec())),
+                ("qty_planned", Value::Integer(2_000_000.into())),
+            ]),
+        )?;
+        apply_contract_action(
+            &data_dir,
+            &identity,
+            &batch_contract,
+            batch_id,
+            "AssignRoute",
+            vmap(vec![
+                ("route_id", Value::Text("route-1".to_string())),
+                ("sequence", Value::Integer(1.into())),
+            ]),
+        )?;
+
+        apply_contract_action(
+            &data_dir,
+            &identity,
+            &invoice_contract,
+            invoice_id,
+            "IssueInvoiceFromBatch",
+            vmap(vec![
+                ("po_id", Value::Bytes(po_id.as_bytes().to_vec())),
+                (
+                    "lines",
+                    Value::Array(vec![vmap(vec![
+                        ("invoice_line_id", Value::Text("inv-line-1".to_string())),
+                        ("line_id", Value::Bytes(line_id.as_bytes().to_vec())),
+                        ("fulfillment_id", Value::Text("ful-1".to_string())),
+                        ("description", Value::Text("line item".to_string())),
+                        ("qty", Value::Integer(2_000_000.into())),
+                        ("unit_price_minor", Value::Integer(1200.into())),
+                        ("tax_amount_minor", Value::Integer(0.into())),
+                        ("net_amount_minor", Value::Integer(2400.into())),
+                        ("gross_amount_minor", Value::Integer(2400.into())),
+                    ])]),
+                ),
+            ]),
+        )?;
+        apply_contract_action(
+            &data_dir,
+            &identity,
+            &invoice_contract,
+            invoice_id,
+            "PostInvoice",
+            Value::Map(vec![]),
+        )?;
+
+        apply_contract_action(
+            &data_dir,
+            &identity,
+            &credit_note_contract,
+            credit_note_id,
+            "IssueCreditNoteForLine",
+            vmap(vec![
+                ("invoice_id", Value::Bytes(invoice_id.as_bytes().to_vec())),
+                ("credit_line_id", Value::Text("cn-line-1".to_string())),
+                ("line_id", Value::Bytes(line_id.as_bytes().to_vec())),
+                ("fulfillment_id", Value::Text("ful-1".to_string())),
+                ("description", Value::Text("return".to_string())),
+                ("qty", Value::Integer(1_000_000.into())),
+                ("unit_price_minor", Value::Integer(1200.into())),
+                ("net_amount_minor", Value::Integer(1200.into())),
+                ("gross_amount_minor", Value::Integer(1200.into())),
+            ]),
+        )?;
+        apply_contract_action(
+            &data_dir,
+            &identity,
+            &credit_note_contract,
+            credit_note_id,
+            "PostCreditNote",
+            Value::Map(vec![]),
+        )?;
+
+        Ok((
+            ctx,
+            CommerceFixture {
+                data_dir,
+                identity: identity.clone(),
+                category_id,
+                variant_id,
+                line_id,
+                invoice_id,
+                catalog_product: product_contract,
+            },
+        ))
+    }
+
+    #[test]
+    fn project_rebuild_populates_commerce_projections() -> Result<(), DharmaError> {
+        let (_ctx, fixture) = build_commerce_fixture()?;
+        let tables = [
+            "std.commerce.catalog.product_facet",
+            "std.commerce.catalog.variant_availability",
+            "std.commerce.order.line_stats",
+            "std.commerce.order.po_action_queue",
+            "std.commerce.logistics.batch_line",
+            "std.commerce.logistics.batch_route",
+            "std.commerce.invoice_line",
+            "std.commerce.credit_note_line",
+        ];
+
+        for table in tables.iter().copied() {
+            let before = table_count(&fixture.data_dir, table)?;
+            assert_eq!(
+                before, 0,
+                "expected empty projection table before rebuild: {table}"
+            );
+        }
+
+        project_runtime::rebuild("std.commerce")?;
+
+        for table in tables.iter().copied() {
+            let after = table_count(&fixture.data_dir, table)?;
+            assert!(
+                after > 0,
+                "expected rebuild writes for projection table: {table}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn ecommerce_key_queries_return_expected_rows() -> Result<(), DharmaError> {
+        let (_ctx, fixture) = build_commerce_fixture()?;
+        project_runtime::rebuild("std.commerce")?;
+
+        let query_from = 0i64;
+        let query_to = 4_102_444_800i64;
+
+        let facets = run_query_from_contract_source(
+            &fixture.data_dir,
+            "commerce_catalog_product.dhl",
+            "GetProductFacets",
+            Value::Array(vec![Value::Text(fixture.category_id.clone()), Value::Null]),
+        )?;
+        assert_eq!(facets.len(), 1);
+        let facet_row = expect_map(&facets[0])?;
+        assert_eq!(
+            map_get(facet_row, "facet_value")
+                .ok_or_else(|| DharmaError::Validation("missing facet_value".to_string()))?,
+            &Value::Text("FR".to_string())
+        );
+
+        let availability = run_query_from_contract_source(
+            &fixture.data_dir,
+            "commerce_catalog_variant.dhl",
+            "GetVariantAvailabilityHint",
+            Value::Array(vec![
+                Value::Bytes(fixture.variant_id.as_bytes().to_vec()),
+                Value::Integer(1.into()),
+                Value::Null,
+                Value::Null,
+            ]),
+        )?;
+        assert_eq!(availability.len(), 1);
+        let availability_row = expect_map(&availability[0])?;
+        assert_eq!(
+            map_get(availability_row, "variant_id")
+                .ok_or_else(|| DharmaError::Validation("missing variant_id".to_string()))?,
+            &Value::Bytes(fixture.variant_id.as_bytes().to_vec())
+        );
+
+        let lines = run_query_from_contract_source(
+            &fixture.data_dir,
+            "commerce_order_line.dhl",
+            "LinesNeedingAllocation",
+            Value::Array(vec![
+                Value::Integer(query_from.into()),
+                Value::Integer(query_to.into()),
+                Value::Integer(0.into()),
+                Value::Integer(10.into()),
+            ]),
+        )?;
+        assert!(!lines.is_empty());
+        let line_subject = map_get(expect_map(&lines[0])?, "subject")
+            .ok_or_else(|| DharmaError::Validation("missing line subject".to_string()))?;
+        assert_eq!(
+            expect_bytes(line_subject)?,
+            fixture.line_id.as_bytes().to_vec()
+        );
+
+        let invoices = run_query_from_contract_source(
+            &fixture.data_dir,
+            "commerce_invoice.dhl",
+            "ListMyInvoices",
+            Value::Array(vec![
+                Value::Bytes(fixture.identity.subject_id.as_bytes().to_vec()),
+                Value::Integer(query_from.into()),
+                Value::Integer(query_to.into()),
+                Value::Integer(0.into()),
+                Value::Integer(10.into()),
+            ]),
+        )?;
+        assert_eq!(invoices.len(), 1);
+        let invoice_subject = map_get(expect_map(&invoices[0])?, "subject")
+            .ok_or_else(|| DharmaError::Validation("missing invoice subject".to_string()))?;
+        assert_eq!(
+            expect_bytes(invoice_subject)?,
+            fixture.invoice_id.as_bytes().to_vec()
+        );
+
+        let credits = run_query_from_contract_source(
+            &fixture.data_dir,
+            "commerce_credit_note.dhl",
+            "ReturnsAndCreditsSummary",
+            Value::Array(vec![
+                Value::Integer(query_from.into()),
+                Value::Integer(query_to.into()),
+            ]),
+        )?;
+        assert_eq!(credits.len(), 1);
+        let total = expect_int(
+            map_get(expect_map(&credits[0])?, "sum")
+                .ok_or_else(|| DharmaError::Validation("missing sum".to_string()))?,
+        )?;
+        assert_eq!(total, 1200);
+
+        Ok(())
+    }
+
+    #[test]
+    fn project_watch_applies_incremental_update() -> Result<(), DharmaError> {
+        let (_ctx, fixture) = build_commerce_fixture()?;
+        project_runtime::rebuild("std.commerce")?;
+
+        let count_rows = run_query(
+            &fixture.data_dir,
+            "std.commerce.catalog.product_facet\n| agg count()",
+            Value::Array(vec![]),
+        )?;
+        let before = expect_int(
+            map_get(expect_map(&count_rows[0])?, "count")
+                .ok_or_else(|| DharmaError::Validation("missing count".to_string()))?,
+        )?;
+        let before_seq_rows = run_query(
+            &fixture.data_dir,
+            r#"
+std.commerce.catalog.product_facet
+| take 1
+"#,
+            Value::Array(vec![]),
+        )?;
+        let before_seq = expect_int(
+            map_get(expect_map(&before_seq_rows[0])?, "seq")
+                .ok_or_else(|| DharmaError::Validation("missing seq".to_string()))?,
+        )?;
+
+        let mut rng = StdRng::seed_from_u64(66_300_002);
+        let product2 = SubjectId::random(&mut rng);
+        apply_contract_action(
+            &fixture.data_dir,
+            &fixture.identity,
+            &fixture.catalog_product,
+            product2,
+            "Create",
+            vmap(vec![
+                ("category_id", Value::Text(fixture.category_id.clone())),
+                (
+                    "taxonomy",
+                    Value::Map(vec![(
+                        Value::Text("origin".to_string()),
+                        Value::Text("ES".to_string()),
+                    )]),
+                ),
+            ]),
+        )?;
+        apply_contract_action(
+            &fixture.data_dir,
+            &fixture.identity,
+            &fixture.catalog_product,
+            product2,
+            "Publish",
+            Value::Map(vec![]),
+        )?;
+
+        project_runtime::watch_with_limit("std.commerce", Duration::from_millis(5), Some(1))?;
+
+        let count_rows = run_query(
+            &fixture.data_dir,
+            "std.commerce.catalog.product_facet\n| agg count()",
+            Value::Array(vec![]),
+        )?;
+        let after = expect_int(
+            map_get(expect_map(&count_rows[0])?, "count")
+                .ok_or_else(|| DharmaError::Validation("missing count".to_string()))?,
+        )?;
+        assert!(after >= before);
+
+        let after_seq_rows = run_query(
+            &fixture.data_dir,
+            r#"
+std.commerce.catalog.product_facet
+| take 1
+"#,
+            Value::Array(vec![]),
+        )?;
+        let after_seq = expect_int(
+            map_get(expect_map(&after_seq_rows[0])?, "seq")
+                .ok_or_else(|| DharmaError::Validation("missing seq".to_string()))?,
+        )?;
+        assert!(after_seq > before_seq);
 
         Ok(())
     }

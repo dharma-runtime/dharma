@@ -51,6 +51,13 @@ action Upsert(
         state.scheduled_for = scheduled_for
         state.batch_state = batch_state
         state.updated_at = context.timestamp
+
+action Deactivate()
+    validate
+        has_role(context.signer, "projection.writer")
+    apply
+        state.qty_planned = 0
+        state.updated_at = context.timestamp
 ```
 
 ## Projection

@@ -43,6 +43,14 @@ action Upsert(
         state.split_count = split_count
         state.substitution_count = substitution_count
         state.updated_at = context.timestamp
+
+action Deactivate()
+    validate
+        has_role(context.signer, "projection.writer")
+    apply
+        state.split_count = 0
+        state.substitution_count = 0
+        state.updated_at = context.timestamp
 ```
 
 ## Projection

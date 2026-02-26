@@ -51,6 +51,13 @@ action Remove()
     apply
         state.sequence = null
         state.updated_at = context.timestamp
+
+action Clear()
+    validate
+        has_role(context.signer, "projection.writer")
+    apply
+        state.sequence = null
+        state.updated_at = context.timestamp
 ```
 
 ## Projection
