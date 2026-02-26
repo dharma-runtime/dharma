@@ -49,6 +49,12 @@ A successful run writes:
 - `summary.txt`
 
 `summary.txt` includes UTC start/end timestamps, commit SHA, per-step pass/fail, and output directory.
+`summary.txt` lifecycle contract:
+- Run start writes `overall=RUNNING`.
+- First failing step appends `<step>=FAIL ...`, `failed_step=<step>`, and `overall=FAIL`, then exits non-zero.
+- Fully successful run appends `completed_at_utc=<timestamp>` and `overall=PASS`.
+
+Artifacts under `var/gates/ecommerce-erp-go-live/` are runtime outputs for CI/manual evidence and are not source-controlled.
 
 ## 4. Manual Fallback Commands
 
