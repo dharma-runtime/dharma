@@ -269,11 +269,7 @@ action AdjustQty(
         state.status != 'Archived
         new_status != 'Archived
         state.quantity_on_hand + qty_delta >= 0
-        (
-            (state.quantity_on_hand + qty_delta == 0) && (new_status == 'Depleted)
-        ) || (
-            (state.quantity_on_hand + qty_delta > 0) && (new_status != 'Depleted)
-        )
+        ((state.quantity_on_hand + qty_delta == 0) && (new_status == 'Depleted)) || ((state.quantity_on_hand + qty_delta > 0) && (new_status != 'Depleted))
     apply
         state.quantity_on_hand = state.quantity_on_hand + qty_delta
         state.status = new_status

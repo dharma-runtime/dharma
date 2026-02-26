@@ -381,7 +381,7 @@ pub(crate) fn compile_dhl(source: &str, out_override: Option<&str>) -> Result<()
 }
 
 #[cfg(feature = "compiler")]
-fn output_stem_for_source(
+pub(crate) fn output_stem_for_source(
     source: &Path,
     out_override: Option<&str>,
 ) -> Result<PathBuf, DharmaError> {

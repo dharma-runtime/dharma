@@ -1,0 +1,86 @@
+---
+namespace: std.commerce.inventory.supplier
+version: 1.0.0
+---
+
+# Commerce Inventory Supplier
+
+Canonical supplier entity referenced by sellable and order-line flows.
+
+## Queries
+
+### Private queries
+#### GetSupplier(supplier_id)
+Parameters: `$1 = supplier_id`
+```dhl
+query GetSupplier(supplier_id: Ref<std.commerce.inventory.supplier>)
+    private
+    dhlq
+    std.commerce.inventory.supplier
+    | where subject == $1
+    | take 1
+```
+
+#### ListSuppliers(status, offset, limit)
+Parameters: `$1 = status`, `$2 = offset`, `$3 = limit`
+```dhl
+query ListSuppliers(status: Enum(Active, Archived), offset: Int, limit: Int)
+    private
+    dhlq
+    std.commerce.inventory.supplier
+    | where status == $1
+    | sort -updated_at
+    | drop $2
+    | take $3
+```
+
+## Code
+
+```dhl
+aggregate Supplier
+    state
+        public external_id: Text(len=64)?
+        public human_ref: Text(len=64)?
+        public name: Text(len=128)
+        public contact: Map<Text(len=64), Text(len=256)>?
+        public status: Enum(Active, Archived) = 'Active
+        public created_at: Timestamp?
+        public updated_at: Timestamp?
+
+action Create(
+    name: Text(len=128),
+    contact: Map<Text(len=64), Text(len=256)>?,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.created_at == null
+    apply
+        state.name = name
+        state.contact = contact
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.status = 'Active
+        state.created_at = context.timestamp
+        state.updated_at = context.timestamp
+
+action Update(
+    name: Text(len=128),
+    contact: Map<Text(len=64), Text(len=256)>?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.status == 'Active
+    apply
+        state.name = name
+        state.contact = contact
+        state.human_ref = human_ref
+        state.updated_at = context.timestamp
+
+action Archive()
+    validate
+        state.status != 'Archived
+    apply
+        state.status = 'Archived
+        state.updated_at = context.timestamp
+```

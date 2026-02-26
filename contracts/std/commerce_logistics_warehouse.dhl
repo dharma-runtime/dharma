@@ -1,0 +1,91 @@
+---
+namespace: std.commerce.logistics.warehouse
+version: 1.0.0
+---
+
+# Commerce Logistics Warehouse
+
+Canonical warehouse entity referenced by inventory and logistics flows.
+
+## Queries
+
+### Private queries
+#### GetWarehouse(warehouse_id)
+Parameters: `$1 = warehouse_id`
+```dhl
+query GetWarehouse(warehouse_id: Ref<std.commerce.logistics.warehouse>)
+    private
+    dhlq
+    std.commerce.logistics.warehouse
+    | where subject == $1
+    | take 1
+```
+
+#### ListWarehouses(status, offset, limit)
+Parameters: `$1 = status`, `$2 = offset`, `$3 = limit`
+```dhl
+query ListWarehouses(status: Enum(Active, Archived), offset: Int, limit: Int)
+    private
+    dhlq
+    std.commerce.logistics.warehouse
+    | where status == $1
+    | sort -updated_at
+    | drop $2
+    | take $3
+```
+
+## Code
+
+```dhl
+aggregate Warehouse
+    state
+        public external_id: Text(len=64)?
+        public human_ref: Text(len=64)?
+        public name: Text(len=128)
+        public status: Enum(Active, Archived) = 'Active
+        public address_snapshot: Map<Text(len=64), Text(len=256)>?
+        public timezone: Text(len=64)?
+        public created_at: Timestamp?
+        public updated_at: Timestamp?
+
+action Create(
+    name: Text(len=128),
+    address_snapshot: Map<Text(len=64), Text(len=256)>?,
+    timezone: Text(len=64)?,
+    external_id: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.created_at == null
+    apply
+        state.name = name
+        state.address_snapshot = address_snapshot
+        state.timezone = timezone
+        state.external_id = external_id
+        state.human_ref = human_ref
+        state.status = 'Active
+        state.created_at = context.timestamp
+        state.updated_at = context.timestamp
+
+action Update(
+    name: Text(len=128),
+    address_snapshot: Map<Text(len=64), Text(len=256)>?,
+    timezone: Text(len=64)?,
+    human_ref: Text(len=64)?
+)
+    validate
+        state.status == 'Active
+    apply
+        state.name = name
+        state.address_snapshot = address_snapshot
+        state.timezone = timezone
+        state.human_ref = human_ref
+        state.updated_at = context.timestamp
+
+action Archive()
+    validate
+        state.status != 'Archived
+    apply
+        state.status = 'Archived
+        state.updated_at = context.timestamp
+```

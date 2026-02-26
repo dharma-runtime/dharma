@@ -5,12 +5,6 @@
 - Task 64.6: Vault Sync + Merkle Proofs (tasks/64_6_vault_sync_merkle.md)
 - Task 64.7: Vault Test Plan + Harness (tasks/64_7_vault_tests.md)
 
-## ECommerce (Epic 66)
-- Epic 66: ECommerce Overview (tasks/66_ecommerce_epic.md)
-- Task 66.1: Projection Writers + Pipelines (tasks/66_1_ecommerce_projections.md)
-- Task 66.2: Core Entity Contracts (Supplier/Warehouse) (tasks/66_2_ecommerce_core_entities.md)
-- Task 66.3: Projection + Query Tests (tasks/66_3_ecommerce_projection_tests.md)
-
 ## REPL & CLI
 - Task 28: Dev Mode (Hot Reload + Live CEL) (tasks/28_dev_mode.md)
 - Vector/graph search commands: vfind/gfind (tasks/05_search_indexing.md)
