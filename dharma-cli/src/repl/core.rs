@@ -5044,20 +5044,37 @@ fn collect_local_contracts() -> Result<Vec<ContractEntry>, DharmaError> {
     let mut out = Vec::new();
     let mut seen: HashSet<(SchemaId, ContractId)> = HashSet::new();
 
-    let project_build = root.join(".dharma").join("contracts");
+    let project_build = configured_build_dir(&root)?;
     if project_build.exists() {
         collect_compiled_contracts(&project_build, false, &mut seen, &mut out)?;
+        return Ok(out);
+    }
+
+    let legacy_contracts_build = contracts_dir.join("_build");
+    if legacy_contracts_build.exists() {
+        collect_compiled_contracts(&legacy_contracts_build, false, &mut seen, &mut out)?;
+    }
+
+    let legacy_adjacent_build = root.join("_build");
+    if legacy_adjacent_build.exists() {
+        collect_compiled_contracts(&legacy_adjacent_build, false, &mut seen, &mut out)?;
     }
 
     if contracts_dir.exists() {
-        let build_dir = contracts_dir.join("_build");
-        if build_dir.exists() {
-            collect_compiled_contracts(&build_dir, false, &mut seen, &mut out)?;
-        }
         collect_compiled_contracts(&contracts_dir, true, &mut seen, &mut out)?;
     }
 
     Ok(out)
+}
+
+fn configured_build_dir(root: &Path) -> Result<PathBuf, DharmaError> {
+    let config = dharma::config::Config::load(root)?;
+    let out_dir = PathBuf::from(&config.compiler.out_dir);
+    if out_dir.is_absolute() {
+        Ok(out_dir)
+    } else {
+        Ok(root.join(out_dir))
+    }
 }
 
 fn find_project_root(start: &Path) -> Option<PathBuf> {
@@ -5448,6 +5465,53 @@ mod tests {
     use crate::pdl::schema::{ConcurrencyMode, CqrsSchema, FieldSchema, TypeSpec, Visibility};
     use tempfile::tempdir;
 
+    struct CwdGuard {
+        previous: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn set(path: &Path) -> Result<Self, DharmaError> {
+            let previous = std::env::current_dir()?;
+            std::env::set_current_dir(path)?;
+            Ok(Self { previous })
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.previous);
+        }
+    }
+
+    fn schema_for(namespace: &str) -> CqrsSchema {
+        CqrsSchema {
+            namespace: namespace.to_string(),
+            version: "1.0.0".to_string(),
+            aggregate: "Task".to_string(),
+            extends: None,
+            implements: Vec::new(),
+            structs: BTreeMap::new(),
+            fields: BTreeMap::new(),
+            actions: BTreeMap::new(),
+            queries: BTreeMap::new(),
+            projections: BTreeMap::new(),
+            concurrency: ConcurrencyMode::Strict,
+        }
+    }
+
+    fn write_compiled_contract(stem: &Path, namespace: &str) -> Result<(), DharmaError> {
+        if let Some(parent) = stem.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let schema_bytes = schema_for(namespace).to_cbor()?;
+        fs::write(stem.with_extension("schema"), schema_bytes)?;
+        fs::write(
+            stem.with_extension("contract"),
+            format!("contract-{namespace}").as_bytes(),
+        )?;
+        Ok(())
+    }
+
     #[test]
     fn overlay_disabled_roundtrip() {
         let dir = tempdir().unwrap();
@@ -5577,6 +5641,56 @@ mod tests {
         let long = "a".repeat(100);
         let truncated = sanitize_snippet(&long);
         assert!(truncated.len() <= 63);
+    }
+
+    #[test]
+    fn collect_local_contracts_uses_configured_out_dir_and_legacy_fallback(
+    ) -> Result<(), DharmaError> {
+        let dir = tempdir()?;
+        let root = dir.path();
+        let _guard = CwdGuard::set(root)?;
+        fs::write(
+            root.join("dharma.toml"),
+            "[storage]\npath = \"data\"\n[compiler]\nout_dir = \"build/contracts\"\n",
+        )?;
+
+        write_compiled_contract(
+            &root
+                .join("build")
+                .join("contracts")
+                .join("std")
+                .join("configured"),
+            "std.configured",
+        )?;
+        write_compiled_contract(
+            &root
+                .join("contracts")
+                .join("_build")
+                .join("std")
+                .join("legacy_contracts"),
+            "std.legacy_contracts",
+        )?;
+        write_compiled_contract(&root.join("_build").join("legacy_root"), "std.legacy_root")?;
+        write_compiled_contract(
+            &root.join("contracts").join("std").join("legacy_in_tree"),
+            "std.legacy_in_tree",
+        )?;
+
+        let configured_first = collect_local_contracts()?;
+        assert_eq!(configured_first.len(), 1);
+        assert_eq!(configured_first[0].name, "std.configured");
+
+        fs::remove_dir_all(root.join("build"))?;
+        let fallback = collect_local_contracts()?;
+        let names = fallback
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect::<HashSet<_>>();
+        assert!(names.contains("std.legacy_contracts"));
+        assert!(names.contains("std.legacy_root"));
+        assert!(names.contains("std.legacy_in_tree"));
+        assert!(!names.contains("std.configured"));
+        Ok(())
     }
 
     #[test]

@@ -89,7 +89,10 @@ pub fn run() -> Result<(), DharmaError> {
             print_config_usage();
             Ok(())
         }
-        [_, "compile", source] => compile_dhl(source),
+        [_, "compile", args @ ..] => {
+            let (source, out_override) = parse_compile_args(args)?;
+            compile_dhl(source, out_override)
+        }
         [_, "test", args @ ..] => run_tests(args),
         [_, "doctor"] => cmd::ops::doctor(),
         [_, "gc", args @ ..] => cmd::ops::gc(args),
@@ -185,7 +188,7 @@ fn print_usage() {
     println!("  dh identity export");
     println!("  dh connect <addr:port> [--verbose]");
     println!("  dh config show");
-    println!("  dh compile <file.dhl>");
+    println!("  dh compile [--out <dir>|--out=<dir>] <file.dhl>");
     println!("  dh test [--deep] [--chaos] [--ci] [--relay] [--external] [--replay SEED=<seed>]");
     println!("  dh doctor");
     println!("  dh gc [--dry-run] [--no-prune] [--no-dharmaq]");
@@ -212,6 +215,50 @@ fn config_show() -> Result<(), DharmaError> {
     let config = dharma::config::Config::load(&root)?;
     println!("{}", config.to_toml_string());
     Ok(())
+}
+
+fn parse_compile_args<'a>(args: &'a [&'a str]) -> Result<(&'a str, Option<&'a str>), DharmaError> {
+    let mut source: Option<&str> = None;
+    let mut out_override: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i];
+        if arg == "--out" {
+            i += 1;
+            if i >= args.len() {
+                return Err(DharmaError::Validation(
+                    "missing directory after --out".to_string(),
+                ));
+            }
+            if out_override.replace(args[i]).is_some() {
+                return Err(DharmaError::Validation(
+                    "compile accepts only one --out value".to_string(),
+                ));
+            }
+        } else if let Some(value) = arg.strip_prefix("--out=") {
+            if value.is_empty() {
+                return Err(DharmaError::Validation(
+                    "missing directory after --out=".to_string(),
+                ));
+            }
+            if out_override.replace(value).is_some() {
+                return Err(DharmaError::Validation(
+                    "compile accepts only one --out value".to_string(),
+                ));
+            }
+        } else if source.replace(arg).is_some() {
+            return Err(DharmaError::Validation(
+                "compile expects exactly one source file".to_string(),
+            ));
+        }
+        i += 1;
+    }
+    let source = source.ok_or_else(|| {
+        DharmaError::Validation(
+            "usage: dh compile [--out <dir>|--out=<dir>] <file.dhl>".to_string(),
+        )
+    })?;
+    Ok((source, out_override))
 }
 
 fn run_tests(args: &[&str]) -> Result<(), DharmaError> {
@@ -280,7 +327,7 @@ fn init_identity(alias: &str) -> Result<(), DharmaError> {
 }
 
 #[cfg(feature = "compiler")]
-pub(crate) fn compile_dhl(source: &str) -> Result<(), DharmaError> {
+pub(crate) fn compile_dhl(source: &str, out_override: Option<&str>) -> Result<(), DharmaError> {
     let data_dir = ensure_data_dir()?;
     let source_path = Path::new(source);
     let contents = fs::read_to_string(source_path)?;
@@ -303,7 +350,7 @@ pub(crate) fn compile_dhl(source: &str) -> Result<(), DharmaError> {
     let summary = pdl::codegen::permissions::compile_permissions(&ast, contract_id, data_ver);
     let summary_bytes = summary.to_cbor()?;
 
-    let stem = output_stem_for_source(source_path);
+    let stem = output_stem_for_source(source_path, out_override)?;
     if let Some(parent) = stem.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -334,26 +381,71 @@ pub(crate) fn compile_dhl(source: &str) -> Result<(), DharmaError> {
 }
 
 #[cfg(feature = "compiler")]
-fn output_stem_for_source(source: &Path) -> PathBuf {
+fn output_stem_for_source(
+    source: &Path,
+    out_override: Option<&str>,
+) -> Result<PathBuf, DharmaError> {
     if let Some(project_root) = find_project_root(source) {
+        let out_root = resolve_output_root(&project_root, out_override)?;
         if let Some(rel) = relative_contract_path(source, &project_root) {
-            let mut out = project_root.join(".dharma").join("contracts").join(rel);
+            let mut out = out_root.join(rel);
             out.set_extension("");
-            return out;
+            return Ok(out);
         }
     }
 
-    if let Some(contracts_root) = find_contracts_root(source) {
-        if let Ok(rel) = source.strip_prefix(&contracts_root) {
-            let mut out = contracts_root.join("_build").join(rel);
-            out.set_extension("");
-            return out;
+    if let Some(out_override) = out_override {
+        let out_root = resolve_override_out_root(out_override)?;
+        if let Some(contracts_root) = find_contracts_root(source) {
+            if let Ok(rel) = source.strip_prefix(&contracts_root) {
+                let mut out = out_root.join(rel);
+                out.set_extension("");
+                return Ok(out);
+            }
         }
+        let mut out = out_root.join(source.file_name().unwrap_or_default());
+        out.set_extension("");
+        return Ok(out);
     }
 
     let base_dir = source.parent().unwrap_or_else(|| Path::new("."));
     let file_stem = source.file_stem().unwrap_or_default().to_os_string();
-    base_dir.join("_build").join(file_stem)
+    Ok(base_dir.join("_build").join(file_stem))
+}
+
+#[cfg(feature = "compiler")]
+fn resolve_output_root(
+    project_root: &Path,
+    out_override: Option<&str>,
+) -> Result<PathBuf, DharmaError> {
+    if let Some(out_override) = out_override {
+        return Ok(resolve_out_dir_value(project_root, out_override));
+    }
+    let config = dharma::config::Config::load(project_root)?;
+    Ok(resolve_out_dir_value(
+        project_root,
+        &config.compiler.out_dir,
+    ))
+}
+
+#[cfg(feature = "compiler")]
+fn resolve_override_out_root(out_override: &str) -> Result<PathBuf, DharmaError> {
+    let out_path = PathBuf::from(out_override);
+    if out_path.is_absolute() {
+        return Ok(out_path);
+    }
+    let cwd = env::current_dir()?;
+    Ok(cwd.join(out_path))
+}
+
+#[cfg(feature = "compiler")]
+fn resolve_out_dir_value(base: &Path, out_dir: &str) -> PathBuf {
+    let out_path = PathBuf::from(out_dir);
+    if out_path.is_absolute() {
+        out_path
+    } else {
+        base.join(out_path)
+    }
 }
 
 #[cfg(feature = "compiler")]
@@ -439,7 +531,7 @@ fn resolve_parent_ast(
 }
 
 #[cfg(not(feature = "compiler"))]
-fn compile_dhl(_source: &str) -> Result<(), DharmaError> {
+fn compile_dhl(_source: &str, _out_override: Option<&str>) -> Result<(), DharmaError> {
     Err(DharmaError::Validation(
         "compile is disabled; build with --features compiler".to_string(),
     ))
@@ -707,4 +799,83 @@ fn parse_data_version(version: &str) -> u64 {
         .next()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(DEFAULT_DATA_VERSION)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_compile_args_supports_out_variants() {
+        let (source, out) = parse_compile_args(&["task.dhl"]).unwrap();
+        assert_eq!(source, "task.dhl");
+        assert_eq!(out, None);
+
+        let (source, out) = parse_compile_args(&["--out", "build/contracts", "task.dhl"]).unwrap();
+        assert_eq!(source, "task.dhl");
+        assert_eq!(out, Some("build/contracts"));
+
+        let (source, out) = parse_compile_args(&["task.dhl", "--out", "build/contracts"]).unwrap();
+        assert_eq!(source, "task.dhl");
+        assert_eq!(out, Some("build/contracts"));
+
+        let (source, out) = parse_compile_args(&["--out=build/contracts", "task.dhl"]).unwrap();
+        assert_eq!(source, "task.dhl");
+        assert_eq!(out, Some("build/contracts"));
+    }
+}
+
+#[cfg(all(test, feature = "compiler"))]
+mod compiler_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn output_stem_for_source_uses_config_and_override() -> Result<(), DharmaError> {
+        let dir = tempdir()?;
+        let root = dir.path();
+        let source = root.join("contracts").join("std").join("task.dhl");
+        fs::create_dir_all(source.parent().unwrap())?;
+        fs::write(&source, "aggregate Task\n")?;
+
+        fs::write(root.join("dharma.toml"), "[storage]\npath = \"data\"\n")?;
+        let stem = output_stem_for_source(&source, None)?;
+        assert_eq!(
+            stem,
+            root.join(".dharma")
+                .join("contracts")
+                .join("std")
+                .join("task")
+        );
+
+        fs::write(
+            root.join("dharma.toml"),
+            "[storage]\npath = \"data\"\n[compiler]\nout_dir = \"build/contracts\"\n",
+        )?;
+        let stem = output_stem_for_source(&source, None)?;
+        assert_eq!(
+            stem,
+            root.join("build")
+                .join("contracts")
+                .join("std")
+                .join("task")
+        );
+
+        let stem = output_stem_for_source(&source, Some("custom/out"))?;
+        assert_eq!(
+            stem,
+            root.join("custom").join("out").join("std").join("task")
+        );
+
+        fs::remove_file(root.join("dharma.toml"))?;
+        let stem = output_stem_for_source(&source, None)?;
+        assert_eq!(
+            stem,
+            root.join("contracts")
+                .join("std")
+                .join("_build")
+                .join("task")
+        );
+        Ok(())
+    }
 }
