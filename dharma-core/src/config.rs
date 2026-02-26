@@ -40,6 +40,7 @@ const DEFAULT_PROFILE_MODE: &str = "embedded";
 const DEFAULT_REGISTRY_URL: &str = "https://registry.dharma.systems";
 const DEFAULT_VM_FUEL: u64 = 1_000_000;
 const DEFAULT_VM_MEMORY_BYTES: usize = 640 * 1024;
+const DEFAULT_COMPILER_OUT_DIR: &str = ".dharma/contracts";
 const DEFAULT_VAULT_MODE: &str = "safe_storage";
 const DEFAULT_VAULT_MAX_LOCAL_STORAGE_MB: u64 = 1024;
 const DEFAULT_VAULT_DISK_PRESSURE_PCT: u8 = 90;
@@ -52,6 +53,7 @@ pub struct Config {
     pub identity: IdentityConfig,
     pub network: NetworkConfig,
     pub storage: StorageConfig,
+    pub compiler: CompilerConfig,
     pub profile: ProfileConfig,
     pub registry: RegistryConfig,
     pub vm: VmConfig,
@@ -108,6 +110,11 @@ pub struct StorageClickHouseConfig {
     pub connect_timeout_ms: u64,
     pub retry_max_attempts: u32,
     pub retry_backoff_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct CompilerConfig {
+    pub out_dir: String,
 }
 
 #[derive(Clone, Debug)]
@@ -240,6 +247,9 @@ impl Default for Config {
                     retry_max_attempts: DEFAULT_STORAGE_CLICKHOUSE_RETRY_MAX_ATTEMPTS,
                     retry_backoff_ms: DEFAULT_STORAGE_CLICKHOUSE_RETRY_BACKOFF_MS,
                 },
+            },
+            compiler: CompilerConfig {
+                out_dir: DEFAULT_COMPILER_OUT_DIR.to_string(),
             },
             profile: ProfileConfig {
                 mode: DEFAULT_PROFILE_MODE.to_string(),
@@ -416,6 +426,10 @@ impl Config {
             "retry_backoff_ms = {}",
             self.storage.clickhouse.retry_backoff_ms
         ));
+        out.push(String::new());
+
+        out.push("[compiler]".to_string());
+        out.push(format!("out_dir = \"{}\"", self.compiler.out_dir));
         out.push(String::new());
 
         out.push("[profile]".to_string());
@@ -806,6 +820,13 @@ impl Config {
                     self.profile.mode = val;
                 }
             }
+            "compiler.out_dir" => {
+                if let ConfigValue::Str(val) = value {
+                    if !val.is_empty() {
+                        self.compiler.out_dir = val;
+                    }
+                }
+            }
             "registry.url" => {
                 if let ConfigValue::Str(val) = value {
                     self.registry.url = val;
@@ -1182,6 +1203,9 @@ fn default_config_template() -> String {
             DEFAULT_STORAGE_CLICKHOUSE_RETRY_BACKOFF_MS
         ),
         "",
+        "[compiler]",
+        &format!("out_dir = \"{}\"", DEFAULT_COMPILER_OUT_DIR),
+        "",
         "[profile]",
         &format!("mode = \"{}\"", DEFAULT_PROFILE_MODE),
         "",
@@ -1417,6 +1441,9 @@ connect_timeout_ms = 3456
 retry_max_attempts = 7
 retry_backoff_ms = 12
 
+[compiler]
+out_dir = "build/contracts"
+
 [registry.pins]
 "std.finance" = "1.2.0"
 "#;
@@ -1454,6 +1481,7 @@ retry_backoff_ms = 12
         assert_eq!(cfg.storage.clickhouse.connect_timeout_ms, 3456);
         assert_eq!(cfg.storage.clickhouse.retry_max_attempts, 7);
         assert_eq!(cfg.storage.clickhouse.retry_backoff_ms, 12);
+        assert_eq!(cfg.compiler.out_dir, "build/contracts");
         assert_eq!(
             cfg.registry.pins.get("std.finance").cloned(),
             Some("1.2.0".to_string())
@@ -1466,6 +1494,8 @@ retry_backoff_ms = 12
         assert!(rendered.contains("sync_obj_buffer_bytes"));
         assert!(rendered.contains("[storage.postgres]"));
         assert!(rendered.contains("[storage.clickhouse]"));
+        assert!(rendered.contains("[compiler]"));
+        assert!(rendered.contains("out_dir = \"build/contracts\""));
     }
 
     #[test]

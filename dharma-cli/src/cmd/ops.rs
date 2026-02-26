@@ -1232,7 +1232,7 @@ keystore_path = "keystore"
         let (_ctx, identity) = setup_temp_project()?;
         let ledger_path =
             copy_contract(&std::env::current_dir()?, "commerce_inventory_ledger.dhl")?;
-        compile_dhl(ledger_path.to_str().unwrap())?;
+        compile_dhl(ledger_path.to_str().unwrap(), None)?;
         let data_dir = crate::ensure_data_dir()?;
         let env = StdEnv::new(&data_dir);
 
@@ -1360,7 +1360,7 @@ std.commerce.inventory.ledger
     fn refund_payment_sets_final_state() -> Result<(), DharmaError> {
         let (_ctx, identity) = setup_temp_project()?;
         let payment_path = copy_contract(&std::env::current_dir()?, "commerce_payment.dhl")?;
-        compile_dhl(payment_path.to_str().unwrap())?;
+        compile_dhl(payment_path.to_str().unwrap(), None)?;
         let data_dir = crate::ensure_data_dir()?;
 
         let mut rng = StdRng::seed_from_u64(7);
@@ -1485,7 +1485,7 @@ std.commerce.payment
                 }
             }
         }
-        compile_dhl(credit_path.to_str().unwrap())?;
+        compile_dhl(credit_path.to_str().unwrap(), None)?;
         let data_dir = crate::ensure_data_dir()?;
 
         let mut rng = StdRng::seed_from_u64(9);
@@ -1597,7 +1597,7 @@ std.commerce.credit_note
             &std::env::current_dir()?,
             "commerce_availability_item_bucket.dhl",
         )?;
-        compile_dhl(item_bucket_path.to_str().unwrap())?;
+        compile_dhl(item_bucket_path.to_str().unwrap(), None)?;
         let data_dir = crate::ensure_data_dir()?;
 
         let mut rng = StdRng::seed_from_u64(11);
