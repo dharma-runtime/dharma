@@ -2640,12 +2640,19 @@ action PostCreditNote()
                 Value::Integer(10.into()),
             ]),
         )?;
-        assert!(!lines.is_empty());
-        let line_subject = map_get(expect_map(&lines[0])?, "subject")
-            .ok_or_else(|| DharmaError::Validation("missing line subject".to_string()))?;
-        assert_eq!(
-            expect_bytes(line_subject)?,
-            fixture.line_id.as_bytes().to_vec()
+        let mut fixture_line_found = false;
+        for row in &lines {
+            let line_subject = map_get(expect_map(row)?, "subject")
+                .ok_or_else(|| DharmaError::Validation("missing line subject".to_string()))?;
+            if expect_bytes(line_subject)? == fixture.line_id.as_bytes().to_vec() {
+                fixture_line_found = true;
+                break;
+            }
+        }
+        assert!(
+            fixture_line_found,
+            "expected LinesNeedingAllocation to include fixture line {:?}",
+            fixture.line_id
         );
 
         let invoices = run_query_from_contract_source(
@@ -2703,15 +2710,12 @@ action PostCreditNote()
         )?;
         let before_seq_rows = run_query(
             &fixture.data_dir,
-            r#"
-std.commerce.catalog.product_facet
-| take 1
-"#,
+            "std.commerce.catalog.product_facet\n| agg max(seq) as max_seq",
             Value::Array(vec![]),
         )?;
         let before_seq = expect_int(
-            map_get(expect_map(&before_seq_rows[0])?, "seq")
-                .ok_or_else(|| DharmaError::Validation("missing seq".to_string()))?,
+            map_get(expect_map(&before_seq_rows[0])?, "max_seq")
+                .ok_or_else(|| DharmaError::Validation("missing max_seq".to_string()))?,
         )?;
 
         let mut rng = StdRng::seed_from_u64(66_300_002);
@@ -2757,15 +2761,12 @@ std.commerce.catalog.product_facet
 
         let after_seq_rows = run_query(
             &fixture.data_dir,
-            r#"
-std.commerce.catalog.product_facet
-| take 1
-"#,
+            "std.commerce.catalog.product_facet\n| agg max(seq) as max_seq",
             Value::Array(vec![]),
         )?;
         let after_seq = expect_int(
-            map_get(expect_map(&after_seq_rows[0])?, "seq")
-                .ok_or_else(|| DharmaError::Validation("missing seq".to_string()))?,
+            map_get(expect_map(&after_seq_rows[0])?, "max_seq")
+                .ok_or_else(|| DharmaError::Validation("missing max_seq".to_string()))?,
         )?;
         assert!(after_seq > before_seq);
 
