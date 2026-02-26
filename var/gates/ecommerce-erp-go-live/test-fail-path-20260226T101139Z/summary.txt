@@ -1,0 +1,6 @@
+DHA-69 Ecommerce/ERP Go-Live Gate Summary
+started_at_utc=20260226T101139Z
+git_sha=8c5d44d7f91f8bc1a3765ac5935728c6dcc2ffd8
+repo_root=/Users/julienmarie/.zeroshot/worktrees/misty-prism-46
+out_dir=var/gates/ecommerce-erp-go-live/test-fail-path-20260226T101139Z
+compile_supplier=FAIL exit_code=0 log=compile_supplier.log

@@ -9,9 +9,52 @@ This runbook is the operator procedure for DHA-69 go-live gating of the TTM v1 e
 3. Ensure projection writer role is granted to the runtime signer identity.
 4. Ensure latest commerce contracts are present under `contracts/std/`.
 
-## 2. Contract Compile Gate
+## 2. Primary Gate Path (Scripted)
 
-Run canonical contract compile checks:
+Run the deterministic DHA-69 gate script from repository root:
+
+```bash
+bash scripts/gates/ecommerce_erp_go_live.sh
+```
+
+Optional CI/artifact override path:
+
+```bash
+bash scripts/gates/ecommerce_erp_go_live.sh --out-dir var/gates/ecommerce-erp-go-live/manual-run
+```
+
+The script runs these gates in fixed order:
+1. Compile `commerce_inventory_supplier.dhl`
+2. Compile `commerce_logistics_warehouse.dhl`
+3. Compile `commerce_inventory_sellable.dhl`
+4. Compile `commerce_order_line.dhl`
+5. `project_rebuild_populates_commerce_projections`
+6. `ecommerce_key_queries_return_expected_rows`
+7. `project_watch_applies_incremental_update`
+
+The script exits on first failure and records logs in:
+- Default: `var/gates/ecommerce-erp-go-live/<utc-timestamp>/`
+- Override: exact `--out-dir` path
+
+## 3. Artifact Directory Contract
+
+A successful run writes:
+- `compile_supplier.log`
+- `compile_warehouse.log`
+- `compile_sellable.log`
+- `compile_order_line.log`
+- `rebuild.log`
+- `key_queries.log`
+- `watch.log`
+- `summary.txt`
+
+`summary.txt` includes UTC start/end timestamps, commit SHA, per-step pass/fail, and output directory.
+
+## 4. Manual Fallback Commands
+
+Use this only if script execution is blocked by environment issues.
+
+Contract compile checks:
 
 ```bash
 cargo run -p dharma-cli -- compile contracts/std/commerce_inventory_supplier.dhl
@@ -20,47 +63,31 @@ cargo run -p dharma-cli -- compile contracts/std/commerce_inventory_sellable.dhl
 cargo run -p dharma-cli -- compile contracts/std/commerce_order_line.dhl
 ```
 
-Expected result: all four commands exit `0`.
-
-## 3. Projection Rebuild Gate
-
-Execute full commerce projection rebuild:
+Projection rebuild command:
 
 ```bash
 dh project rebuild --scope std.commerce
 ```
 
-Expected result:
-- No `projection runtime not wired yet` error.
-- Rebuild summary prints `plans`, `writes`, and `prunes`.
-- Projection target tables are queryable after rebuild.
+Deterministic rebuild gate test:
 
-## 4. Go-Live Query Gate
+```bash
+cargo test -p dharma-cli cmd::ops::tests::project_rebuild_populates_commerce_projections -- --exact --nocapture
+```
 
-Run the key query validation suite:
+Go-live query gate:
 
 ```bash
 cargo test -p dharma-cli cmd::ops::tests::ecommerce_key_queries_return_expected_rows -- --exact --nocapture
 ```
 
-This gate validates deterministic rows for:
-- `GetProductFacets`
-- `GetVariantAvailabilityHint`
-- `LinesNeedingAllocation`
-- `ListMyInvoices`
-- `ReturnsAndCreditsSummary`
-
-## 5. Watch Incremental Gate
-
-Run watch mode incremental update validation:
+Watch incremental gate:
 
 ```bash
 cargo test -p dharma-cli cmd::ops::tests::project_watch_applies_incremental_update -- --exact --nocapture
 ```
 
-Expected result: watch cycle runs without full rebuild failure and preserves/increases projected row count after source change.
-
-## 6. Rollback Procedure
+## 5. Rollback Procedure
 
 If any gate fails:
 
@@ -70,12 +97,10 @@ If any gate fails:
 4. Re-run compile + rebuild + key query gates after remediation.
 5. Resume writes only after all gates pass.
 
-## 7. Evidence and Sign-Off
+## 6. Evidence and Sign-Off
 
-Archive the following artifacts for gate approval:
-- Contract compile command outputs
-- Rebuild command output
-- Key query test output
-- Watch incremental test output
-- Timestamp, environment, operator identity, commit SHA
-
+Archive the gate artifact directory and include:
+- Timestamp and environment metadata
+- Operator identity
+- Commit SHA
+- Required log files listed above

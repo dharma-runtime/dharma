@@ -143,6 +143,42 @@ jobs:
           path: tests/failures/DHARMA-FAILURE-*.md
           retention-days: 7
 
+  pr-ecommerce-erp-go-live:
+    name: PR DHA-69 Ecommerce/ERP Go-Live Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    needs:
+      - pr-quality-matrix
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-pr-rust
+          workspaces: |
+            . -> target
+          cache-workspace-crates: true
+          cache-on-failure: true
+
+      - name: Run DHA-69 ecommerce/ERP go-live gates
+        run: bash scripts/gates/ecommerce_erp_go_live.sh
+
+      - name: Upload DHA-69 go-live gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-ecommerce-erp-go-live
+          if-no-files-found: ignore
+          path: var/gates/ecommerce-erp-go-live/**
+          retention-days: 7
+
   pr-coverage:
     name: PR Coverage Summary
     runs-on: ubuntu-latest
@@ -215,6 +251,7 @@ jobs:
     needs:
       - pr-quality-matrix
       - pr-test
+      - pr-ecommerce-erp-go-live
       - pr-coverage
       - pr-security
     steps:
@@ -227,6 +264,7 @@ jobs:
             echo "| --- | --- |"
             echo "| pr-quality-matrix | ${{ needs.pr-quality-matrix.result }} |"
             echo "| pr-test | ${{ needs.pr-test.result }} |"
+            echo "| pr-ecommerce-erp-go-live | ${{ needs.pr-ecommerce-erp-go-live.result }} |"
             echo "| pr-coverage | ${{ needs.pr-coverage.result }} |"
             echo "| pr-security | ${{ needs.pr-security.result }} |"
           } >> "${GITHUB_STEP_SUMMARY}"
@@ -236,6 +274,7 @@ jobs:
           for result in \
             "${{ needs.pr-quality-matrix.result }}" \
             "${{ needs.pr-test.result }}" \
+            "${{ needs.pr-ecommerce-erp-go-live.result }}" \
             "${{ needs.pr-coverage.result }}"; do
             if [ "${result}" != "success" ]; then
               echo "PR lane failed with result: ${result}"

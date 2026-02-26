@@ -20,6 +20,8 @@ dh backup export <path>
 dh backup import <path> [--force]
 dh migrate validate [--backend sqlite|postgres|clickhouse|all] [--strict] [--json]
 dh migrate parity [--strict] [--json]
+dh project rebuild [--scope std.commerce]
+dh project watch [--scope std.commerce] [--interval SECONDS]
 dh serve
 dh
 ```

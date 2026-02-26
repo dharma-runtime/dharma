@@ -107,6 +107,42 @@ jobs:
           path: tests/failures/DHARMA-FAILURE-*.md
           retention-days: 14
 
+  main-ecommerce-erp-go-live:
+    name: Main DHA-69 Ecommerce/ERP Go-Live Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    needs:
+      - main-quality-matrix
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-main-rust
+          workspaces: |
+            . -> target
+          cache-workspace-crates: true
+          cache-on-failure: true
+
+      - name: Run DHA-69 ecommerce/ERP go-live gates
+        run: bash scripts/gates/ecommerce_erp_go_live.sh
+
+      - name: Upload DHA-69 go-live gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: main-ecommerce-erp-go-live
+          if-no-files-found: ignore
+          path: var/gates/ecommerce-erp-go-live/**
+          retention-days: 14
+
   artifact-build:
     name: Build Artifacts
     runs-on: ubuntu-latest
@@ -204,6 +240,7 @@ jobs:
     needs:
       - main-quality-matrix
       - main-chaos
+      - main-ecommerce-erp-go-live
       - artifact-build
       - sbom-and-depscan
     steps:
@@ -216,6 +253,7 @@ jobs:
             echo "| --- | --- |"
             echo "| main-quality-matrix | ${{ needs.main-quality-matrix.result }} |"
             echo "| main-chaos | ${{ needs.main-chaos.result }} |"
+            echo "| main-ecommerce-erp-go-live | ${{ needs.main-ecommerce-erp-go-live.result }} |"
             echo "| artifact-build | ${{ needs.artifact-build.result }} |"
             echo "| sbom-and-depscan | ${{ needs.sbom-and-depscan.result }} |"
           } >> "${GITHUB_STEP_SUMMARY}"
@@ -225,11 +263,15 @@ jobs:
           set -euo pipefail
           failures=()
           quality_result="${{ needs.main-quality-matrix.result }}"
+          gate_result="${{ needs.main-ecommerce-erp-go-live.result }}"
           artifact_result="${{ needs.artifact-build.result }}"
           sbom_result="${{ needs.sbom-and-depscan.result }}"
 
           if [ "${quality_result}" != "success" ]; then
             failures+=("main-quality-matrix:${quality_result}")
+          fi
+          if [ "${gate_result}" != "success" ]; then
+            failures+=("main-ecommerce-erp-go-live:${gate_result}")
           fi
           if [ "${artifact_result}" != "success" ]; then
             failures+=("artifact-build:${artifact_result}")
