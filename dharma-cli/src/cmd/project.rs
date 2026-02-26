@@ -157,7 +157,7 @@ fn parse_positive_u64(raw: &str, label: &str) -> Result<u64, DharmaError> {
 fn print_usage() {
     println!("Usage:");
     println!("  dh project rebuild [--scope std.commerce]");
-    println!("  dh project watch [--scope std.commerce] [--interval 5s]");
+    println!("  dh project watch [--scope std.commerce] [--interval SECONDS]");
 }
 
 #[cfg(test)]
