@@ -62,6 +62,7 @@ started_at_utc=${timestamp_utc}
 git_sha=${git_sha}
 repo_root=${REPO_ROOT}
 out_dir=${out_dir}
+overall=RUNNING
 SUMMARY
 
 run_step() {
@@ -92,6 +93,8 @@ run_step() {
     echo "exit_code=${status}"
   } >>"${log_path}"
   echo "${step_name}=FAIL exit_code=${status} log=${log_name}" | tee -a "${summary_file}"
+  echo "failed_step=${step_name}" >> "${summary_file}"
+  echo "overall=FAIL" >> "${summary_file}"
   exit "${status}"
 }
 

@@ -9,3 +9,4 @@ _build/
 .idea
 .vscode
 .fastembed_cache
+var/gates/ecommerce-erp-go-live/
